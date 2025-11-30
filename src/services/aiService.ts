@@ -52,6 +52,13 @@ function formatStrictMenuForAI(items: MenuItem[], categories: MenuCategory[]): s
         if (item.is_customizable) {
           menuText += ' [Can add custom text]';
         }
+        // Add available add-ons to the description for the AI
+        // @ts-ignore
+        if (item.add_ons && item.add_ons.length > 0) {
+          // @ts-ignore
+          const addOnText = item.add_ons.map(a => `${a.add_on.name} (₹${a.add_on.price})`).join(', ');
+          menuText += ` [Available Add-ons: ${addOnText}]`;
+        }
         if (item.special_notes) {
           menuText += ` [Note: ${item.special_notes}]`;
         }
@@ -94,6 +101,7 @@ ${currentItemsSection}
 4. Item names in your response MUST match EXACTLY from the menu list
 5. Prices and sizes MUST match EXACTLY what's in the menu
 6. If unsure about an item, ask customer to choose from the menu
+7. If customer requests an available add-on (e.g., "with a candle"), include its name in the "add_ons" array in your JSON response.
 
 VALID ITEM NAMES (use EXACTLY as written): [${itemNamesList}]
 
@@ -107,7 +115,8 @@ RESPONSE FORMAT (JSON only):
     "size_or_weight": "EXACT size from menu",
     "custom_text": "for cakes only",
     "delivery_date": "YYYY-MM-DD",
-    "notes": "special instructions"
+    "notes": "special instructions",
+    "add_ons": ["Name of add-on 1", "Name of add-on 2"]
   },
   "order_id": "8-character order ID (only for cancel_existing_order)"
 }
@@ -138,8 +147,8 @@ EXAMPLES:
 Customer: "I want vanilla cake"
 {"reply": "Sorry, we don't have Vanilla cake. We have Black Forest, Chocolate Truffle, Pineapple Cake, Red Velvet, and Butterscotch. Which would you like?", "intent": "item_not_available"}
 
-Customer: "Black Forest 2kg"
-{"reply": "Great choice! When do you need the Black Forest cake?", "intent": "ask_question", "item": {"name": "Black Forest", "quantity": 1, "size_or_weight": "2kg"}}
+Customer: "Black Forest 2kg with a candle"
+{"reply": "Great choice! When do you need the 2kg Black Forest cake with a candle?", "intent": "ask_question", "item": {"name": "Black Forest", "quantity": 1, "size_or_weight": "2kg", "add_ons": ["Candle"]}}
 
 Customer: "Do you have pizza?"
 {"reply": "Sorry, we don't have pizza. We have Sandwich, Burger, and Samosa in our snacks. Would you like any of these?", "intent": "item_not_available"}

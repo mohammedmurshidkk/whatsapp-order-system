@@ -63,7 +63,8 @@ export async function getMenuItems(businessId: string): Promise<MenuItem[]> {
     .from('menu_items')
     .select(`
       *,
-      category:menu_categories(*)
+      category:menu_categories(*),
+      add_ons:menu_item_add_ons(add_on:add_ons(id, name, price))
     `)
     .eq('business_id', businessId)
     .eq('is_available', true);

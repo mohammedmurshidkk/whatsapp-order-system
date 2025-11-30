@@ -1,11 +1,11 @@
 import { supabase } from '../config/database';
-import { SessionItem, Order, AIItemResponse, OrderItemData, MenuItem } from '../types';
+import { SessionItem, Order, AIItemResponse, OrderItemData, MenuItem, OrderItemAddonData, AddOn } from '../types';
 import {
   getSessionWithItems,
   completeSession,
   updateSessionItemCount,
 } from './sessionService';
-import { searchMenuItem, getBusinessById } from './menuService';
+import { searchMenuItem } from './menuService';
 import { logger } from '../utils/logger';
 
 // Default business ID (same as webhookController for now)
@@ -38,7 +38,7 @@ export async function saveOrderItem(
   item: AIItemResponse,
   businessId: string = DEFAULT_BUSINESS_ID
 ): Promise<SessionItem> {
-  // Lookup menu item to get price
+  // 1. Get base item price
   let unitPrice: number | null = null;
   const menuItem = await searchMenuItem(businessId, item.name);
   if (menuItem) {
@@ -46,6 +46,24 @@ export async function saveOrderItem(
     logger.info(`Price lookup: ${item.name} (${item.size_or_weight || 'default'}) = ₹${unitPrice}`);
   }
 
+  // 2. Handle Add-ons
+  let addOnsData: OrderItemAddonData[] | null = null;
+  if (item.add_ons && item.add_ons.length > 0) {
+    const { data: fetchedAddOns, error: addOnError } = await supabase
+      .from('add_ons')
+      .select('name, price')
+      .eq('business_id', businessId)
+      .in('name', item.add_ons);
+    
+    if (addOnError) {
+      logger.error('Failed to fetch add-ons', addOnError);
+    } else {
+      addOnsData = fetchedAddOns as OrderItemAddonData[];
+      logger.info(`Found ${addOnsData.length} valid add-ons for item.`);
+    }
+  }
+
+  // 3. Save to session_items
   const { data, error } = await supabase
     .from('session_items')
     .insert({
@@ -59,6 +77,7 @@ export async function saveOrderItem(
       notes: item.notes || null,
       ai_raw: item,
       created_at: new Date().toISOString(),
+      add_ons: addOnsData, // Save fetched add-ons data
     })
     .select()
     .single();
@@ -184,7 +203,7 @@ export async function generateOrderSummary(sessionId: string): Promise<string> {
   const session = await getSessionWithItems(sessionId);
 
   if (!session || session.items.length === 0) {
-    return 'No items in your order yet.';
+    return 'Your cart is empty. Just tell me what you would like to order!';
   }
 
   let summary = '📋 *Order Summary*\n';
@@ -193,47 +212,33 @@ export async function generateOrderSummary(sessionId: string): Promise<string> {
   let grandTotal = 0;
 
   session.items.forEach((item, index) => {
-    const lineTotal = (item.unit_price || 0) * item.quantity;
-    grandTotal += lineTotal;
-
+    let lineTotal = (item.unit_price || 0) * item.quantity;
+    
     summary += `${index + 1}. ${item.item_name}`;
-
-    if (item.size_or_weight) {
-      summary += ` (${item.size_or_weight})`;
-    }
-
-    if (item.quantity > 1) {
-      summary += ` x${item.quantity}`;
-    }
-
-    // Show price
-    if (item.unit_price) {
-      if (item.quantity > 1) {
-        summary += `\n   ₹${item.unit_price} × ${item.quantity} = ₹${lineTotal}`;
-      } else {
-        summary += ` - ₹${item.unit_price}`;
-      }
-    }
-
+    if (item.size_or_weight) summary += ` (${item.size_or_weight})`;
+    if (item.quantity > 1) summary += ` x${item.quantity}`;
+    if (item.unit_price) summary += ` - ₹${item.unit_price * item.quantity}`;
     summary += '\n';
 
-    if (item.custom_text) {
-      summary += `   📝 "${item.custom_text}"\n`;
+    // Display add-ons
+    if (item.add_ons && item.add_ons.length > 0) {
+      item.add_ons.forEach(addOn => {
+        summary += `   + ${addOn.name} - ₹${addOn.price}\n`;
+        lineTotal += addOn.price * item.quantity; // Add add-on price to line total
+      });
     }
 
-    if (item.delivery_date) {
-      summary += `   📅 ${item.delivery_date}\n`;
-    }
+    grandTotal += lineTotal;
 
-    if (item.notes) {
-      summary += `   ℹ️ ${item.notes}\n`;
-    }
+    if (item.custom_text) summary += `   📝 "${item.custom_text}"\n`;
+    if (item.delivery_date) summary += `   📅 ${item.delivery_date}\n`;
+    if (item.notes) summary += `   ℹ️ ${item.notes}\n`;
 
     summary += '\n';
   });
 
   summary += '━━━━━━━━━━━━━━━━━━\n';
-  summary += `📦 Total Items: ${session.items.length}\n`;
+  summary += `📦 Total Items: ${session.items.reduce((acc, item) => acc + item.quantity, 0)}\n`;
   summary += `💰 *Grand Total: ₹${grandTotal}*\n\n`;
   summary += 'Reply *YES* to confirm your order';
 
@@ -243,18 +248,20 @@ export async function generateOrderSummary(sessionId: string): Promise<string> {
 export async function createFinalOrder(sessionId: string): Promise<Order> {
   const session = await getSessionWithItems(sessionId);
 
-  if (!session) {
-    throw new Error('Session not found');
-  }
+  if (!session) throw new Error('Session not found');
+  if (session.items.length === 0) throw new Error('No items in session');
 
-  if (session.items.length === 0) {
-    throw new Error('No items in session');
-  }
-
-  // Convert session items to order item data with prices
   let totalAmount = 0;
   const orderItems: OrderItemData[] = session.items.map((item) => {
-    const lineTotal = (item.unit_price || 0) * item.quantity;
+    let lineTotal = (item.unit_price || 0) * item.quantity;
+
+    // Add cost of add-ons to line total
+    if (item.add_ons) {
+      item.add_ons.forEach(addOn => {
+        lineTotal += addOn.price * item.quantity;
+      });
+    }
+    
     totalAmount += lineTotal;
 
     return {
@@ -266,27 +273,23 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
       custom_text: item.custom_text || undefined,
       delivery_date: item.delivery_date || undefined,
       notes: item.notes || undefined,
+      add_ons: item.add_ons || undefined, // Carry over add-ons to final order
     };
   });
 
-  // Generate summary text
   const orderSummary = await generateOrderSummary(sessionId);
 
-  // Find earliest delivery date from items
-  const deliveryDates = session.items
-    .map((item) => item.delivery_date)
-    .filter((date): date is string => date !== null);
-
+  const deliveryDates = session.items.map((item) => item.delivery_date).filter((date): date is string => date !== null);
   const deliveryDate = deliveryDates.length > 0 ? deliveryDates[0] : null;
 
-  // Create the order
   const { data: order, error } = await supabase
     .from('orders')
     .insert({
       session_id: sessionId,
       customer_id: session.customer_id,
+      business_id: session.business_id,
       items: orderItems,
-      total_items: session.items.length,
+      total_items: session.items.reduce((acc, item) => acc + item.quantity, 0),
       total_amount: totalAmount,
       order_summary: orderSummary,
       status: 'confirmed',
@@ -301,16 +304,13 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
     throw new Error('Failed to create order');
   }
 
-  // Mark session as completed
   await completeSession(sessionId);
-
   logger.info(`Order created: ${order.id} - Total: ₹${totalAmount}`);
-
-  // Send notification to business
   await sendOrderNotification(order as Order);
 
   return order as Order;
 }
+
 
 export async function sendOrderNotification(order: Order): Promise<void> {
   const notificationMethod = process.env.BUSINESS_NOTIFICATION_METHOD || 'console';
@@ -323,19 +323,7 @@ Customer ID: ${order.customer_id.substring(0, 8)}
 Status: ${order.status}
 Delivery Date: ${order.delivery_date || 'Not specified'}
 
-Items:
-${order.items
-  .map(
-    (item, i) =>
-      `${i + 1}. ${item.name}${item.size_or_weight ? ` (${item.size_or_weight})` : ''} x${item.quantity} - ₹${item.line_total || 0}`
-  )
-  .join('\n')}
-
-━━━━━━━━━━━━━━━━━━━━
-Total Items: ${order.total_items}
-💰 TOTAL: ₹${order.total_amount}
-━━━━━━━━━━━━━━━━━━━━
-Created: ${order.created_at}
+${order.order_summary}
 `;
 
   switch (notificationMethod) {
@@ -434,6 +422,7 @@ export async function cancelOrderById(
     .from('orders')
     .update({
       status: 'cancelled',
+      // @ts-ignore
       updated_at: new Date().toISOString(),
     })
     .eq('id', order.id);

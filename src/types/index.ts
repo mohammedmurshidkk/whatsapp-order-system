@@ -27,6 +27,14 @@ export interface MenuItemSize {
   price: number;
 }
 
+export interface AddOn {
+  id: string;
+  business_id: string;
+  name: string;
+  price: number;
+  created_at: string;
+}
+
 export interface MenuItem {
   id: string;
   business_id: string;
@@ -41,6 +49,8 @@ export interface MenuItem {
   special_notes: string | null;
   created_at: string;
   category?: MenuCategory;
+  add_ons?: AddOn[];
+  related_items?: MenuItem[];
 }
 
 // Customer types
@@ -64,13 +74,19 @@ export interface Session {
   last_message_at: string;
   completed_at: string | null;
   total_items: number;
-  ai_paused: boolean;  // True when human has taken over
+  ai_paused: boolean; // True when human has taken over
   paused_at: string | null;
-  paused_by: string | null;  // Who paused (business owner name/id)
+  paused_by: string | null; // Who paused (business owner name/id)
 }
 
 export interface SessionWithItems extends Session {
   items: SessionItem[];
+}
+
+// Data for a selected add-on attached to an order item
+export interface OrderItemAddonData {
+  name: string;
+  price: number;
 }
 
 // Session item types
@@ -86,6 +102,7 @@ export interface SessionItem {
   notes: string | null;
   ai_raw: Record<string, unknown> | null;
   created_at: string;
+  add_ons?: OrderItemAddonData[] | null;
 }
 
 // Message types
@@ -124,6 +141,7 @@ export interface OrderItemData {
   custom_text?: string;
   delivery_date?: string;
   notes?: string;
+  add_ons?: OrderItemAddonData[];
 }
 
 // AI types
@@ -147,6 +165,7 @@ export interface AIItemResponse {
   custom_text?: string;
   delivery_date?: string;
   notes?: string;
+  add_ons?: string[]; // Names of add-ons
 }
 
 export interface AIResponse {

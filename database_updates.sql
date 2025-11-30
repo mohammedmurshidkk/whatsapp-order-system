@@ -122,3 +122,36 @@ BEGIN
     (biz_id, snack_cat, 'Burger', 'Veg burger with fries', '[{"name": "regular", "price": 120}]', false, false),
     (biz_id, snack_cat, 'Samosa', 'Crispy samosa (2 pcs)', '[{"name": "regular", "price": 30}]', false, false);
 END $$;
+
+-- === ADD-ONS AND RELATED ITEMS (NEW) ===
+
+-- Add-ons table (for candles, special packing, etc.)
+CREATE TABLE IF NOT EXISTS add_ons (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID REFERENCES businesses(id) ON DELETE CASCADE NOT NULL,
+  name TEXT NOT NULL,
+  price DECIMAL(10, 2) NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT unique_add_on_name_for_business UNIQUE (business_id, name)
+);
+
+-- Join table for menu items and their available add-ons
+CREATE TABLE IF NOT EXISTS menu_item_add_ons (
+  menu_item_id UUID REFERENCES menu_items(id) ON DELETE CASCADE,
+  add_on_id UUID REFERENCES add_ons(id) ON DELETE CASCADE,
+  PRIMARY KEY (menu_item_id, add_on_id)
+);
+
+-- Join table for upselling/cross-selling related items
+CREATE TABLE IF NOT EXISTS menu_item_related_items (
+  menu_item_id UUID REFERENCES menu_items(id) ON DELETE CASCADE,
+  related_item_id UUID REFERENCES menu_items(id) ON DELETE CASCADE,
+  PRIMARY KEY (menu_item_id, related_item_id),
+  -- Ensure an item cannot be related to itself
+  CONSTRAINT check_item_not_related_to_self CHECK (menu_item_id <> related_item_id)
+);
+
+-- Indexes for performance
+CREATE INDEX IF NOT EXISTS idx_add_ons_business ON add_ons(business_id);
+CREATE INDEX IF NOT EXISTS idx_menu_item_add_ons_menu_item ON menu_item_add_ons(menu_item_id);
+CREATE INDEX IF NOT EXISTS idx_menu_item_related_items_menu_item ON menu_item_related_items(menu_item_id);
