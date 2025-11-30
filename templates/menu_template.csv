@@ -1,0 +1,15 @@
+category,item_name,description,price,sizes,is_customizable,requires_date,special_notes
+Cakes,Black Forest,Classic black forest cake with cherries,,500g:400|1kg:750|2kg:1400,yes,yes,Best consumed within 24 hours
+Cakes,Chocolate Truffle,Rich chocolate truffle cake,,500g:350|1kg:650|2kg:1200,yes,yes,Keep refrigerated
+Cakes,Pineapple Cake,Fresh pineapple cream cake,,500g:350|1kg:650|2kg:1200,yes,yes,
+Cakes,Red Velvet,Premium red velvet with cream cheese,,500g:450|1kg:850|2kg:1600,yes,yes,Contains nuts
+Cakes,Butterscotch,Creamy butterscotch cake,,500g:350|1kg:650|2kg:1200,yes,yes,
+Hot Beverages,Coffee,Fresh brewed coffee,,small:30|medium:50|large:70,no,no,
+Hot Beverages,Tea,Kerala style chai,,small:20|medium:30|large:40,no,no,
+Hot Beverages,Hot Chocolate,Rich hot chocolate,,small:60|medium:80|large:100,no,no,
+Cold Beverages,Cool Coffee,Iced coffee,,small:50|medium:70|large:90,no,no,Shake before serving
+Cold Beverages,Mango Shake,Fresh mango milkshake,,medium:80|large:100,no,no,Consume within 30 mins
+Cold Beverages,Fresh Lime,Refreshing lime soda,40,,no,no,
+Snacks,Veg Sandwich,Club sandwich with veggies,80,,no,no,
+Snacks,Burger,Veg burger with fries,120,,no,no,
+Snacks,Samosa,Crispy samosa (2 pcs),30,,no,no,Best served hot
