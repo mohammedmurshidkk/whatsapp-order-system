@@ -1,6 +1,7 @@
 import { supabase } from '../config/database';
 import { Business, MenuCategory, MenuItem } from '../types';
 import { logger } from '../utils/logger';
+import { InteractiveListMessagePayload } from './whatsappService';
 
 // Cache for menu data (refreshes every 5 minutes)
 const menuCache: Map<string, { data: MenuItem[]; timestamp: number }> = new Map();
@@ -106,9 +107,15 @@ export async function searchMenuItem(
   searchTerm: string
 ): Promise<MenuItem | null> {
   const items = await getMenuItems(businessId);
+  if (!items) return null;
 
-  // Normalize search term
   const normalizedSearch = searchTerm.toLowerCase().trim();
+
+  // Handle interactive message IDs
+  if (normalizedSearch.startsWith('menu_item_')) {
+      const itemId = normalizedSearch.replace('menu_item_', '');
+      return items.find(item => item.id === itemId) || null;
+  }
 
   // Try exact match first
   let found = items.find(
@@ -126,70 +133,8 @@ export async function searchMenuItem(
   return found || null;
 }
 
-export function formatMenuForAI(items: MenuItem[], categories: MenuCategory[]): string {
-  if (items.length === 0) {
-    return 'No menu items available.';
-  }
-
-  let menuText = 'MENU:\n';
-
-  // Group items by category
-  const categoryMap = new Map<string, MenuItem[]>();
-  const uncategorized: MenuItem[] = [];
-
-  for (const item of items) {
-    if (item.category_id) {
-      const existing = categoryMap.get(item.category_id) || [];
-      existing.push(item);
-      categoryMap.set(item.category_id, existing);
-    } else {
-      uncategorized.push(item);
-    }
-  }
-
-  // Format each category
-  for (const category of categories) {
-    const categoryItems = categoryMap.get(category.id);
-    if (categoryItems && categoryItems.length > 0) {
-      menuText += `\n${category.name.toUpperCase()}:\n`;
-      for (const item of categoryItems) {
-        menuText += formatMenuItem(item);
-      }
-    }
-  }
-
-  // Add uncategorized items
-  if (uncategorized.length > 0) {
-    menuText += '\nOTHER:\n';
-    for (const item of uncategorized) {
-      menuText += formatMenuItem(item);
-    }
-  }
-
-  return menuText;
-}
-
-function formatMenuItem(item: MenuItem): string {
-  let text = `- ${item.name}`;
-
-  if (item.sizes && item.sizes.length > 0) {
-    const sizeText = item.sizes
-      .map(s => `${s.name}: ₹${s.price}`)
-      .join(', ');
-    text += ` (${sizeText})`;
-  } else if (item.price) {
-    text += ` - ₹${item.price}`;
-  }
-
-  if (item.is_customizable) {
-    text += ' [customizable]';
-  }
-
-  text += '\n';
-  return text;
-}
-
-export function formatMenuForCustomer(
+// Renamed from formatMenuForCustomer
+export function formatMenuAsText(
   items: MenuItem[],
   categories: MenuCategory[]
 ): string {
@@ -199,9 +144,7 @@ export function formatMenuForCustomer(
 
   let menuText = '📋 *Our Menu*\n\n';
 
-  // Group items by category
   const categoryMap = new Map<string, MenuItem[]>();
-
   for (const item of items) {
     if (item.category_id) {
       const existing = categoryMap.get(item.category_id) || [];
@@ -210,13 +153,8 @@ export function formatMenuForCustomer(
     }
   }
 
-  // Format each category with emojis
   const categoryEmojis: Record<string, string> = {
-    'Cakes': '🎂',
-    'Hot Beverages': '☕',
-    'Cold Beverages': '🧊',
-    'Snacks': '🍔',
-    'default': '📌'
+    'Cakes': '🎂', 'Hot Beverages': '☕', 'Cold Beverages': '🧊', 'Snacks': '🍔', 'default': '📌'
   };
 
   for (const category of categories) {
@@ -224,7 +162,6 @@ export function formatMenuForCustomer(
     if (categoryItems && categoryItems.length > 0) {
       const emoji = categoryEmojis[category.name] || categoryEmojis['default'];
       menuText += `${emoji} *${category.name}*\n`;
-
       for (const item of categoryItems) {
         menuText += `  • ${item.name}`;
         if (item.sizes && item.sizes.length > 0) {
@@ -236,10 +173,53 @@ export function formatMenuForCustomer(
       menuText += '\n';
     }
   }
-
   menuText += '_Just tell me what you would like to order!_';
   return menuText;
 }
+
+export function buildMenuAsInteractiveList(items: MenuItem[], categories: MenuCategory[]): InteractiveListMessagePayload {
+  const categoryMap = new Map<string, MenuItem[]>();
+  for (const item of items) {
+    if (item.category_id) {
+      const existing = categoryMap.get(item.category_id) || [];
+      existing.push(item);
+      categoryMap.set(item.category_id, existing);
+    }
+  }
+
+  const sections = categories.map(category => {
+    const categoryItems = categoryMap.get(category.id) || [];
+    if (categoryItems.length === 0) return null;
+
+    return {
+      title: category.name.substring(0, 24),
+      rows: categoryItems.map(item => {
+        let description = "";
+        if (item.sizes && item.sizes.length > 0) {
+          description = item.sizes.map(s => `${s.name}: ₹${s.price}`).join(', ');
+        } else if (item.price) {
+          description = `₹${item.price}`;
+        }
+        
+        return {
+          id: `menu_item_${item.id}`,
+          title: item.name.substring(0, 24),
+          description: description.substring(0, 72),
+        };
+      }),
+    };
+  }).filter((section): section is Exclude<typeof section, null> => section !== null);
+
+  return {
+    body: { text: "Here is our menu. Please select an item to get started." },
+    action: {
+      button: "View Menu",
+      sections: sections,
+    },
+    footer: { text: "You can type your order as well" }
+  };
+}
+
 
 // Clear cache for a business (call when menu is updated)
 export function clearMenuCache(businessId: string): void {

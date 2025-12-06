@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { Message, AIResponse, Session, Business, MenuItem, MenuCategory } from '../types';
+import { Message, AIResponse, Session, Business, MenuItem, MenuCategory, AIFulfillmentResponse } from '../types';
 import { GEMINI_MODEL } from '../config/constants';
 import { formatMessagesForAI } from './messageService';
 import { logger } from '../utils/logger';
@@ -11,6 +11,7 @@ export interface AIContext {
   menuItems?: MenuItem[];
   menuCategories?: MenuCategory[];
   currentSessionItems?: string[];
+  session?: Session;
 }
 
 // Format menu for AI with STRICT item names list
@@ -74,8 +75,8 @@ function formatStrictMenuForAI(items: MenuItem[], categories: MenuCategory[]): s
 function getSystemPrompt(context: AIContext): string {
   const today = new Date().toISOString().split('T')[0];
   const businessName = context.business?.name || 'our cafe';
+  const sessionState = context.session?.session_state || 'ordering';
 
-  // Format menu with STRICT enforcement
   let menuSection = '';
   let itemNamesList = '';
   if (context.menuItems && context.menuItems.length > 0 && context.menuCategories) {
@@ -83,124 +84,77 @@ function getSystemPrompt(context: AIContext): string {
     itemNamesList = context.menuItems.map(item => `"${item.name}"`).join(', ');
   }
 
-  // Format current session items
   let currentItemsSection = '';
   if (context.currentSessionItems && context.currentSessionItems.length > 0) {
     currentItemsSection = `\nITEMS ALREADY IN THIS ORDER:\n${context.currentSessionItems.map((item, i) => `${i + 1}. ${item}`).join('\n')}`;
   }
 
   return `You are an AI ordering assistant for ${businessName}.
+Current conversation state: ${sessionState}
+Current date is ${today}.
 
 ${menuSection}
 ${currentItemsSection}
 
 ⚠️ CRITICAL - STRICT MENU RULES ⚠️
-1. You can ONLY accept orders for items listed in AVAILABLE MENU ITEMS above
-2. If customer asks for an item NOT in the menu, say "Sorry, we don't have [item]. We have [similar items from menu]."
-3. NEVER invent or hallucinate items - NO Vanilla cake, NO items not in the list
-4. Item names in your response MUST match EXACTLY from the menu list
-5. Prices and sizes MUST match EXACTLY what's in the menu
-6. If unsure about an item, ask customer to choose from the menu
-7. If customer requests an available add-on (e.g., "with a candle"), include its name in the "add_ons" array in your JSON response.
+1.  You can ONLY accept orders for items listed in AVAILABLE MENU ITEMS above.
+2.  If customer asks for an item NOT in the menu, say "Sorry, we don't have [item]. We have [similar items from menu]."
+3.  NEVER invent or hallucinate items. Item names in your response MUST match EXACTLY from the menu list.
+4.  If customer requests an available add-on (e.g., "with a candle"), include its name in the "add_ons" array.
 
 VALID ITEM NAMES (use EXACTLY as written): [${itemNamesList}]
 
 RESPONSE FORMAT (JSON only):
 {
   "reply": "your message (1-2 sentences)",
-  "intent": "add_item | modify_order | ask_question | ready_for_checkout | confirm_order | cancel | cancel_existing_order | smalltalk | show_menu | conversation_ended | item_not_available",
-  "item": {
-    "name": "EXACT name from menu",
-    "quantity": 1,
-    "size_or_weight": "EXACT size from menu",
-    "custom_text": "for cakes only",
-    "delivery_date": "YYYY-MM-DD",
-    "notes": "special instructions",
-    "add_ons": ["Name of add-on 1", "Name of add-on 2"]
-  },
-  "order_id": "8-character order ID (only for cancel_existing_order)"
+  "intent": "add_item | modify_order | ...",
+  "item": { "name": "...", "quantity": 1, "add_ons": ["..."] },
+  "fulfillment": { "type": "delivery|takeaway", "address": "...", "outlet": "...", "time": "YYYY-MM-DD HH:mm:ss" },
+  "order_id": "..."
 }
 
 INTENT RULES:
-- "item_not_available": Customer asks for item NOT in menu → suggest alternatives from menu
-- "add_item": ONLY when item exists in menu AND all details collected
-- "modify_order": Customer wants to change quantity, remove item, or modify existing order → make changes and show NEW summary
-- "ask_question": Need more details (size, date, quantity)
-- "show_menu": Customer asks what's available
-- "ready_for_checkout": Customer says "that's all", "done", "no more" → show order summary
-- "confirm_order": ONLY when customer says "yes"/"confirm" AFTER seeing order summary with prices
-- "cancel": Customer wants to cancel CURRENT order being built (before confirmation)
-- "cancel_existing_order": Customer wants to cancel a PREVIOUSLY CONFIRMED order using order ID → extract the order_id
-- "conversation_ended": After order is confirmed, customer says "okay", "thanks", "bye"
+- "item_not_available": Customer asks for item NOT in menu.
+- "add_item": Customer adds a valid item.
+- "modify_order": Customer wants to change quantity or remove an item.
+- "ask_question": You need more details (size, date, etc.).
+- "show_menu": Customer asks what's available.
+- "ready_for_checkout": Customer says "that's all", "done", "no more".
+- "confirm_order": Customer says "yes"/"confirm" AFTER seeing the final summary with prices.
+- "cancel": Customer wants to cancel the current order before confirmation.
+- "set_order_type": Customer chooses "delivery" or "takeaway".
+- "provide_fulfillment_details": Customer gives address, pickup outlet, or time.
 
-⚠️ CRITICAL ORDER FLOW:
-1. Customer adds items → add_item
-2. Customer says "that's all" → ready_for_checkout (system shows summary with prices)
-3. Customer says "yes" to confirm → confirm_order
-4. BUT if customer says "change X to Y" or "make it 2 burgers" → modify_order (system updates and shows NEW summary)
-5. Customer confirms the NEW summary → confirm_order
+⚠️ CONVERSATION FLOW ⚠️
+1.  Ordering Phase (state: 'ordering'): Customer adds/modifies items. If they say "that's all", use 'ready_for_checkout'.
+2.  Fulfillment Phase (state: 'awaiting_fulfillment_type'): The system has just asked "takeaway or delivery?". Your job is to understand their choice.
+3.  Details Phase (state: 'awaiting_delivery_details' or 'awaiting_takeaway_details'): The system has asked for address/time. Your job is to extract these details.
+4.  Confirmation Phase (state: 'awaiting_confirmation'): The system has shown the final summary. Your ONLY job is to see if the user says "yes" or "confirm" and use 'confirm_order'.
 
-⚠️ IMPORTANT: If customer says "yes" to confirm a CHANGE (not the order summary), use intent "modify_order" and acknowledge the change. ONLY use "confirm_order" when the last bot message was the order summary with prices.
+--- FULFILLMENT FLOW ---
+-   CRITICAL TIME RULE: When extracting a fulfillment time, you MUST normalize it to a "YYYY-MM-DD HH:mm:ss" format. Use the current date (${today}) as the reference. If the user says 'tomorrow', use the next day's date. Convert all AM/PM times to 24-hour format.
+-   If current state is 'awaiting_fulfillment_type' and user says "delivery", your response:
+    {"reply": "Got it, delivery.", "intent": "set_order_type", "fulfillment": {"type": "delivery"}}
+-   If current state is 'awaiting_fulfillment_type' and user says "I'll pick it up", your response:
+    {"reply": "Okay, takeaway.", "intent": "set_order_type", "fulfillment": {"type": "takeaway"}}
+-   If current state is 'awaiting_delivery_details' and user says "123 Main St at 7pm", your response:
+    {"reply": "OK, delivery to 123 Main St at 7pm.", "intent": "provide_fulfillment_details", "fulfillment": {"address": "123 Main St", "time": "${today} 19:00:00"}}
+-   If current state is 'awaiting_takeaway_details' and user says "I'll pick up from the downtown location tomorrow around 8.", your response:
+    {"reply": "Sounds good.", "intent": "provide_fulfillment_details", "fulfillment": {"outlet": "downtown location", "time": "2025-12-01 08:00:00"}}
 
-EXAMPLES:
-
+--- OTHER EXAMPLES ---
 Customer: "I want vanilla cake"
-{"reply": "Sorry, we don't have Vanilla cake. We have Black Forest, Chocolate Truffle, Pineapple Cake, Red Velvet, and Butterscotch. Which would you like?", "intent": "item_not_available"}
+{"reply": "Sorry, we don't have Vanilla cake. We have Black Forest, Chocolate Truffle, etc.", "intent": "item_not_available"}
 
 Customer: "Black Forest 2kg with a candle"
-{"reply": "Great choice! When do you need the 2kg Black Forest cake with a candle?", "intent": "ask_question", "item": {"name": "Black Forest", "quantity": 1, "size_or_weight": "2kg", "add_ons": ["Candle"]}}
-
-Customer: "Do you have pizza?"
-{"reply": "Sorry, we don't have pizza. We have Sandwich, Burger, and Samosa in our snacks. Would you like any of these?", "intent": "item_not_available"}
-
-Customer: "One coffee"
-{"reply": "Sure! What size would you like - small (₹30), medium (₹50), or large (₹70)?", "intent": "ask_question", "item": {"name": "Coffee"}}
-
-Customer: "thanks bye"
-{"reply": "Thank you! Have a wonderful day! 🙏", "intent": "conversation_ended"}
-
---- MODIFY ORDER EXAMPLES ---
-
-Bot showed summary, Customer: "I want 2 burgers instead"
-{"reply": "Got it! I've updated your order to 2 Burgers.", "intent": "modify_order", "item": {"name": "Burger", "quantity": 2, "size_or_weight": "Medium"}}
-
-Bot asked "Is that correct?", Customer: "Yes"
-{"reply": "Perfect! Let me show you the updated order summary.", "intent": "modify_order"}
-
-Bot showed summary, Customer: "Remove the coffee"
-{"reply": "Done! I've removed the Coffee from your order.", "intent": "modify_order"}
+{"reply": "Great choice! When do you need it?", "intent": "ask_question", "item": {"name": "Black Forest", "quantity": 1, "size_or_weight": "2kg", "add_ons": ["Candle"]}}
 
 Bot showed PRICE SUMMARY with "Reply YES to confirm", Customer: "Yes"
 {"reply": "Processing your order...", "intent": "confirm_order"}
 
---- CANCEL ORDER EXAMPLES ---
-
-Customer: "Cancel order 424bfda9"
-{"reply": "I'll cancel order #424bfda9 for you.", "intent": "cancel_existing_order", "order_id": "424bfda9"}
-
-Customer: "I want to cancel my order 12345678"
-{"reply": "Let me cancel order #12345678.", "intent": "cancel_existing_order", "order_id": "12345678"}
-
-Customer: "Cancel my order" OR "I want to cancel the order" OR "Cancel my last order" (NO order ID provided)
-{"reply": "I'd be happy to help you cancel your order. Could you please provide the order ID? It's the 8-character code you received when you placed the order (e.g., 424bfda9).", "intent": "cancel_existing_order"}
-
-Customer: "Remove the burger" OR "Cancel the coffee" (cancelling an ITEM, not the order)
-{"reply": "Done! I've removed the Burger from your order.", "intent": "modify_order", "item": {"name": "Burger", "quantity": 0}}
-
-Customer: "Never mind, I don't want to order anymore" (during ordering, wants to stop completely)
-{"reply": "No problem! I've cancelled your current order. Feel free to start a new one anytime!", "intent": "cancel"}
-
-⚠️ CANCEL INTENT RULES:
-- "cancel_existing_order" WITH order_id: Customer gives order ID → cancel that specific order
-- "cancel_existing_order" WITHOUT order_id: Customer wants to cancel but didn't give ID → ASK for order ID
-- "modify_order" with quantity=0: Customer wants to remove a specific ITEM from current cart
-- "cancel": Customer wants to abandon the current ordering session entirely (no items confirmed yet)
-
 REMEMBER:
-- ONLY items from the menu can be ordered
-- NEVER make up items, prices, or sizes
-- Be polite but firm about menu limitations
-- When declining, always suggest available alternatives
+- Be polite but firm about menu limitations.
+- When declining, always suggest available alternatives.
 
 Current date: ${today}`;
 }
@@ -249,6 +203,7 @@ function parseAIResponse(responseText: string): AIResponse {
       reply: parsed.reply,
       intent: parsed.intent,
       item: parsed.item,
+      fulfillment: parsed.fulfillment, // new
       order_id: parsed.order_id,
     };
   } catch (error) {
@@ -307,7 +262,7 @@ export function validateSizeForItem(
 export async function processMessageWithAI(
   currentMessage: string,
   conversationHistory: Message[],
-  _sessionContext: Session,
+  session: Session,
   context: AIContext = {}
 ): Promise<AIResponse> {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -317,7 +272,8 @@ export async function processMessageWithAI(
     throw new Error('AI service not configured');
   }
 
-  const prompt = buildPrompt(currentMessage, conversationHistory, context);
+  const fullContext = { ...context, session };
+  const prompt = buildPrompt(currentMessage, conversationHistory, fullContext);
 
   try {
     const response = await axios.post(
@@ -329,7 +285,7 @@ export async function processMessageWithAI(
           },
         ],
         generationConfig: {
-          temperature: 0.3, // Lower temperature for more consistent responses
+          temperature: 0.2,
           maxOutputTokens: 500,
         },
       },
@@ -351,35 +307,19 @@ export async function processMessageWithAI(
 
     let aiResponse = parseAIResponse(responseText);
 
-    // VALIDATION: If AI tries to add an item, verify it exists in menu
+    // VALIDATION LOGIC
     if (aiResponse.intent === 'add_item' && aiResponse.item?.name && context.menuItems) {
       const validItem = validateItemAgainstMenu(aiResponse.item.name, context.menuItems);
-
       if (!validItem) {
-        // Item doesn't exist - override AI response
         logger.warn(`AI tried to add non-menu item: ${aiResponse.item.name}`);
-        const availableItems = context.menuItems.map(i => i.name).slice(0, 5).join(', ');
-        aiResponse = {
-          reply: `Sorry, "${aiResponse.item.name}" is not on our menu. We have: ${availableItems}. What would you like?`,
-          intent: 'item_not_available' as any,
-        };
+        aiResponse.reply = `Sorry, "${aiResponse.item.name}" is not on our menu.`;
+        aiResponse.intent = 'item_not_available';
       } else {
-        // Correct the item name to exact menu name
-        aiResponse.item.name = validItem.name;
-
-        // Validate size if provided
-        if (aiResponse.item.size_or_weight && !validateSizeForItem(aiResponse.item.size_or_weight, validItem)) {
-          const availableSizes = validItem.sizes?.map(s => s.name).join(', ') || 'standard';
-          aiResponse = {
-            reply: `Sorry, we don't have that size for ${validItem.name}. Available sizes: ${availableSizes}. Which would you like?`,
-            intent: 'ask_question',
-            item: { ...aiResponse.item, size_or_weight: undefined },
-          };
-        }
+        aiResponse.item.name = validItem.name; // Correct name
       }
     }
-
-    logger.info(`AI Intent: ${aiResponse.intent}`);
+    
+    logger.info(`AI Intent: ${aiResponse.intent} (State: ${session.session_state})`);
     return aiResponse;
 
   } catch (error) {
@@ -388,28 +328,6 @@ export async function processMessageWithAI(
         status: error.response?.status,
         data: error.response?.data,
       });
-
-      if (error.code === 'ECONNABORTED') {
-        logger.info('Retrying AI request after timeout...');
-        try {
-          const retryResponse = await axios.post(
-            `${GEMINI_API_URL}?key=${apiKey}`,
-            {
-              contents: [{ parts: [{ text: prompt }] }],
-              generationConfig: { temperature: 0.3, maxOutputTokens: 500 },
-            },
-            { headers: { 'Content-Type': 'application/json' }, timeout: 30000 }
-          );
-
-          const retryText =
-            retryResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (retryText) {
-            return parseAIResponse(retryText);
-          }
-        } catch (retryError) {
-          logger.error('Retry also failed', retryError);
-        }
-      }
     } else {
       logger.error('Unexpected AI error', error);
     }

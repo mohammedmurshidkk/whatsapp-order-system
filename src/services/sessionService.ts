@@ -1,5 +1,5 @@
 import { supabase } from '../config/database';
-import { Session, SessionWithItems, SessionItem } from '../types';
+import { Session, SessionWithItems, SessionItem, SessionState, OrderType } from '../types';
 import { SESSION_TIMEOUT_HOURS } from '../config/constants';
 import { logger } from '../utils/logger';
 
@@ -33,6 +33,7 @@ export async function findOrCreateSession(customerId: string): Promise<Session> 
       created_at: now,
       last_message_at: now,
       total_items: 0,
+      session_state: 'ordering',
     })
     .select()
     .single();
@@ -250,4 +251,46 @@ export async function getSessionByCustomerPhone(
   }
 
   return data as Session;
+}
+
+// Update the state of the conversation session
+export async function updateSessionState(sessionId: string, state: SessionState): Promise<void> {
+  const { error } = await supabase
+    .from('sessions')
+    .update({ session_state: state })
+    .eq('id', sessionId);
+
+  if (error) {
+    logger.error(`Failed to update session state to ${state}`, error);
+    throw new Error('Failed to update session state');
+  }
+  logger.info(`Session ${sessionId} state updated to: ${state}`);
+}
+
+// Update fulfillment details for the session
+export async function updateSessionFulfillment(
+  sessionId: string,
+  fulfillmentData: {
+    type?: OrderType;
+    details?: string;
+    time?: string;
+  }
+): Promise<void> {
+  const updatePayload: Record<string, any> = {};
+  if (fulfillmentData.type) updatePayload.fulfillment_type = fulfillmentData.type;
+  if (fulfillmentData.details) updatePayload.fulfillment_details = fulfillmentData.details;
+  if (fulfillmentData.time) updatePayload.fulfillment_time = fulfillmentData.time;
+
+  if (Object.keys(updatePayload).length === 0) return;
+
+  const { error } = await supabase
+    .from('sessions')
+    .update(updatePayload)
+    .eq('id', sessionId);
+
+  if (error) {
+    logger.error('Failed to update session fulfillment details', error);
+    throw new Error('Failed to update session fulfillment details');
+  }
+  logger.info(`Session ${sessionId} fulfillment details updated.`);
 }

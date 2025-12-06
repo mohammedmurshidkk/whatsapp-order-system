@@ -206,7 +206,7 @@ export async function generateOrderSummary(sessionId: string): Promise<string> {
     return 'Your cart is empty. Just tell me what you would like to order!';
   }
 
-  let summary = '📋 *Order Summary*\n';
+  let summary = '📋 *Final Order Summary*\n';
   summary += '━━━━━━━━━━━━━━━━━━\n\n';
 
   let grandTotal = 0;
@@ -236,11 +236,25 @@ export async function generateOrderSummary(sessionId: string): Promise<string> {
 
     summary += '\n';
   });
-
+  
   summary += '━━━━━━━━━━━━━━━━━━\n';
+
+  // Add fulfillment details to summary
+  if (session.fulfillment_type) {
+    if (session.fulfillment_type === 'delivery') {
+      summary += `🚚 *Delivery to:*\n   ${session.fulfillment_details || 'Not specified'}\n`;
+    } else {
+      summary += `🛍️ *Takeaway from:*\n   ${session.fulfillment_details || 'Not specified'}\n`;
+    }
+    if (session.fulfillment_time) {
+      summary += `   at *${session.fulfillment_time}*\n`;
+    }
+    summary += '\n';
+  }
+
   summary += `📦 Total Items: ${session.items.reduce((acc, item) => acc + item.quantity, 0)}\n`;
   summary += `💰 *Grand Total: ₹${grandTotal}*\n\n`;
-  summary += 'Reply *YES* to confirm your order';
+  summary += 'Please reply *YES* to confirm your order.';
 
   return summary;
 }
@@ -271,16 +285,17 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
       unit_price: item.unit_price || undefined,
       line_total: lineTotal || undefined,
       custom_text: item.custom_text || undefined,
-      delivery_date: item.delivery_date || undefined,
       notes: item.notes || undefined,
       add_ons: item.add_ons || undefined, // Carry over add-ons to final order
     };
   });
 
   const orderSummary = await generateOrderSummary(sessionId);
+  
+  // NOTE: Naive time parsing. A library like date-fns-tz would be more robust.
+  // For now, we assume the fulfillment_time is a string that Postgres can handle.
+  const fulfillmentTime = session.fulfillment_time ? new Date(session.fulfillment_time).toISOString() : null;
 
-  const deliveryDates = session.items.map((item) => item.delivery_date).filter((date): date is string => date !== null);
-  const deliveryDate = deliveryDates.length > 0 ? deliveryDates[0] : null;
 
   const { data: order, error } = await supabase
     .from('orders')
@@ -294,7 +309,10 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
       order_summary: orderSummary,
       status: 'confirmed',
       created_at: new Date().toISOString(),
-      delivery_date: deliveryDate,
+      // Fulfillment fields
+      order_type: session.fulfillment_type,
+      fulfillment_details: session.fulfillment_details,
+      fulfillment_time: fulfillmentTime
     })
     .select()
     .single();
@@ -315,24 +333,24 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
 export async function sendOrderNotification(order: Order): Promise<void> {
   const notificationMethod = process.env.BUSINESS_NOTIFICATION_METHOD || 'console';
 
-  const notificationText = `
-🔔 NEW ORDER RECEIVED
-━━━━━━━━━━━━━━━━━━━━
-Order ID: ${order.id.substring(0, 8)}
-Customer ID: ${order.customer_id.substring(0, 8)}
-Status: ${order.status}
-Delivery Date: ${order.delivery_date || 'Not specified'}
-
-${order.order_summary}
-`;
+  // Re-generating a simpler text for notification to avoid recursion issues
+  let simpleSummary = `🔔 NEW ORDER: ${order.id.substring(0,8)}\n\n`;
+  order.items.forEach(item => {
+    simpleSummary += `- ${item.name} x${item.quantity}\n`;
+  });
+  simpleSummary += `\nTotal: ₹${order.total_amount}\n`;
+  if (order.order_type) {
+    simpleSummary += `Type: ${order.order_type}\n`;
+    simpleSummary += `Details: ${order.fulfillment_details || ''} at ${order.fulfillment_time || ''}\n`
+  }
 
   switch (notificationMethod) {
     case 'console':
     default:
-      logger.info('ORDER NOTIFICATION:');
-      console.log(notificationText);
+      logger.info('--- ORDER NOTIFICATION ---');
+      console.log(simpleSummary);
+      logger.info('--------------------------');
       break;
-    // Future: Add telegram, whatsapp notification methods
   }
 }
 

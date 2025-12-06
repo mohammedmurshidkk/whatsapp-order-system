@@ -5,6 +5,36 @@ import { logger } from '../utils/logger';
 
 const WHATSAPP_API_BASE = `https://graph.facebook.com/${WHATSAPP_API_VERSION}`;
 
+// --- Interfaces for Interactive Messages ---
+
+interface InteractiveListRow {
+  id: string;
+  title: string;
+  description?: string;
+}
+
+interface InteractiveListSection {
+  title: string;
+  rows: InteractiveListRow[];
+}
+
+export interface InteractiveListMessagePayload {
+  header?: {
+    type: 'text';
+    text: string;
+  };
+  body: {
+    text: string;
+  };
+  footer?: {
+    text: string;
+  };
+  action: {
+    button: string;
+    sections: InteractiveListSection[];
+  };
+}
+
 export async function sendWhatsAppMessage(
   to: string,
   message: string
@@ -49,6 +79,52 @@ export async function sendWhatsAppMessage(
       logger.error('Failed to send WhatsApp message', error);
     }
     // Don't throw - we want to continue even if WhatsApp fails
+  }
+}
+
+export async function sendInteractiveListMessage(
+  to: string,
+  payload: InteractiveListMessagePayload
+): Promise<void> {
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+
+  if (!phoneNumberId || !accessToken) {
+    logger.info(`[WhatsApp Mock] To: ${to}`);
+    logger.info(`[WhatsApp Mock] Interactive List Message: ${payload.body.text}`);
+    return;
+  }
+
+  try {
+    await axios.post(
+      `${WHATSAPP_API_BASE}/${phoneNumberId}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        to,
+        type: 'interactive',
+        interactive: {
+          type: 'list',
+          ...payload,
+        },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    logger.info(`WhatsApp interactive list message sent to ${to}`);
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      logger.error('WhatsApp API error sending interactive list', {
+        status: error.response?.status,
+        data: error.response?.data,
+      });
+    } else {
+      logger.error('Failed to send WhatsApp interactive list message', error);
+    }
   }
 }
 

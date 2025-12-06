@@ -1,11 +1,20 @@
 import { Request, Response } from 'express';
-import { WhatsAppWebhookBody, TestMessageRequest, SessionItem } from '../types';
+import {
+  WhatsAppWebhookBody,
+  TestMessageRequest,
+  SessionItem,
+  Session,
+  AIResponse,
+  WhatsAppWebhookMessage,
+} from '../types';
 import { findOrCreateCustomer } from '../services/customerService';
 import {
   findOrCreateSession,
   updateSessionActivity,
   getSessionWithItems,
   isAIPaused,
+  updateSessionState,
+  updateSessionFulfillment,
 } from '../services/sessionService';
 import {
   getRecentMessages,
@@ -25,10 +34,12 @@ import {
   getBusinessById,
   getMenuItems,
   getMenuCategories,
-  formatMenuForCustomer,
+  formatMenuAsText, // Renamed
+  buildMenuAsInteractiveList, // New
 } from '../services/menuService';
 import {
   sendWhatsAppMessage,
+  sendInteractiveListMessage, // New
   verifyWebhookChallenge,
   verifyWebhookSignature,
 } from '../services/whatsappService';
@@ -41,7 +52,6 @@ import {
 import { logger } from '../utils/logger';
 
 // Default business ID for MVP (will be dynamic in SaaS version)
-// TODO: Change this to your actual business ID from Supabase
 const DEFAULT_BUSINESS_ID = 'c3150207-4bf9-4ce4-8478-2e6369c46749';
 
 // Format session items as strings for AI context
@@ -50,286 +60,286 @@ function formatSessionItemsForAI(items: SessionItem[]): string[] {
     let desc = `${item.item_name}`;
     if (item.size_or_weight) desc += ` (${item.size_or_weight})`;
     if (item.quantity > 1) desc += ` x${item.quantity}`;
-    if (item.custom_text) desc += ` - "${item.custom_text}"`;
-    if (item.delivery_date) desc += ` - ${item.delivery_date}`;
-    if (item.notes) desc += ` [${item.notes}]`;
+    // Add-ons formatting can be added here if needed for AI context
     return desc;
   });
 }
 
-// Check if item already exists in session (to prevent duplicates)
-function isItemDuplicate(
-  existingItems: SessionItem[],
-  newItemName: string,
-  newItemSize?: string
-): boolean {
-  const normalizedNew = newItemName.toLowerCase().trim();
-
-  return existingItems.some((item) => {
-    const normalizedExisting = item.item_name.toLowerCase().trim();
-    const sameItem =
-      normalizedExisting === normalizedNew ||
-      normalizedExisting.includes(normalizedNew) ||
-      normalizedNew.includes(normalizedExisting);
-
-    // If same item name, check if size also matches
-    if (sameItem && newItemSize && item.size_or_weight) {
-      return (
-        item.size_or_weight.toLowerCase() === newItemSize.toLowerCase()
-      );
-    }
-
-    return sameItem;
-  });
-}
-
+// Main message processing logic with state machine
 async function processMessage(
   phone: string,
   messageText: string,
   businessId: string = DEFAULT_BUSINESS_ID
 ): Promise<string | null> {
-  logger.info(`Processing message from ${phone}: ${messageText.substring(0, 50)}...`);
+  logger.info(
+    `Processing message from ${phone}: "${messageText.substring(0, 50)}..."`
+  );
 
-  // Get business context
-  const business = await getBusinessById(businessId);
-  logger.info(`Business: ${business?.name || 'NOT FOUND'} (ID: ${businessId})`);
-
-  // Find or create customer
   const customer = await findOrCreateCustomer(phone);
-
-  // Find or create active session
   const session = await findOrCreateSession(customer.id);
-
-  // Update session activity
   await updateSessionActivity(session.id);
 
-  // Check if AI is paused (human takeover mode)
-  const aiPaused = await isAIPaused(session.id);
-  if (aiPaused) {
-    logger.info(`AI paused for session ${session.id}, skipping AI response`);
-    // Still save the incoming message for record
+  if (await isAIPaused(session.id)) {
+    logger.info(`AI paused for session ${session.id}, skipping AI response.`);
     await saveIncomingMessage(session.id, messageText);
-    return null; // Return null to indicate no AI response
+    return null;
   }
 
-  // Get session with items (for duplicate prevention)
-  const sessionWithItems = await getSessionWithItems(session.id);
-  const existingItems = sessionWithItems?.items || [];
+  const fullSession = await getSessionWithItems(session.id);
+  if (!fullSession) {
+    throw new Error('Could not retrieve session details.');
+  }
 
-  // Get recent message history
   const messageHistory = await getRecentMessages(session.id);
+  const menuItems = await getMenuItems(businessId);
+  const menuCategories = await getMenuCategories(businessId);
 
-  // Get menu for AI context
-  let menuItems;
-  let menuCategories;
-  if (businessId) {
-    menuItems = await getMenuItems(businessId);
-    menuCategories = await getMenuCategories(businessId);
-    logger.info(`Menu loaded: ${menuItems?.length || 0} items, ${menuCategories?.length || 0} categories`);
-  } else {
-    logger.warn('No business found - AI will have no menu context!');
-  }
-
-  // Build AI context
   const aiContext = {
-    business: business || undefined,
-    menuItems,
-    menuCategories,
-    currentSessionItems: formatSessionItemsForAI(existingItems),
+    business: (await getBusinessById(businessId)) || undefined,
+    menuItems: menuItems || [],
+    menuCategories: menuCategories || [],
+    currentSessionItems: formatSessionItemsForAI(fullSession.items),
+    session: fullSession,
   };
 
-  // Process with AI
   const aiResponse = await processMessageWithAI(
     messageText,
     messageHistory,
-    session,
+    fullSession,
     aiContext
   );
 
-  // Save incoming message
   await saveIncomingMessage(session.id, messageText);
 
-  let replyMessage = aiResponse.reply;
+  let replyMessage: string | null = aiResponse.reply;
 
-  // Handle different intents
-  switch (aiResponse.intent) {
-    case 'add_item':
-      if (aiResponse.item && aiResponse.item.name) {
-        // Check for duplicates before adding
-        const isDuplicate = isItemDuplicate(
-          existingItems,
-          aiResponse.item.name,
-          aiResponse.item.size_or_weight
-        );
-
-        if (isDuplicate) {
-          logger.info(`Duplicate item prevented: ${aiResponse.item.name}`);
-          // Don't add, but keep the AI's response (it should acknowledge it's already added)
-        } else {
-          await saveOrderItem(session.id, aiResponse.item, businessId);
-          logger.info(`Item added: ${aiResponse.item.name}`);
-        }
-      }
+  // STATE MACHINE
+  switch (fullSession.session_state) {
+    case 'ordering':
+      replyMessage = await handleOrderingState(
+        aiResponse,
+        fullSession,
+        businessId,
+        phone
+      );
       break;
-
-    case 'modify_order':
-      // Customer wants to modify their order (change quantity, remove item)
-      if (aiResponse.item && aiResponse.item.name) {
-        if (aiResponse.item.quantity === 0) {
-          // Remove item
-          await removeSessionItem(session.id, aiResponse.item.name, aiResponse.item.size_or_weight);
-          logger.info(`Item removed: ${aiResponse.item.name}`);
-        } else {
-          // Check if item exists in session
-          const itemExists = existingItems.some(item =>
-            item.item_name.toLowerCase().includes(aiResponse.item!.name.toLowerCase()) ||
-            aiResponse.item!.name.toLowerCase().includes(item.item_name.toLowerCase())
-          );
-
-          if (itemExists) {
-            // Update quantity
-            await updateSessionItemQuantity(
-              session.id,
-              aiResponse.item.name,
-              aiResponse.item.quantity,
-              aiResponse.item.size_or_weight
-            );
-            logger.info(`Item updated: ${aiResponse.item.name} x${aiResponse.item.quantity}`);
-          } else {
-            // Add as new item
-            await saveOrderItem(session.id, aiResponse.item, businessId);
-            logger.info(`Item added: ${aiResponse.item.name}`);
-          }
-        }
-      }
-      // Always show updated summary after modification
-      const modifiedSummary = await generateOrderSummary(session.id);
-      replyMessage = aiResponse.reply + '\n\n' + modifiedSummary;
+    case 'awaiting_fulfillment_type':
+      replyMessage = await handleFulfillmentTypeState(aiResponse, fullSession);
       break;
-
-    case 'show_menu':
-      // Send formatted menu to customer
-      if (menuItems && menuCategories && menuItems.length > 0) {
-        replyMessage = formatMenuForCustomer(menuItems, menuCategories);
-      } else {
-        replyMessage =
-          "We have cakes, coffee, tea, cold drinks, and snacks! Just tell me what you'd like.";
-      }
+    case 'awaiting_delivery_details':
+    case 'awaiting_takeaway_details':
+      replyMessage = await handleFulfillmentDetailsState(
+        aiResponse,
+        fullSession
+      );
       break;
-
-    case 'ready_for_checkout':
-      // Generate and send order summary
-      const summary = await generateOrderSummary(session.id);
-      replyMessage = summary;
+    case 'awaiting_confirmation':
+      replyMessage = await handleConfirmationState(aiResponse, fullSession);
       break;
-
-    case 'confirm_order':
-      try {
-        const order = await createFinalOrder(session.id);
-        replyMessage = `✅ Order confirmed!\n\nOrder ID: ${order.id.substring(0, 8)}\n\nThank you so much for your order! We'll have everything ready for you. Have a wonderful day! 🙏`;
-      } catch (error) {
-        logger.error('Failed to create order', error);
-        replyMessage =
-          "I'm sorry, I couldn't process your order right now. Please try again or contact us directly.";
-      }
-      break;
-
-    case 'cancel':
-      replyMessage =
-        "No problem! Your order has been cancelled. Feel free to start a new order whenever you're ready!";
-      break;
-
-    case 'cancel_existing_order':
-      if (aiResponse.order_id) {
-        const cancelResult = await cancelOrderById(aiResponse.order_id, customer.id);
-        if (cancelResult.success) {
-          replyMessage = `✅ ${cancelResult.message}\n\nIf you'd like to place a new order, just let me know!`;
-        } else {
-          replyMessage = `❌ ${cancelResult.message}`;
-        }
-      } else {
-        replyMessage = "Could you please provide the order ID? It's the 8-character code you received when you placed the order (e.g., 424bfda9).";
-      }
-      break;
-
-    case 'conversation_ended':
-      // Just send the farewell message, no need to ask more questions
-      // The AI's reply should already be a proper goodbye
-      break;
-
-    case 'ask_question':
-    case 'smalltalk':
     default:
-      // Use AI's reply as is
-      break;
+      replyMessage =
+        "I'm sorry, I seem to be a little lost. Could we start over?";
+      await updateSessionState(fullSession.id, 'ordering');
   }
 
-  // Save outgoing message
-  await saveOutgoingMessage(session.id, replyMessage);
-
-  logger.info(`Reply sent: ${replyMessage.substring(0, 50)}...`);
-
+  // Only save outgoing message if one is being sent
+  if (replyMessage) {
+    await saveOutgoingMessage(session.id, replyMessage);
+    logger.info(`Reply sent: ${replyMessage.substring(0, 50)}...`);
+  }
   return replyMessage;
+}
+
+// Handles the 'ordering' state
+async function handleOrderingState(
+  aiResponse: AIResponse,
+  session: Session,
+  businessId: string,
+  phone: string
+): Promise<string | null> {
+  let replyMessage: string | null = aiResponse.reply;
+  const sessionId = session.id;
+
+  switch (aiResponse.intent) {
+    case 'add_item':
+      if (aiResponse.item?.name) {
+        await saveOrderItem(sessionId, aiResponse.item, businessId);
+      }
+      break;
+    case 'modify_order':
+      if (aiResponse.item?.name) {
+        if (aiResponse.item.quantity === 0) {
+          await removeSessionItem(
+            sessionId,
+            aiResponse.item.name,
+            aiResponse.item.size_or_weight
+          );
+        } else {
+          await updateSessionItemQuantity(
+            sessionId,
+            aiResponse.item.name,
+            aiResponse.item.quantity,
+            aiResponse.item.size_or_weight
+          );
+        }
+      }
+      const modifiedSummary = await generateOrderSummary(sessionId);
+      replyMessage = aiResponse.reply + '\n\n' + modifiedSummary;
+      break;
+    case 'show_menu':
+      const menuItems = await getMenuItems(businessId);
+      const menuCategories = await getMenuCategories(businessId);
+      if (menuItems && menuCategories && menuItems.length > 0) {
+        // Send AI text reply first
+        await sendWhatsAppMessage(phone, replyMessage);
+
+        // Then send the interactive list
+        const listPayload = buildMenuAsInteractiveList(
+          menuItems,
+          menuCategories
+        );
+        await sendInteractiveListMessage(phone, listPayload);
+
+        // Return null because we've handled sending the messages
+        return null;
+      } else {
+        replyMessage = 'Our menu is currently empty, please check back later!';
+      }
+      break;
+    case 'ready_for_checkout':
+      await updateSessionState(sessionId, 'awaiting_fulfillment_type');
+      replyMessage =
+        'Great! To finalize your order, I need a few more details.\n\nWill this be for *delivery* or *takeaway*?';
+      break;
+  }
+  return replyMessage;
+}
+
+// Handles the 'awaiting_fulfillment_type' state
+async function handleFulfillmentTypeState(
+  aiResponse: AIResponse,
+  session: Session
+): Promise<string> {
+  if (aiResponse.intent !== 'set_order_type' || !aiResponse.fulfillment?.type) {
+    return "Sorry, I didn't catch that. Is it for delivery or takeaway?";
+  }
+
+  const type = aiResponse.fulfillment.type;
+  await updateSessionFulfillment(session.id, { type });
+
+  if (type === 'delivery') {
+    await updateSessionState(session.id, 'awaiting_delivery_details');
+    return 'Got it, delivery. What is the full address and preferred time for the delivery?';
+  } else {
+    // takeaway
+    await updateSessionState(session.id, 'awaiting_takeaway_details');
+    return 'Okay, takeaway. From which outlet and at what time would you like to pick up your order?';
+  }
+}
+
+// Handles 'awaiting_delivery_details' and 'awaiting_takeaway_details' states
+async function handleFulfillmentDetailsState(
+  aiResponse: AIResponse,
+  session: Session
+): Promise<string> {
+  if (
+    aiResponse.intent !== 'provide_fulfillment_details' ||
+    !aiResponse.fulfillment
+  ) {
+    return "Sorry, I didn't quite get those details. Could you provide them again?";
+  }
+
+  const { address, outlet, time } = aiResponse.fulfillment;
+  const details = session.fulfillment_type === 'delivery' ? address : outlet;
+
+  await updateSessionFulfillment(session.id, { details, time });
+  await updateSessionState(session.id, 'awaiting_confirmation');
+
+  const summary = await generateOrderSummary(session.id);
+  return summary;
+}
+
+// Handles the 'awaiting_confirmation' state
+async function handleConfirmationState(
+  aiResponse: AIResponse,
+  session: Session
+): Promise<string> {
+  if (aiResponse.intent === 'confirm_order') {
+    try {
+      const order = await createFinalOrder(session.id);
+      return `✅ Order confirmed!\n\nYour Order ID is *${order.id.substring(
+        0,
+        8
+      )}*.\n\nThank you for your order! We'll have everything ready for you. Have a wonderful day! 🙏`;
+    } catch (error) {
+      logger.error('Failed to create order', error);
+      return "I'm sorry, I couldn't process your order right now. Please try again or contact us directly.";
+    }
+  } else if (
+    aiResponse.intent === 'modify_order' ||
+    aiResponse.intent === 'add_item'
+  ) {
+    await updateSessionState(session.id, 'ordering');
+    return "No problem, let's make some changes. What would you like to update?";
+  } else if (aiResponse.intent === 'cancel') {
+    await updateSessionState(session.id, 'ordering'); // Reset state
+    return "Your order has been cancelled. Feel free to start a new one whenever you're ready!";
+  }
+
+  return "I'm waiting for your confirmation. Please reply *YES* to confirm your order, or let me know if you want to make changes.";
 }
 
 export async function handleWhatsAppWebhook(
   req: Request,
   res: Response
 ): Promise<void> {
-  // Immediately respond with 200 OK (WhatsApp requires fast response)
   res.status(200).send('OK');
-
   try {
-    const signature = req.headers['x-hub-signature-256'] as string;
-    const rawBody = JSON.stringify(req.body);
-
-    // Verify signature (optional for MVP)
-    if (signature && !verifyWebhookSignature(signature, rawBody)) {
-      logger.warn('Invalid webhook signature');
-      return;
-    }
-
     const body = req.body as WhatsAppWebhookBody;
+    if (body.object !== 'whatsapp_business_account') return;
 
-    // Check if this is a valid WhatsApp message
-    if (body.object !== 'whatsapp_business_account') {
-      return;
-    }
-
-    // Process each entry
     for (const entry of body.entry) {
       for (const change of entry.changes) {
-        const value = change.value;
-
-        // Skip if no messages
-        if (!value.messages || value.messages.length === 0) {
-          continue;
-        }
-
-        for (const message of value.messages) {
-          // Only handle text messages for MVP
-          if (message.type !== 'text' || !message.text?.body) {
-            logger.debug(`Skipping non-text message type: ${message.type}`);
-            continue;
-          }
-
+        if (!change.value.messages) continue;
+        for (const message of change.value.messages) {
           const phone = sanitizePhoneNumber(message.from);
-          const messageText = sanitizeMessage(message.text.body);
-
           if (!isValidPhoneNumber(phone)) {
-            logger.warn(`Invalid phone number: ${message.from}`);
+            logger.warn(`Invalid phone number received: ${message.from}`);
             continue;
           }
 
-          if (!isValidMessage(messageText)) {
-            logger.warn('Empty message received');
+          let messageText: string | null = null; // Initialize as nullable
+
+          if (message.type === 'text' && message.text) {
+            // Check if message.text exists
+            messageText = sanitizeMessage(message.text.body);
+          } else if (
+            message.type === 'interactive' &&
+            message.interactive?.type === 'list_reply' &&
+            message.interactive.list_reply
+          ) {
+            // Safely access properties
+            messageText = message.interactive.list_reply.id;
+          } else {
+            logger.debug(
+              `Skipping message type: ${message.type} or unsupported interactive type`
+            );
+            continue; // Skip messages we don't handle
+          }
+
+          if (messageText === null || !isValidMessage(messageText)) {
+            // Check messageText for null/validity
+            logger.warn('Empty or invalid message content after parsing');
             continue;
           }
 
           try {
-            // Use DEFAULT_BUSINESS_ID directly (will be dynamic in SaaS version)
-            const reply = await processMessage(phone, messageText, DEFAULT_BUSINESS_ID);
-            // Only send message if AI is not paused (reply will be null if paused)
+            // messageText is now guaranteed to be a string
+            const reply = await processMessage(
+              phone,
+              messageText,
+              DEFAULT_BUSINESS_ID
+            );
             if (reply !== null) {
               await sendWhatsAppMessage(phone, reply);
             }
@@ -373,7 +383,6 @@ export async function handleTestMessage(
   res: Response
 ): Promise<void> {
   try {
-    logger.debug('Test message endpoint called');
     const { phone, message } = req.body as TestMessageRequest;
 
     if (!phone || !message) {
@@ -384,41 +393,29 @@ export async function handleTestMessage(
     const sanitizedPhone = sanitizePhoneNumber(phone);
     const sanitizedMessage = sanitizeMessage(message);
 
-    if (!isValidPhoneNumber(sanitizedPhone)) {
-      res.status(400).json({ error: 'Invalid phone number' });
-      return;
-    }
-
-    if (!isValidMessage(sanitizedMessage)) {
-      res.status(400).json({ error: 'Message cannot be empty' });
+    if (
+      !isValidPhoneNumber(sanitizedPhone) ||
+      !isValidMessage(sanitizedMessage)
+    ) {
+      res.status(400).json({ error: 'Invalid phone or message' });
       return;
     }
 
     const reply = await processMessage(sanitizedPhone, sanitizedMessage);
 
     if (reply === null) {
-      res.status(200).json({
-        success: true,
-        phone: sanitizedPhone,
-        message: sanitizedMessage,
-        reply: null,
-        aiPaused: true,
-        note: 'AI is paused for this session. Human takeover mode active.',
-      });
+      res
+        .status(200)
+        .json({
+          reply: null,
+          note: 'AI is paused or message sent interactively.',
+        });
       return;
     }
 
-    res.status(200).json({
-      success: true,
-      phone: sanitizedPhone,
-      message: sanitizedMessage,
-      reply,
-    });
+    res.status(200).json({ reply });
   } catch (error) {
     logger.error('Test message error', error);
-    res.status(500).json({
-      error: 'Failed to process message',
-      details: error instanceof Error ? error.message : 'Unknown error',
-    });
+    res.status(500).json({ error: 'Failed to process message' });
   }
 }

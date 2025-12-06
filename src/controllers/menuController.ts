@@ -9,9 +9,10 @@ import {
   getMenuCategories,
   getBusinessByPhone,
   getBusinessById,
-  formatMenuForCustomer,
+  formatMenuAsText,
   clearMenuCache,
-} from '../services/menuService';
+}
+ from '../services/menuService';
 import { logger } from '../utils/logger';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -32,7 +33,7 @@ export async function getMenu(req: Request, res: Response): Promise<void> {
     res.status(200).json({
       categories,
       items,
-      formatted: formatMenuForCustomer(items, categories),
+      formatted: formatMenuAsText(items, categories),
     });
   } catch (error) {
     logger.error('Failed to get menu', error);
