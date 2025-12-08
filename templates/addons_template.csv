@@ -1,0 +1,12 @@
+addon_name,category,description,price,link_to_categories,is_auto_suggested,image_url
+Standard Candle,candle,Basic birthday candle,,Cakes,yes,
+Number Candle,candle,Custom number candle,50,Cakes,yes,
+Sparkler Candle,candle,Musical sparkler candle,100,Cakes,yes,
+Gift Box,packing,Premium gift box with ribbon,80,Cakes,yes,
+Thermal Bag,packing,Insulated thermal bag,50,Cakes,no,
+Extra Cheese,topping,Additional cheese slice,20,Snacks,yes,
+Extra Sauce,topping,Extra sauce packet,10,Snacks,yes,
+Extra Patty,topping,Additional burger patty,50,Snacks,yes,
+Extra Shot,beverage_extra,Extra espresso shot,30,"Hot Beverages|Cold Beverages",yes,
+Whipped Cream,beverage_extra,Whipped cream topping,20,"Hot Beverages|Cold Beverages",yes,
+Flavor Syrup,beverage_extra,Vanilla/Caramel/Hazelnut,25,"Hot Beverages|Cold Beverages",yes,

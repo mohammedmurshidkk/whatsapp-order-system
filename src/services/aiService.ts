@@ -1,71 +1,76 @@
 import axios from 'axios';
-import { Message, AIResponse, Session, Business, MenuItem, MenuCategory } from '../types';
+import { Message, AIResponse, Session, Business, MenuItem, MenuCategory, BusinessOutlet, MenuAddon } from '../types';
 import { GEMINI_MODEL } from '../config/constants';
 import { formatMessagesForAI } from './messageService';
 import { logger } from '../utils/logger';
+import { OpenRouter } from "@openrouter/sdk";
 
 const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+const openrouter = new OpenRouter({
+  apiKey: process.env.OPENROUTER_API_KEY
+});
 
 export interface AIContext {
   business?: Business;
   menuItems?: MenuItem[];
   menuCategories?: MenuCategory[];
   currentSessionItems?: string[];
+  outlets?: BusinessOutlet[];
+  sessionHasFulfillmentType?: boolean;
+  sessionHasDeliveryInfo?: boolean;
+  sessionHasPickupInfo?: boolean;
+  availableAddons?: MenuAddon[]; // NEW: Available add-ons for current item
+  lastAddedItemId?: string; // NEW: Last added session item ID (for add-on flow)
 }
 
-// Format menu for AI with STRICT item names list
+// Format menu for AI - includes item names AND sizes (to prevent hallucination)
 function formatStrictMenuForAI(items: MenuItem[], categories: MenuCategory[]): string {
   if (items.length === 0) {
     return 'MENU: No items available.';
   }
 
-  // Create a list of EXACT item names
-  const itemNames = items.map(item => item.name);
-
-  let menuText = `AVAILABLE MENU ITEMS (ONLY THESE CAN BE ORDERED):\n`;
-  menuText += `EXACT ITEM NAMES: [${itemNames.map(n => `"${n}"`).join(', ')}]\n\n`;
-
-  // Group items by category
-  const categoryMap = new Map<string, MenuItem[]>();
+  // Group items by category with size info
+  const categoryMap = new Map<string, string[]>();
 
   for (const item of items) {
     if (item.category_id) {
       const existing = categoryMap.get(item.category_id) || [];
-      existing.push(item);
+
+      // Format item with sizes if available
+      let itemText = item.name;
+      if (item.sizes && item.sizes.length > 0) {
+        const sizeNames = item.sizes.map(s => s.name).join(', ');
+        itemText += ` [sizes: ${sizeNames}]`;
+      }
+
+      existing.push(itemText);
       categoryMap.set(item.category_id, existing);
     }
   }
 
-  // Format each category
+  let menuText = `AVAILABLE MENU (with available sizes):\n\n`;
+
+  // Format each category with items and sizes
   for (const category of categories) {
     const categoryItems = categoryMap.get(category.id);
     if (categoryItems && categoryItems.length > 0) {
-      menuText += `${category.name.toUpperCase()}:\n`;
-      for (const item of categoryItems) {
-        menuText += `  - "${item.name}"`;
-        if (item.sizes && item.sizes.length > 0) {
-          const sizeText = item.sizes.map(s => `${s.name}:₹${s.price}`).join(', ');
-          menuText += ` [Sizes: ${sizeText}]`;
-        } else if (item.price) {
-          menuText += ` [Price: ₹${item.price}]`;
-        }
-        if (item.is_customizable) {
-          menuText += ' [Can add custom text]';
-        }
-        if (item.special_notes) {
-          menuText += ` [Note: ${item.special_notes}]`;
-        }
-        menuText += '\n';
-      }
-      menuText += '\n';
+      menuText += `${category.name}:\n`;
+      categoryItems.forEach(item => {
+        menuText += `  - ${item}\n`;
+      });
     }
   }
+
+  menuText += `\n⚠️ ONLY use sizes listed above. NEVER invent sizes like "Regular", "Large", "Extra Large" unless they are in the list.`;
+  menuText += `\nWhen customer asks "show menu", use intent "show_menu" (system will send full details to customer).`;
 
   return menuText;
 }
 
 function getSystemPrompt(context: AIContext): string {
-  const today = new Date().toISOString().split('T')[0];
+  const now = new Date();
+  const today = now.toISOString().split('T')[0];
+  const currentTime = now.toTimeString().split(' ')[0].substring(0, 5); // HH:MM format
   const businessName = context.business?.name || 'our cafe';
 
   // Format menu with STRICT enforcement
@@ -76,124 +81,184 @@ function getSystemPrompt(context: AIContext): string {
     itemNamesList = context.menuItems.map(item => `"${item.name}"`).join(', ');
   }
 
-  // Format current session items
+  // Format current session items - CRITICAL for tracking
   let currentItemsSection = '';
+  let hasItemsInCart = false;
   if (context.currentSessionItems && context.currentSessionItems.length > 0) {
-    currentItemsSection = `\nITEMS ALREADY IN THIS ORDER:\n${context.currentSessionItems.map((item, i) => `${i + 1}. ${item}`).join('\n')}`;
+    hasItemsInCart = true;
+    currentItemsSection = `\n🛒 ITEMS ALREADY IN CART:\n${context.currentSessionItems.map((item, i) => `${i + 1}. ${item}`).join('\n')}`;
+  } else {
+    currentItemsSection = `\n🛒 CART IS EMPTY - No items added yet`;
+  }
+
+  // Format outlets for takeaway
+  let outletsSection = '';
+  if (context.outlets && context.outlets.length > 0) {
+    outletsSection = `\n\nAVAILABLE OUTLETS FOR PICKUP:\n`;
+    context.outlets.forEach((outlet, i) => {
+      outletsSection += `${i + 1}. "${outlet.outlet_name}" - ${outlet.address}\n`;
+    });
+  }
+
+  // Fulfillment status - make it very clear to AI
+  let fulfillmentStatus = '\n\n📦 FULFILLMENT STATUS:';
+  if (context.sessionHasFulfillmentType) {
+    fulfillmentStatus += '\n✅ Fulfillment type: CHOSEN';
+  } else {
+    fulfillmentStatus += '\n❌ Fulfillment type: NOT YET CHOSEN';
+  }
+  if (context.sessionHasDeliveryInfo) {
+    fulfillmentStatus += '\n✅ Delivery address: COLLECTED';
+  }
+  if (context.sessionHasPickupInfo) {
+    fulfillmentStatus += '\n✅ Pickup outlet: SELECTED';
+  }
+
+  // Determine if ready for final confirmation
+  const readyForFinalConfirm = context.sessionHasFulfillmentType &&
+    (context.sessionHasDeliveryInfo || context.sessionHasPickupInfo);
+  if (readyForFinalConfirm) {
+    fulfillmentStatus += '\n\n🎯 READY FOR FINAL CONFIRMATION - when customer says YES, use "confirm_order"';
+  }
+
+  // Format available add-ons if any
+  let addonsSection = '';
+  if (context.availableAddons && context.availableAddons.length > 0) {
+    addonsSection = `\n\nAVAILABLE ADD-ONS FOR LAST ADDED ITEM:\n`;
+    context.availableAddons.forEach((addon, i) => {
+      addonsSection += `${i + 1}. "${addon.name}" - ${addon.price !== null ? `₹${addon.price}` : 'FREE'}`;
+      if (addon.description) {
+        addonsSection += ` - ${addon.description}`;
+      }
+      addonsSection += '\n';
+    });
+  }
+
+  // Business-specific custom instructions
+  let customInstructions = '';
+  if (context.business?.custom_ai_prompt) {
+    customInstructions = `\n\n🏪 BUSINESS-SPECIFIC INSTRUCTIONS (MUST FOLLOW):\n${context.business.custom_ai_prompt}\n`;
   }
 
   return `You are an AI ordering assistant for ${businessName}.
-
+Current date: ${today}, Current time: ${currentTime}
+${customInstructions}
 ${menuSection}
-${currentItemsSection}
+${currentItemsSection}${outletsSection}${fulfillmentStatus}${addonsSection}
 
-⚠️ CRITICAL - STRICT MENU RULES ⚠️
-1. You can ONLY accept orders for items listed in AVAILABLE MENU ITEMS above
-2. If customer asks for an item NOT in the menu, say "Sorry, we don't have [item]. We have [similar items from menu]."
-3. NEVER invent or hallucinate items - NO Vanilla cake, NO items not in the list
-4. Item names in your response MUST match EXACTLY from the menu list
-5. Prices and sizes MUST match EXACTLY what's in the menu
-6. If unsure about an item, ask customer to choose from the menu
+⚠️ STRICT RULES ⚠️
+1. ONLY accept orders for items in the menu above
+2. If item NOT in menu: use "item_not_available" intent, suggest alternatives
+3. Item names MUST match EXACTLY from menu
+4. NEVER hallucinate or invent items/prices
 
-VALID ITEM NAMES (use EXACTLY as written): [${itemNamesList}]
+VALID ITEMS: [${itemNamesList}]
 
-RESPONSE FORMAT (JSON only):
+📋 RESPONSE FORMAT (JSON only):
 {
   "reply": "your message (1-2 sentences)",
-  "intent": "add_item | modify_order | ask_question | ready_for_checkout | confirm_order | cancel | cancel_existing_order | smalltalk | show_menu | conversation_ended | item_not_available",
+  "intent": "add_item | ask_question | modify_order | ready_for_checkout | confirm_order | cancel | show_menu | item_not_available | conversation_ended",
   "item": {
     "name": "EXACT name from menu",
     "quantity": 1,
     "size_or_weight": "EXACT size from menu",
-    "custom_text": "for cakes only",
     "delivery_date": "YYYY-MM-DD",
-    "notes": "special instructions"
+    "notes": "optional notes"
   },
-  "order_id": "8-character order ID (only for cancel_existing_order)"
+  "fulfillment": {
+    "fulfillment_type": "delivery | takeaway",
+    "delivery_address": "address text",
+    "delivery_time": "time text",
+    "pickup_outlet_id": "outlet id",
+    "pickup_time": "time text"
+  }
 }
 
-INTENT RULES:
-- "item_not_available": Customer asks for item NOT in menu → suggest alternatives from menu
-- "add_item": ONLY when item exists in menu AND all details collected
-- "modify_order": Customer wants to change quantity, remove item, or modify existing order → make changes and show NEW summary
-- "ask_question": Need more details (size, date, quantity)
+🚨 CRITICAL ORDERING FLOW 🚨
+
+STEP 1 - ADD ITEMS (MANDATORY):
+- When customer asks for an item → CHECK if it's in the menu
+- ⚠️ IMPORTANT: Check if customer ALREADY specified size in their message!
+  Examples: "Rainbow 1kg" = item "Rainbow" + size "1kg" → use "add_item" directly!
+  "2 medium burgers" = item "Burger" + size "Medium" + quantity 2 → use "add_item" directly!
+- ONLY use "ask_question" for size if customer did NOT specify it
+- If in menu AND all details provided → use "add_item" with complete item object
+- ⚠️ NEVER skip to fulfillment if cart is empty!
+
+STEP 2 - CHECKOUT:
+- When customer says "that's all", "done", "no more" → use "ready_for_checkout"
+- System will show order summary and ask for delivery/takeaway
+- ⚠️ ONLY proceed to checkout if CART HAS ITEMS!
+
+STEP 3 - FULFILLMENT:
+- Customer chooses "delivery" or "takeaway" → use "ask_question" with fulfillment data
+- ONE order = ONE fulfillment type only (no mixing)
+- For delivery: collect address, then time (optional)
+- For takeaway: show outlet list, collect selection, then time (optional)
+
+STEP 4 - TIME RULES:
+- Time is OPTIONAL - if customer doesn't specify, that's okay
+- If they DO specify time: Minimum wait ${context.business?.minimum_wait_minutes || 30} minutes
+- REJECT past dates/times - say "Please choose a future time"
+- Valid examples: "today 5pm", "tomorrow 10am", "in 2 hours"
+
+STEP 5 - FINAL CONFIRM:
+- After delivery address OR pickup outlet is collected → use "confirm_order"
+- When customer says "yes" after providing delivery/pickup info → use "confirm_order"
+- System will create the order and show confirmation
+
+⚠️ ONLY ONE "YES" NEEDED:
+- After customer provides delivery address or selects pickup outlet, confirm the order
+- Don't ask for separate item confirmation - go straight to fulfillment after summary
+
+INTENT GUIDE:
+- "add_item": Customer wants item AND you have name + size + quantity → ADD TO CART
+- "ask_question": Need more info (which size? what quantity? delivery/takeaway? address?)
+- "modify_order": Change quantity/remove item (set quantity=0 to remove)
+- "ready_for_checkout": Customer done adding items → show summary + ask delivery/takeaway
+- "confirm_order": Customer provided delivery address OR pickup outlet → FINALIZE ORDER
 - "show_menu": Customer asks what's available
-- "ready_for_checkout": Customer says "that's all", "done", "no more" → show order summary
-- "confirm_order": ONLY when customer says "yes"/"confirm" AFTER seeing order summary with prices
-- "cancel": Customer wants to cancel CURRENT order being built (before confirmation)
-- "cancel_existing_order": Customer wants to cancel a PREVIOUSLY CONFIRMED order using order ID → extract the order_id
-- "conversation_ended": After order is confirmed, customer says "okay", "thanks", "bye"
-
-⚠️ CRITICAL ORDER FLOW:
-1. Customer adds items → add_item
-2. Customer says "that's all" → ready_for_checkout (system shows summary with prices)
-3. Customer says "yes" to confirm → confirm_order
-4. BUT if customer says "change X to Y" or "make it 2 burgers" → modify_order (system updates and shows NEW summary)
-5. Customer confirms the NEW summary → confirm_order
-
-⚠️ IMPORTANT: If customer says "yes" to confirm a CHANGE (not the order summary), use intent "modify_order" and acknowledge the change. ONLY use "confirm_order" when the last bot message was the order summary with prices.
+- "item_not_available": Item not in menu
+- "cancel": Customer wants to stop ordering
+- "conversation_ended": Farewell after order complete
 
 EXAMPLES:
 
-Customer: "I want vanilla cake"
-{"reply": "Sorry, we don't have Vanilla cake. We have Black Forest, Chocolate Truffle, Pineapple Cake, Red Velvet, and Butterscotch. Which would you like?", "intent": "item_not_available"}
+Customer: "I want a burger"
+${context.menuItems?.find(i => i.name.toLowerCase().includes('burger'))?.sizes ?
+`{"reply": "Great choice! What size - small, medium, or large?", "intent": "ask_question", "item": {"name": "Burger"}}` :
+`{"reply": "Added 1 Burger to your cart! Anything else?", "intent": "add_item", "item": {"name": "Burger", "quantity": 1}}`}
 
-Customer: "Black Forest 2kg"
-{"reply": "Great choice! When do you need the Black Forest cake?", "intent": "ask_question", "item": {"name": "Black Forest", "quantity": 1, "size_or_weight": "2kg"}}
+Customer: "Medium burger" or "burger medium" (size already specified!)
+{"reply": "Added Burger (Medium) to your cart! Anything else?", "intent": "add_item", "item": {"name": "Burger", "quantity": 1, "size_or_weight": "Medium"}}
 
-Customer: "Do you have pizza?"
-{"reply": "Sorry, we don't have pizza. We have Sandwich, Burger, and Samosa in our snacks. Would you like any of these?", "intent": "item_not_available"}
+Customer: "Rainbow 1kg" (item + size in one message!)
+{"reply": "Added Rainbow (1kg) to your cart! Anything else?", "intent": "add_item", "item": {"name": "Rainbow", "quantity": 1, "size_or_weight": "1kg"}}
 
-Customer: "One coffee"
-{"reply": "Sure! What size would you like - small (₹30), medium (₹50), or large (₹70)?", "intent": "ask_question", "item": {"name": "Coffee"}}
+Customer: "That's all"
+${hasItemsInCart ?
+`{"reply": "Let me show you your order summary.", "intent": "ready_for_checkout"}` :
+`{"reply": "Your cart is empty! What would you like to order?", "intent": "ask_question"}`}
 
-Customer: "thanks bye"
-{"reply": "Thank you! Have a wonderful day! 🙏", "intent": "conversation_ended"}
+Customer: "Delivery" (after seeing summary)
+{"reply": "Please share your delivery address.", "intent": "ask_question", "fulfillment": {"fulfillment_type": "delivery"}}
 
---- MODIFY ORDER EXAMPLES ---
+Customer: "MG Road" (providing delivery address)
+{"reply": "Your order is confirmed! Delivery to MG Road.", "intent": "confirm_order", "fulfillment": {"fulfillment_type": "delivery", "delivery_address": "MG Road"}}
 
-Bot showed summary, Customer: "I want 2 burgers instead"
-{"reply": "Got it! I've updated your order to 2 Burgers.", "intent": "modify_order", "item": {"name": "Burger", "quantity": 2, "size_or_weight": "Medium"}}
+Customer: "Takeaway" (after seeing summary)
+{"reply": "Please select your pickup location.", "intent": "ask_question", "fulfillment": {"fulfillment_type": "takeaway"}}
 
-Bot asked "Is that correct?", Customer: "Yes"
-{"reply": "Perfect! Let me show you the updated order summary.", "intent": "modify_order"}
-
-Bot showed summary, Customer: "Remove the coffee"
-{"reply": "Done! I've removed the Coffee from your order.", "intent": "modify_order"}
-
-Bot showed PRICE SUMMARY with "Reply YES to confirm", Customer: "Yes"
-{"reply": "Processing your order...", "intent": "confirm_order"}
-
---- CANCEL ORDER EXAMPLES ---
-
-Customer: "Cancel order 424bfda9"
-{"reply": "I'll cancel order #424bfda9 for you.", "intent": "cancel_existing_order", "order_id": "424bfda9"}
-
-Customer: "I want to cancel my order 12345678"
-{"reply": "Let me cancel order #12345678.", "intent": "cancel_existing_order", "order_id": "12345678"}
-
-Customer: "Cancel my order" OR "I want to cancel the order" OR "Cancel my last order" (NO order ID provided)
-{"reply": "I'd be happy to help you cancel your order. Could you please provide the order ID? It's the 8-character code you received when you placed the order (e.g., 424bfda9).", "intent": "cancel_existing_order"}
-
-Customer: "Remove the burger" OR "Cancel the coffee" (cancelling an ITEM, not the order)
-{"reply": "Done! I've removed the Burger from your order.", "intent": "modify_order", "item": {"name": "Burger", "quantity": 0}}
-
-Customer: "Never mind, I don't want to order anymore" (during ordering, wants to stop completely)
-{"reply": "No problem! I've cancelled your current order. Feel free to start a new one anytime!", "intent": "cancel"}
-
-⚠️ CANCEL INTENT RULES:
-- "cancel_existing_order" WITH order_id: Customer gives order ID → cancel that specific order
-- "cancel_existing_order" WITHOUT order_id: Customer wants to cancel but didn't give ID → ASK for order ID
-- "modify_order" with quantity=0: Customer wants to remove a specific ITEM from current cart
-- "cancel": Customer wants to abandon the current ordering session entirely (no items confirmed yet)
+Customer: "Yesterday 5pm" (past time)
+{"reply": "Sorry, that time has passed. Please choose a future time (e.g., today 6pm, tomorrow 10am).", "intent": "ask_question"}
 
 REMEMBER:
-- ONLY items from the menu can be ordered
-- NEVER make up items, prices, or sizes
-- Be polite but firm about menu limitations
-- When declining, always suggest available alternatives
-
-Current date: ${today}`;
+- CART MUST have items before checkout/fulfillment
+- After customer provides delivery address → use "confirm_order" to finalize
+- ONE fulfillment type per order (no mixing delivery+takeaway)
+- Time is optional - don't force customer to provide time
+- Reject past dates/times if provided
+- Keep replies short (1-2 sentences)`;
 }
 
 function buildPrompt(
@@ -241,6 +306,7 @@ function parseAIResponse(responseText: string): AIResponse {
       intent: parsed.intent,
       item: parsed.item,
       order_id: parsed.order_id,
+      fulfillment: parsed.fulfillment,  // CRITICAL: Include fulfillment data!
     };
   } catch (error) {
     logger.warn('Failed to parse AI response as JSON', { error, responseText });
@@ -252,7 +318,44 @@ function parseAIResponse(responseText: string): AIResponse {
   }
 }
 
-// Validate that item name exists in menu
+// Calculate Levenshtein distance for fuzzy matching
+function levenshteinDistance(str1: string, str2: string): number {
+  const m = str1.length;
+  const n = str2.length;
+  const dp: number[][] = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
+
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (str1[i - 1] === str2[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1];
+      } else {
+        dp[i][j] = 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+      }
+    }
+  }
+  return dp[m][n];
+}
+
+// Normalize item name - handle plurals, common variations
+function normalizeItemName(name: string): string {
+  let normalized = name.toLowerCase().trim();
+
+  // Remove common plurals (s, es, ies -> y)
+  if (normalized.endsWith('ies')) {
+    normalized = normalized.slice(0, -3) + 'y';
+  } else if (normalized.endsWith('es')) {
+    normalized = normalized.slice(0, -2);
+  } else if (normalized.endsWith('s') && !normalized.endsWith('ss')) {
+    normalized = normalized.slice(0, -1);
+  }
+
+  return normalized;
+}
+
+// Validate that item name exists in menu with fuzzy matching
 export function validateItemAgainstMenu(
   itemName: string,
   menuItems: MenuItem[]
@@ -261,23 +364,48 @@ export function validateItemAgainstMenu(
     return null;
   }
 
-  const normalizedInput = itemName.toLowerCase().trim();
+  const normalizedInput = normalizeItemName(itemName);
 
-  // Exact match first
+  // 1. Exact match first
   let found = menuItems.find(
     item => item.name.toLowerCase() === normalizedInput
   );
 
-  // Partial match
-  if (!found) {
-    found = menuItems.find(
-      item =>
-        item.name.toLowerCase().includes(normalizedInput) ||
-        normalizedInput.includes(item.name.toLowerCase())
-    );
+  if (found) return found;
+
+  // 2. Normalized match (handles plurals like "burgers" -> "burger")
+  found = menuItems.find(
+    item => normalizeItemName(item.name) === normalizedInput
+  );
+
+  if (found) return found;
+
+  // 3. Partial/substring match
+  found = menuItems.find(
+    item =>
+      item.name.toLowerCase().includes(normalizedInput) ||
+      normalizedInput.includes(item.name.toLowerCase())
+  );
+
+  if (found) return found;
+
+  // 4. Fuzzy match using Levenshtein distance
+  // Allow 2 character edits for short names, 3 for longer names
+  const maxDistance = normalizedInput.length <= 5 ? 2 : 3;
+  let bestMatch: MenuItem | null = null;
+  let bestDistance = Infinity;
+
+  for (const item of menuItems) {
+    const itemNormalized = normalizeItemName(item.name);
+    const distance = levenshteinDistance(normalizedInput, itemNormalized);
+
+    if (distance < bestDistance && distance <= maxDistance) {
+      bestDistance = distance;
+      bestMatch = item;
+    }
   }
 
-  return found || null;
+  return bestMatch;
 }
 
 // Validate size exists for item
@@ -293,6 +421,40 @@ export function validateSizeForItem(
   return menuItem.sizes.some(
     s => s.name.toLowerCase() === normalizedSize
   );
+}
+
+// Extract size from message if present (e.g., "Rainbow 1kg" -> { item: "Rainbow", size: "1kg" })
+export function extractSizeFromMessage(
+  message: string,
+  menuItem: MenuItem
+): { size: string | null; cleanedMessage: string } {
+  if (!menuItem.sizes || menuItem.sizes.length === 0) {
+    return { size: null, cleanedMessage: message };
+  }
+
+  const normalizedMessage = message.toLowerCase().trim();
+
+  // Check each size for the item
+  for (const sizeOption of menuItem.sizes) {
+    const sizeName = sizeOption.name.toLowerCase();
+
+    // Check for exact size match in message
+    // Patterns: "1kg", "1 kg", "500g", "500 g", "small", "medium", "large"
+    const sizePatterns = [
+      new RegExp(`\\b${sizeName}\\b`, 'i'),
+      new RegExp(`\\b${sizeName.replace(/(\d+)/, '$1\\s*')}\\b`, 'i'), // Allow space in "1 kg"
+    ];
+
+    for (const pattern of sizePatterns) {
+      if (pattern.test(normalizedMessage)) {
+        // Remove size from message to get clean item name
+        const cleanedMessage = message.replace(pattern, '').trim();
+        return { size: sizeOption.name, cleanedMessage };
+      }
+    }
+  }
+
+  return { size: null, cleanedMessage: message };
 }
 
 export async function processMessageWithAI(
@@ -311,30 +473,62 @@ export async function processMessageWithAI(
   const prompt = buildPrompt(currentMessage, conversationHistory, context);
 
   try {
-    const response = await axios.post(
-      `${GEMINI_API_URL}?key=${apiKey}`,
-      {
-        contents: [
-          {
-            parts: [{ text: prompt }],
-          },
-        ],
-        generationConfig: {
-          temperature: 0.3, // Lower temperature for more consistent responses
-          maxOutputTokens: 500,
-        },
-      },
-      {
-        headers: { 'Content-Type': 'application/json' },
-        timeout: 30000,
-      }
-    );
+    // const response = await axios.post(
+    //   `${GEMINI_API_URL}?key=${apiKey}`,
+    //   {
+    //     contents: [
+    //       {
+    //         parts: [{ text: prompt }],
+    //       },
+    //     ],
+    //     generationConfig: {
+    //       temperature: 0.3, // Lower temperature for more consistent responses
+    //       maxOutputTokens: 500,
+    //     },
+    //   },
+    //   {
+    //     headers: { 'Content-Type': 'application/json' },
+    //     timeout: 30000,
+    //   }
+    // );
 
-    const responseText =
-      response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    // const responseText =
+    // response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    const stream = await openrouter.chat.send({
+      model: "amazon/nova-2-lite-v1:free",
+      messages: [
+        {
+          role: "user",
+          content: prompt
+        }
+      ],
+      stream: true,
+      streamOptions: {
+        includeUsage: true
+      }
+    });
+
+    let response = "";
+
+    for await (const chunk of stream) {
+      const content = chunk.choices[0]?.delta?.content;
+      if (content) {
+        response += content;
+        process.stdout.write(content);
+      }
+      
+      // Usage information comes in the final chunk
+      if (chunk.usage) {
+        console.log("\nReasoning tokens:", chunk.usage.totalTokens);
+      }
+    }
+
+    const responseText = response;
 
     if (!responseText) {
-      logger.error('Empty response from Gemini', response.data);
+      // logger.error('Empty response from Gemini', response.data);
+      logger.error('Empty response from Gemini', response);
       throw new Error('Empty AI response');
     }
 
@@ -358,6 +552,15 @@ export async function processMessageWithAI(
         // Correct the item name to exact menu name
         aiResponse.item.name = validItem.name;
 
+        // If AI didn't extract size but item requires it, try extracting from original message
+        if (!aiResponse.item.size_or_weight && validItem.sizes && validItem.sizes.length > 0) {
+          const { size } = extractSizeFromMessage(currentMessage, validItem);
+          if (size) {
+            logger.info(`Extracted size from message: ${size}`);
+            aiResponse.item.size_or_weight = size;
+          }
+        }
+
         // Validate size if provided
         if (aiResponse.item.size_or_weight && !validateSizeForItem(aiResponse.item.size_or_weight, validItem)) {
           const availableSizes = validItem.sizes?.map(s => s.name).join(', ') || 'standard';
@@ -365,6 +568,26 @@ export async function processMessageWithAI(
             reply: `Sorry, we don't have that size for ${validItem.name}. Available sizes: ${availableSizes}. Which would you like?`,
             intent: 'ask_question',
             item: { ...aiResponse.item, size_or_weight: undefined },
+          };
+        }
+      }
+    }
+
+    // FALLBACK: If AI is asking for size but size was in the original message, convert to add_item
+    if (aiResponse.intent === 'ask_question' && aiResponse.item?.name && context.menuItems) {
+      const validItem = validateItemAgainstMenu(aiResponse.item.name, context.menuItems);
+      if (validItem && validItem.sizes && validItem.sizes.length > 0) {
+        const { size } = extractSizeFromMessage(currentMessage, validItem);
+        if (size) {
+          logger.info(`AI asked for size but it was in message. Converting to add_item with size: ${size}`);
+          aiResponse = {
+            reply: `Added ${validItem.name} (${size}) to your cart! Anything else?`,
+            intent: 'add_item',
+            item: {
+              name: validItem.name,
+              quantity: aiResponse.item.quantity || 1,
+              size_or_weight: size,
+            },
           };
         }
       }

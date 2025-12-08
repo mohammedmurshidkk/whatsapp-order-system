@@ -196,6 +196,34 @@ export function formatMenuForCustomer(
     return 'Our menu is being updated. Please check back soon!';
   }
 
+  // For large menus (50+ items), show only category overview
+  if (items.length > 50) {
+    let menuText = '📋 *Our Menu*\n\n';
+    menuText += 'We have a wide selection! Here are our categories:\n\n';
+
+    const categoryEmojis: Record<string, string> = {
+      'Cakes': '🎂',
+      'Hot Beverages': '☕',
+      'Cold Beverages': '🧊',
+      'Snacks': '🍔',
+      'Beverages': '🥤',
+      'Desserts': '🍰',
+      'default': '📌'
+    };
+
+    for (const category of categories) {
+      const emoji = categoryEmojis[category.name] || categoryEmojis['default'];
+      menuText += `${emoji} *${category.name}*\n`;
+      if (category.description) {
+        menuText += `   ${category.description}\n`;
+      }
+    }
+
+    menuText += '\n_Just tell me what you would like (e.g., "I want black forest cake") and I\'ll help you!_';
+    return menuText;
+  }
+
+  // For smaller menus, show full details
   let menuText = '📋 *Our Menu*\n\n';
 
   // Group items by category
@@ -215,6 +243,8 @@ export function formatMenuForCustomer(
     'Hot Beverages': '☕',
     'Cold Beverages': '🧊',
     'Snacks': '🍔',
+    'Beverages': '🥤',
+    'Desserts': '🍰',
     'default': '📌'
   };
 
@@ -229,6 +259,8 @@ export function formatMenuForCustomer(
         if (item.sizes && item.sizes.length > 0) {
           const prices = item.sizes.map(s => `₹${s.price}`).join('/');
           menuText += ` - ${prices}`;
+        } else if (item.price) {
+          menuText += ` - ₹${item.price}`;
         }
         menuText += '\n';
       }

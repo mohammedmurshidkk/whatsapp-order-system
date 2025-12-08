@@ -8,9 +8,6 @@ import {
 import { searchMenuItem, getBusinessById } from './menuService';
 import { logger } from '../utils/logger';
 
-// Default business ID (same as webhookController for now)
-const DEFAULT_BUSINESS_ID = 'c3150207-4bf9-4ce4-8478-2e6369c46749';
-
 // Helper to get price for an item based on size
 function getItemPrice(menuItem: MenuItem, sizeOrWeight?: string | null): number | null {
   // If item has sizes, find matching size price
@@ -36,7 +33,7 @@ function getItemPrice(menuItem: MenuItem, sizeOrWeight?: string | null): number 
 export async function saveOrderItem(
   sessionId: string,
   item: AIItemResponse,
-  businessId: string = DEFAULT_BUSINESS_ID
+  businessId: string
 ): Promise<SessionItem> {
   // Lookup menu item to get price
   let unitPrice: number | null = null;
@@ -180,7 +177,13 @@ export async function removeSessionItem(
   return true;
 }
 
-export async function generateOrderSummary(sessionId: string): Promise<string> {
+// Generate order summary - can optionally include CTA message
+export async function generateOrderSummary(
+  sessionId: string,
+  options: { includeCta?: boolean; ctaMessage?: string } = {}
+): Promise<string> {
+  const { includeCta = false, ctaMessage = 'Reply *YES* to confirm your order' } = options;
+
   const session = await getSessionWithItems(sessionId);
 
   if (!session || session.items.length === 0) {
@@ -217,6 +220,32 @@ export async function generateOrderSummary(sessionId: string): Promise<string> {
 
     summary += '\n';
 
+    // Show add-ons
+    if (item.addons && item.addons.length > 0) {
+      item.addons.forEach((addon) => {
+        const addonTotal = (addon.unit_price || 0) * addon.quantity;
+        grandTotal += addonTotal;
+
+        summary += `   + ${addon.addon_name}`;
+
+        if (addon.quantity > 1) {
+          summary += ` x${addon.quantity}`;
+        }
+
+        if (addon.unit_price !== null && addon.unit_price > 0) {
+          if (addon.quantity > 1) {
+            summary += ` - ₹${addon.unit_price} × ${addon.quantity} = ₹${addonTotal}`;
+          } else {
+            summary += ` - ₹${addon.unit_price}`;
+          }
+        } else {
+          summary += ' - FREE';
+        }
+
+        summary += '\n';
+      });
+    }
+
     if (item.custom_text) {
       summary += `   📝 "${item.custom_text}"\n`;
     }
@@ -234,8 +263,29 @@ export async function generateOrderSummary(sessionId: string): Promise<string> {
 
   summary += '━━━━━━━━━━━━━━━━━━\n';
   summary += `📦 Total Items: ${session.items.length}\n`;
-  summary += `💰 *Grand Total: ₹${grandTotal}*\n\n`;
-  summary += 'Reply *YES* to confirm your order';
+  summary += `💰 *Grand Total: ₹${grandTotal}*\n`;
+
+  // Add fulfillment info if available
+  if (session.fulfillment_type) {
+    summary += '\n';
+    if (session.fulfillment_type === 'delivery' && session.delivery_address) {
+      summary += `🚚 Delivery to: ${session.delivery_address}\n`;
+      if (session.delivery_time) {
+        const deliveryDate = new Date(session.delivery_time);
+        summary += `⏰ Time: ${deliveryDate.toLocaleString()}\n`;
+      }
+    } else if (session.fulfillment_type === 'takeaway' && session.pickup_outlet_id) {
+      summary += `📍 Pickup from outlet\n`;
+      if (session.pickup_time) {
+        const pickupDate = new Date(session.pickup_time);
+        summary += `⏰ Time: ${pickupDate.toLocaleString()}\n`;
+      }
+    }
+  }
+
+  if (includeCta && ctaMessage) {
+    summary += '\n' + ctaMessage;
+  }
 
   return summary;
 }
@@ -257,6 +307,19 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
     const lineTotal = (item.unit_price || 0) * item.quantity;
     totalAmount += lineTotal;
 
+    // Process add-ons
+    const addons = (item.addons || []).map((addon) => {
+      const addonTotal = (addon.unit_price || 0) * addon.quantity;
+      totalAmount += addonTotal;
+
+      return {
+        addon_name: addon.addon_name,
+        quantity: addon.quantity,
+        unit_price: addon.unit_price || undefined,
+        line_total: addonTotal || undefined,
+      };
+    });
+
     return {
       name: item.item_name,
       quantity: item.quantity,
@@ -266,6 +329,7 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
       custom_text: item.custom_text || undefined,
       delivery_date: item.delivery_date || undefined,
       notes: item.notes || undefined,
+      addons: addons.length > 0 ? addons : undefined,
     };
   });
 
@@ -292,6 +356,14 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
       status: 'confirmed',
       created_at: new Date().toISOString(),
       delivery_date: deliveryDate,
+      fulfillment_type: session.fulfillment_type || null,
+      delivery_address: session.delivery_address || null,
+      delivery_latitude: session.delivery_latitude || null,
+      delivery_longitude: session.delivery_longitude || null,
+      delivery_time: session.delivery_time || null,
+      pickup_outlet_id: session.pickup_outlet_id || null,
+      pickup_time: session.pickup_time || null,
+      fulfillment_notes: session.fulfillment_notes || null,
     })
     .select()
     .single();
@@ -315,19 +387,57 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
 export async function sendOrderNotification(order: Order): Promise<void> {
   const notificationMethod = process.env.BUSINESS_NOTIFICATION_METHOD || 'console';
 
+  // Get outlet name if pickup
+  let outletInfo = '';
+  if (order.fulfillment_type === 'takeaway' && order.pickup_outlet_id) {
+    const { data: outlet } = await supabase
+      .from('business_outlets')
+      .select('outlet_name')
+      .eq('id', order.pickup_outlet_id)
+      .single();
+
+    if (outlet) {
+      outletInfo = ` from ${outlet.outlet_name}`;
+    }
+  }
+
   const notificationText = `
 🔔 NEW ORDER RECEIVED
 ━━━━━━━━━━━━━━━━━━━━
 Order ID: ${order.id.substring(0, 8)}
 Customer ID: ${order.customer_id.substring(0, 8)}
 Status: ${order.status}
-Delivery Date: ${order.delivery_date || 'Not specified'}
+
+${order.fulfillment_type === 'delivery' ? '🚚 DELIVERY' : order.fulfillment_type === 'takeaway' ? '📍 TAKEAWAY' : ''}
+${order.delivery_address ? `Address: ${order.delivery_address}` : ''}
+${order.pickup_outlet_id ? `Pickup${outletInfo}` : ''}
+${order.delivery_time ? `Time: ${new Date(order.delivery_time).toLocaleString()}` : ''}
+${order.pickup_time ? `Pickup Time: ${new Date(order.pickup_time).toLocaleString()}` : ''}
+${order.fulfillment_notes ? `Notes: ${order.fulfillment_notes}` : ''}
 
 Items:
 ${order.items
   .map(
-    (item, i) =>
-      `${i + 1}. ${item.name}${item.size_or_weight ? ` (${item.size_or_weight})` : ''} x${item.quantity} - ₹${item.line_total || 0}`
+    (item, i) => {
+      let itemText = `${i + 1}. ${item.name}${item.size_or_weight ? ` (${item.size_or_weight})` : ''} x${item.quantity} - ₹${item.line_total || 0}`;
+
+      // Add add-ons if any
+      if (item.addons && item.addons.length > 0) {
+        item.addons.forEach((addon) => {
+          itemText += `\n   + ${addon.addon_name}`;
+          if (addon.quantity > 1) {
+            itemText += ` x${addon.quantity}`;
+          }
+          if (addon.unit_price) {
+            itemText += ` - ₹${addon.line_total || 0}`;
+          } else {
+            itemText += ' - FREE';
+          }
+        });
+      }
+
+      return itemText;
+    }
   )
   .join('\n')}
 

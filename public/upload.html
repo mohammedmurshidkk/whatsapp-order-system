@@ -68,19 +68,23 @@
   </style>
 </head>
 <body>
-  <h1>📋 Menu CSV Upload</h1>
+  <h1>📋 Menu & Add-ons Upload</h1>
 
   <div class="template-links">
-    <strong>Download Templates:</strong><br><br>
-    <a href="/api/menu/template" download>📄 Blank Template</a>
-    <a href="/api/menu/template/sample" download>📄 Sample Template</a>
+    <strong>Download Menu Templates:</strong><br><br>
+    <a href="/api/menu/template" download>📄 Menu Blank Template</a>
+    <a href="/api/menu/template/sample" download>📄 Menu Sample Template</a>
+    <br><br>
+    <strong>Download Add-ons Template:</strong><br><br>
+    <a href="/api/menu/addons/template" download>📄 Add-ons Template</a>
   </div>
 
+  <h2>📋 Menu Upload</h2>
   <form id="uploadForm">
     <div class="form-group">
       <label for="businessId">Business ID:</label>
       <input type="text" id="businessId" name="businessId"
-             value="c3150207-4bf9-4ce4-8478-2e6369c46749" required>
+             placeholder="Enter your business ID" required>
     </div>
 
     <div class="form-group">
@@ -97,6 +101,31 @@
   </form>
 
   <div id="result"></div>
+
+  <hr style="margin: 40px 0;">
+
+  <h2>🎁 Add-ons Upload</h2>
+  <form id="addonsUploadForm">
+    <div class="form-group">
+      <label for="addonsBusinessId">Business ID:</label>
+      <input type="text" id="addonsBusinessId" name="addonsBusinessId"
+             placeholder="Enter your business ID" required>
+    </div>
+
+    <div class="form-group">
+      <label for="addonsCsvFile">Select Add-ons CSV File:</label>
+      <input type="file" id="addonsCsvFile" name="addons" accept=".csv" required>
+    </div>
+
+    <div class="form-group checkbox-group">
+      <input type="checkbox" id="addonsReplace" name="addonsReplace">
+      <label for="addonsReplace" style="margin-bottom: 0;">Replace existing add-ons (delete all current add-ons)</label>
+    </div>
+
+    <button type="submit">Upload Add-ons</button>
+  </form>
+
+  <div id="addonsResult"></div>
 
   <script>
     document.getElementById('uploadForm').addEventListener('submit', async (e) => {
@@ -123,7 +152,7 @@
       resultDiv.innerHTML = 'Uploading...';
 
       try {
-        const response = await fetch(`/api/menu/${businessId}/import`, {
+        const response = await fetch(`/api/menu/business/${businessId}/import`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -143,6 +172,66 @@
             Categories created: ${data.categoriesCreated}<br>
             Items created: ${data.itemsCreated}<br>
             Items updated: ${data.itemsUpdated}<br>
+            ${data.errors && data.errors.length > 0 ? '<br>Errors:<br>' + data.errors.join('<br>') : ''}
+          `;
+        } else {
+          resultDiv.className = 'error';
+          resultDiv.innerHTML = `
+            <strong>❌ Error:</strong> ${data.error}<br>
+            ${data.details ? '<pre>' + JSON.stringify(data.details, null, 2) + '</pre>' : ''}
+          `;
+        }
+      } catch (error) {
+        resultDiv.className = 'error';
+        resultDiv.innerHTML = `<strong>❌ Error:</strong> ${error.message}`;
+      }
+    });
+
+    // Add-ons upload handler
+    document.getElementById('addonsUploadForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+
+      const businessId = document.getElementById('addonsBusinessId').value;
+      const fileInput = document.getElementById('addonsCsvFile');
+      const replace = document.getElementById('addonsReplace').checked;
+      const resultDiv = document.getElementById('addonsResult');
+
+      if (!fileInput.files[0]) {
+        resultDiv.className = 'error';
+        resultDiv.style.display = 'block';
+        resultDiv.innerHTML = 'Please select a CSV file';
+        return;
+      }
+
+      // Read file content
+      const file = fileInput.files[0];
+      const csvContent = await file.text();
+
+      resultDiv.style.display = 'block';
+      resultDiv.className = '';
+      resultDiv.innerHTML = 'Uploading...';
+
+      try {
+        const response = await fetch(`/api/menu/business/${businessId}/addons/import`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            csv: csvContent,
+            replace: replace
+          })
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+          resultDiv.className = 'success';
+          resultDiv.innerHTML = `
+            <strong>✅ ${data.message}</strong><br><br>
+            Add-ons created: ${data.addonsCreated}<br>
+            Add-ons updated: ${data.addonsUpdated}<br>
+            Links created: ${data.linksCreated}<br>
             ${data.errors && data.errors.length > 0 ? '<br>Errors:<br>' + data.errors.join('<br>') : ''}
           `;
         } else {

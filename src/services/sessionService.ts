@@ -3,7 +3,7 @@ import { Session, SessionWithItems, SessionItem } from '../types';
 import { SESSION_TIMEOUT_HOURS } from '../config/constants';
 import { logger } from '../utils/logger';
 
-export async function findOrCreateSession(customerId: string): Promise<Session> {
+export async function findOrCreateSession(customerId: string, businessId: string): Promise<Session> {
   const timeoutThreshold = new Date();
   timeoutThreshold.setHours(timeoutThreshold.getHours() - SESSION_TIMEOUT_HOURS);
 
@@ -29,6 +29,7 @@ export async function findOrCreateSession(customerId: string): Promise<Session> 
     .from('sessions')
     .insert({
       customer_id: customerId,
+      business_id: businessId,
       status: 'active',
       created_at: now,
       last_message_at: now,
@@ -42,7 +43,7 @@ export async function findOrCreateSession(customerId: string): Promise<Session> 
     throw new Error('Failed to create session');
   }
 
-  logger.info(`New session created: ${newSession.id}`);
+  logger.info(`New session created: ${newSession.id} for business ${businessId}`);
   return newSession as Session;
 }
 
@@ -76,16 +77,32 @@ export async function getSessionWithItems(
     .from('session_items')
     .select('*')
     .eq('session_id', sessionId)
-    .order('created_at', { ascending: true });
+    .order('created_at', { ascending: true});
 
   if (itemsError) {
     logger.error('Failed to fetch session items', itemsError);
     throw new Error('Failed to fetch session items');
   }
 
+  // Fetch add-ons for each item
+  const itemsWithAddons = await Promise.all(
+    (items || []).map(async (item) => {
+      const { data: addons } = await supabase
+        .from('session_item_addons')
+        .select('*')
+        .eq('session_item_id', item.id)
+        .order('created_at', { ascending: true });
+
+      return {
+        ...item,
+        addons: addons || [],
+      };
+    })
+  );
+
   return {
     ...session,
-    items: (items || []) as SessionItem[],
+    items: itemsWithAddons as SessionItem[],
   } as SessionWithItems;
 }
 

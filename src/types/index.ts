@@ -9,6 +9,69 @@ export interface Business {
   currency: string;
   is_active: boolean;
   created_at: string;
+  supports_delivery?: boolean;
+  supports_takeaway?: boolean;
+  delivery_fee?: number;
+  free_delivery_above?: number;
+  delivery_radius_km?: number;
+  minimum_wait_minutes?: number; // Minimum wait time for orders (no ASAP)
+  // Custom AI behavior
+  custom_ai_prompt?: string | null; // Business-specific AI instructions
+  critical_message?: string | null; // Message to send instead of AI (emergencies)
+  critical_message_enabled?: boolean; // When true, send critical_message instead of AI
+  updated_at?: string;
+}
+
+// Outlet types
+export interface BusinessOutlet {
+  id: string;
+  business_id: string;
+  outlet_name: string;
+  address: string;
+  phone: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  is_active: boolean;
+  display_order: number;
+  created_at: string;
+  updated_at?: string;
+}
+
+// Fulfillment types (one order = one type, no mixing)
+export type FulfillmentType = 'delivery' | 'takeaway';
+
+// Add-on types
+export interface MenuAddon {
+  id: string;
+  business_id: string;
+  name: string;
+  category: string; // 'candle', 'packing', 'topping', 'extra', etc.
+  description: string | null;
+  price: number | null; // NULL = free
+  is_available: boolean;
+  display_order: number;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface CategoryAddon {
+  id: string;
+  menu_category_id: string;
+  addon_id: string;
+  is_auto_suggested: boolean;
+  suggestion_priority: number;
+  created_at: string;
+  addon?: MenuAddon; // Populated via join
+}
+
+export interface SessionItemAddon {
+  id: string;
+  session_item_id: string;
+  addon_id: string;
+  addon_name: string;
+  quantity: number;
+  unit_price: number | null;
+  created_at: string;
 }
 
 // Menu types
@@ -67,6 +130,14 @@ export interface Session {
   ai_paused: boolean;  // True when human has taken over
   paused_at: string | null;
   paused_by: string | null;  // Who paused (business owner name/id)
+  fulfillment_type?: FulfillmentType | null;
+  delivery_address?: string | null;
+  delivery_latitude?: number | null;
+  delivery_longitude?: number | null;
+  delivery_time?: string | null;
+  pickup_outlet_id?: string | null;
+  pickup_time?: string | null;
+  fulfillment_notes?: string | null;
 }
 
 export interface SessionWithItems extends Session {
@@ -86,6 +157,8 @@ export interface SessionItem {
   notes: string | null;
   ai_raw: Record<string, unknown> | null;
   created_at: string;
+  item_fulfillment_type?: 'delivery' | 'takeaway' | null; // For mixed orders
+  addons?: SessionItemAddon[]; // Add-ons for this item
 }
 
 // Message types
@@ -113,6 +186,15 @@ export interface Order {
   status: OrderStatus;
   created_at: string;
   delivery_date: string | null;
+  fulfillment_type?: FulfillmentType | null;
+  delivery_address?: string | null;
+  delivery_latitude?: number | null;
+  delivery_longitude?: number | null;
+  delivery_time?: string | null;
+  pickup_outlet_id?: string | null;
+  pickup_time?: string | null;
+  fulfillment_notes?: string | null;
+  updated_at?: string;
 }
 
 export interface OrderItemData {
@@ -124,6 +206,12 @@ export interface OrderItemData {
   custom_text?: string;
   delivery_date?: string;
   notes?: string;
+  addons?: Array<{
+    addon_name: string;
+    quantity: number;
+    unit_price?: number;
+    line_total?: number;
+  }>; // NEW: Add-ons for this item
 }
 
 // AI types
@@ -132,13 +220,27 @@ export type AIIntent =
   | 'modify_order'
   | 'ask_question'
   | 'ready_for_checkout'
-  | 'confirm_order'
+  | 'confirm_items'         // NEW: Customer confirms items in cart (step 1 of 2-step checkout)
+  | 'ask_fulfillment_type'  // Ask delivery or takeaway
+  | 'collect_delivery_info' // Collecting delivery address/time
+  | 'collect_pickup_info'   // Collecting pickup outlet/time
+  | 'suggest_addons'        // Suggest add-ons for item
+  | 'add_addon'             // Customer wants to add an add-on
+  | 'decline_addon'         // Customer declines add-on
+  | 'continue_ordering'     // Continue after add-ons (ask for more items)
+  | 'confirm_order'         // Final confirmation (step 2 of 2-step checkout)
   | 'cancel'
   | 'cancel_existing_order'
   | 'smalltalk'
   | 'show_menu'
   | 'conversation_ended'
   | 'item_not_available';
+
+export interface AIAddonResponse {
+  addon_id?: string;
+  addon_name: string;
+  quantity?: number;
+}
 
 export interface AIItemResponse {
   name: string;
@@ -147,6 +249,16 @@ export interface AIItemResponse {
   custom_text?: string;
   delivery_date?: string;
   notes?: string;
+  addons?: AIAddonResponse[]; // NEW: Add-ons for this item
+}
+
+export interface AIFulfillmentResponse {
+  fulfillment_type?: 'delivery' | 'takeaway';
+  delivery_address?: string;
+  delivery_time?: string;
+  pickup_outlet_id?: string;
+  pickup_time?: string;
+  fulfillment_notes?: string;
 }
 
 export interface AIResponse {
@@ -154,6 +266,9 @@ export interface AIResponse {
   intent: AIIntent;
   item?: AIItemResponse;
   order_id?: string; // For cancel_existing_order intent
+  fulfillment?: AIFulfillmentResponse; // For fulfillment info
+  addon?: AIAddonResponse; // NEW: For add-on responses
+  suggested_addons?: string[]; // NEW: List of addon IDs to suggest
 }
 
 // WhatsApp webhook types

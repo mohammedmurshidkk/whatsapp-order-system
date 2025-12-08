@@ -1,0 +1,44 @@
+import { Router } from 'express';
+import multer from 'multer';
+import {
+  listMenuItems,
+  getMenuItem,
+  createMenuItem,
+  updateMenuItem,
+  deleteMenuItem,
+  toggleAvailability,
+  uploadItemImage,
+  updateItemPrice,
+} from '../controllers/adminMenuController';
+import { authMiddleware } from '../middleware/auth';
+
+const router = Router();
+
+// Configure multer for image uploads
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB max
+  },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed'));
+    }
+  },
+});
+
+// All routes require authentication
+router.use(authMiddleware);
+
+router.get('/', listMenuItems);
+router.get('/:itemId', getMenuItem);
+router.post('/', createMenuItem);
+router.put('/:itemId', updateMenuItem);
+router.delete('/:itemId', deleteMenuItem);
+router.patch('/:itemId/availability', toggleAvailability);
+router.patch('/:itemId/price', updateItemPrice);  // Convenience endpoint for price updates
+router.post('/:itemId/image', upload.single('image'), uploadItemImage);
+
+export default router;

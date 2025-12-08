@@ -2,16 +2,17 @@ import { supabase } from '../config/database';
 import { Customer } from '../types';
 import { logger } from '../utils/logger';
 
-export async function findOrCreateCustomer(phone: string): Promise<Customer> {
-  // Try to find existing customer
+export async function findOrCreateCustomer(phone: string, businessId: string): Promise<Customer> {
+  // Try to find existing customer for this business
   const { data: existingCustomer, error: findError } = await supabase
     .from('customers')
     .select('*')
     .eq('phone', phone)
+    .eq('business_id', businessId)
     .single();
 
   if (existingCustomer && !findError) {
-    logger.debug(`Customer found: ${existingCustomer.id}`);
+    logger.debug(`Customer found: ${existingCustomer.id} for business ${businessId}`);
     return existingCustomer as Customer;
   }
 
@@ -20,6 +21,7 @@ export async function findOrCreateCustomer(phone: string): Promise<Customer> {
     .from('customers')
     .insert({
       phone,
+      business_id: businessId,
       created_at: new Date().toISOString(),
     })
     .select()
@@ -30,7 +32,7 @@ export async function findOrCreateCustomer(phone: string): Promise<Customer> {
     throw new Error('Failed to create customer');
   }
 
-  logger.info(`New customer created: ${newCustomer.id}`);
+  logger.info(`New customer created: ${newCustomer.id} for business ${businessId}`);
   return newCustomer as Customer;
 }
 
