@@ -268,3 +268,24 @@ export async function getSessionByCustomerPhone(
 
   return data as Session;
 }
+
+/**
+ * Update session item custom text (e.g., cake message)
+ */
+export async function updateSessionItemCustomText(
+  itemId: string,
+  customText: string
+): Promise<boolean> {
+  const { error } = await supabase
+    .from('session_items')
+    .update({ custom_text: customText })
+    .eq('id', itemId);
+
+  if (error) {
+    logger.error('Failed to update session item custom text', error);
+    return false;
+  }
+
+  logger.info(`Custom text updated for item ${itemId}: "${customText}"`);
+  return true;
+}

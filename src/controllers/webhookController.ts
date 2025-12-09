@@ -1,11 +1,12 @@
 import { Request, Response } from 'express';
-import { WhatsAppWebhookBody, TestMessageRequest, SessionItem } from '../types';
+import { WhatsAppWebhookBody, TestMessageRequest, SessionItem, MenuAddon } from '../types';
 import { findOrCreateCustomer } from '../services/customerService';
 import {
   findOrCreateSession,
   updateSessionActivity,
   getSessionWithItems,
   isAIPaused,
+  updateSessionItemCustomText,
 } from '../services/sessionService';
 import {
   getRecentMessages,
@@ -20,6 +21,7 @@ import {
   updateSessionItemQuantity,
   removeSessionItem,
   cancelOrderById,
+  getOrderStatus,
 } from '../services/orderService';
 import {
   getBusinessById,
@@ -38,6 +40,8 @@ import {
   updateSessionDeliveryInfo,
   updateSessionPickupInfo,
   parseDeliveryTime,
+  extractAddressAndTime,
+  formatDeliveryTime,
 } from '../services/fulfillmentService';
 import {
   getAutoSuggestedAddons,
@@ -49,7 +53,11 @@ import {
   sendWhatsAppMessage,
   verifyWebhookChallenge,
   verifyWebhookSignature,
+  sendReplyButtons,
+  sendInteractiveListMessage,
+  sendLocationRequest,
 } from '../services/whatsappService';
+import { notifyBusinessAdmin } from '../services/notificationService';
 import {
   isValidPhoneNumber,
   sanitizePhoneNumber,
@@ -60,6 +68,12 @@ import { logger } from '../utils/logger';
 
 // Track last added item per session for add-on attachment
 const lastAddedItemMap = new Map<string, string>(); // sessionId -> itemId
+
+// Track pending custom text questions per session
+const pendingCustomTextMap = new Map<string, { itemId: string; prompt: string }>(); // sessionId -> { itemId, prompt }
+
+// Track pending addon selections per session
+const pendingAddonSelectionMap = new Map<string, { itemId: string; addons: MenuAddon[] }>(); // sessionId -> { itemId, addons }
 
 // Format session items as strings for AI context
 function formatSessionItemsForAI(items: SessionItem[]): string[] {
@@ -111,6 +125,9 @@ async function processMessage(
   const business = await getBusinessById(businessId);
   logger.info(`Business: ${business?.name || 'NOT FOUND'} (ID: ${businessId})`);
 
+  // Get business timezone for date/time parsing and display
+  const businessTimezone = business?.timezone;
+
   // CHECK CRITICAL MESSAGE - If enabled, bypass AI and send critical message
   if (business?.critical_message_enabled && business?.critical_message) {
     logger.info(`⚠️ Critical message enabled for ${business.name} - bypassing AI`);
@@ -125,6 +142,158 @@ async function processMessage(
 
   // Update session activity
   await updateSessionActivity(session.id);
+
+  // Check for pending custom text question (e.g., "What to write on cake?")
+  const pendingCustomText = pendingCustomTextMap.get(session.id);
+  if (pendingCustomText) {
+    const normalizedInput = messageText.toLowerCase().trim();
+
+    // Check if user is trying to skip custom text or order something else
+    const wantsToSkip = ['no', 'skip', 'none', 'nothing', 'no thanks', 'nope'].some(s => normalizedInput === s);
+    const looksLikeNewOrder = normalizedInput.match(/\b(want|order|give|need|get|add)\b/i) &&
+      !normalizedInput.match(/\b(write|message|text)\b/i); // "add candle" but not "add message"
+
+    if (wantsToSkip) {
+      logger.info(`Customer skipped custom text for item ${pendingCustomText.itemId}`);
+      pendingCustomTextMap.delete(session.id);
+      await saveIncomingMessage(session.id, messageText);
+
+      // Check if there are pending addons to ask about (stored when custom text was first asked)
+      const pendingAddonsAfterSkip = pendingAddonSelectionMap.get(session.id);
+      if (pendingAddonsAfterSkip && pendingAddonsAfterSkip.itemId === pendingCustomText.itemId) {
+        // Ask about addons now
+        const addonsMessage = formatAddonsForCustomer(pendingAddonsAfterSkip.addons);
+        const skipWithAddons = `No problem!\n\n${addonsMessage}`;
+        await saveOutgoingMessage(session.id, skipWithAddons);
+        return skipWithAddons;
+      }
+
+      const skipReply = "No problem! Anything else you'd like to order?";
+      await saveOutgoingMessage(session.id, skipReply);
+      return skipReply;
+    }
+
+    if (looksLikeNewOrder) {
+      // User wants to order something else, clear pending and continue to AI
+      logger.info(`Input "${messageText}" looks like a new order, clearing pending custom text`);
+      pendingCustomTextMap.delete(session.id);
+      // Fall through to AI processing
+    } else {
+      // Customer is responding to a custom text question
+      // Clean up common prefixes like "write", "message:", etc.
+      let cleanedText = messageText;
+      cleanedText = cleanedText.replace(/^(write|message|text|cake message|on cake|write on cake)[:\s]*/i, '').trim();
+      // Remove surrounding quotes if present
+      cleanedText = cleanedText.replace(/^["'](.*)["']$/, '$1').trim();
+
+      logger.info(`Saving custom text response for item ${pendingCustomText.itemId}: "${cleanedText}"`);
+      await updateSessionItemCustomText(pendingCustomText.itemId, cleanedText);
+      pendingCustomTextMap.delete(session.id);
+
+      // Save incoming message
+      await saveIncomingMessage(session.id, messageText);
+
+      // Check if there are pending addons to ask about (stored when custom text was first asked)
+      const pendingAddonsAfterText = pendingAddonSelectionMap.get(session.id);
+      if (pendingAddonsAfterText && pendingAddonsAfterText.itemId === pendingCustomText.itemId) {
+        // Ask about addons now
+        const addonsMessage = formatAddonsForCustomer(pendingAddonsAfterText.addons);
+        const confirmWithAddons = `Got it! "${cleanedText}" will be written on your cake.\n\n${addonsMessage}`;
+        await saveOutgoingMessage(session.id, confirmWithAddons);
+        return confirmWithAddons;
+      }
+
+      // No addons to ask about
+      const confirmReply = `Got it! "${cleanedText}" will be added to your cake. Anything else you'd like to order?`;
+      await saveOutgoingMessage(session.id, confirmReply);
+      return confirmReply;
+    }
+  }
+
+  // Check for pending addon selection (e.g., user replied "1" or "candle" after addon suggestion)
+  const pendingAddon = pendingAddonSelectionMap.get(session.id);
+  if (pendingAddon) {
+    const normalizedInput = messageText.toLowerCase().trim();
+
+    // Check if user wants to skip addons
+    if (['no', 'no thanks', 'skip', 'none', 'nope', 'nothing'].some(s => normalizedInput === s || normalizedInput.startsWith(s + ' '))) {
+      logger.info(`Customer declined addons for item ${pendingAddon.itemId}`);
+      pendingAddonSelectionMap.delete(session.id);
+
+      await saveIncomingMessage(session.id, messageText);
+      const skipReply = "No problem! Anything else you'd like to order?";
+      await saveOutgoingMessage(session.id, skipReply);
+      return skipReply;
+    }
+
+    // Check if user wants to write custom text (e.g., "write Happy Birthday", "message on cake")
+    const wantsCustomText = normalizedInput.match(/\b(write|message|text|cake message)\b/i);
+    if (wantsCustomText) {
+      logger.info(`Customer wants to add custom text while in addon selection: "${messageText}"`);
+      // Extract the custom text if provided inline
+      let customTextContent = messageText;
+      customTextContent = customTextContent.replace(/^(write|message|text|cake message|on cake|write on cake)[:\s]*/i, '').trim();
+      customTextContent = customTextContent.replace(/^["'](.*)["']$/, '$1').trim();
+
+      if (customTextContent && customTextContent.length > 2) {
+        // Save custom text directly
+        await updateSessionItemCustomText(pendingAddon.itemId, customTextContent);
+        logger.info(`Custom text saved during addon selection: "${customTextContent}"`);
+        // Keep addon selection pending - user might still want addons
+        await saveIncomingMessage(session.id, messageText);
+        const addonNames = pendingAddon.addons.map((a, i) => `${i + 1}. ${a.name}`).join('\n');
+        const customTextReply = `Got it! "${customTextContent}" will be written on your cake.\n\nWould you also like any add-ons?\n${addonNames}\n\nOr say "no thanks" to skip.`;
+        await saveOutgoingMessage(session.id, customTextReply);
+        return customTextReply;
+      } else {
+        // Ask for the custom text
+        await saveIncomingMessage(session.id, messageText);
+        const askTextReply = "Sure! What would you like written on the cake?";
+        await saveOutgoingMessage(session.id, askTextReply);
+        // Set pending custom text for next message
+        pendingCustomTextMap.set(session.id, {
+          itemId: pendingAddon.itemId,
+          prompt: "What would you like written on the cake?",
+        });
+        return askTextReply;
+      }
+    }
+
+    // Try to find addon by number or name
+    const selectedAddon = findAddonByCustomerInput(messageText, pendingAddon.addons);
+
+    if (selectedAddon) {
+      // Add the addon to the item
+      await addAddonToSessionItem(pendingAddon.itemId, selectedAddon.id, 1);
+      logger.info(`Addon added: ${selectedAddon.name} to item ${pendingAddon.itemId}`);
+      pendingAddonSelectionMap.delete(session.id);
+
+      await saveIncomingMessage(session.id, messageText);
+      const addonReply = `Added ${selectedAddon.name}${selectedAddon.price ? ` (₹${selectedAddon.price})` : ' (FREE)'}! Would you like anything else?`;
+      await saveOutgoingMessage(session.id, addonReply);
+      return addonReply;
+    }
+
+    // If input doesn't match any addon, check if user wants to order something else
+    // Don't clear immediately - give them another chance
+    const looksLikeNewOrder = normalizedInput.match(/\b(want|order|give|need|get)\b/i) ||
+      normalizedInput.match(/\b(cake|coffee|burger|tea|juice)\b/i);
+
+    if (looksLikeNewOrder) {
+      // User is ordering something new, clear addon pending and continue to AI
+      logger.info(`Input "${messageText}" looks like a new order, continuing to AI`);
+      pendingAddonSelectionMap.delete(session.id);
+    } else {
+      // Give hint about addon selection
+      logger.info(`Input "${messageText}" didn't match addons, giving hint`);
+      await saveIncomingMessage(session.id, messageText);
+
+      const addonNames = pendingAddon.addons.map((a, i) => `${i + 1}. ${a.name}`).join('\n');
+      const hintReply = `I didn't catch that. Please reply with:\n${addonNames}\n\nOr say "no thanks" to skip add-ons.\n\n💡 _To add a cake message, say "write Happy Birthday" or similar._`;
+      await saveOutgoingMessage(session.id, hintReply);
+      return hintReply;
+    }
+  }
 
   // Check if AI is paused (human takeover mode)
   const aiPaused = await isAIPaused(session.id);
@@ -223,26 +392,59 @@ async function processMessage(
             // Store last added item ID for add-on attachment
             lastAddedItemMap.set(session.id, savedItem.id);
 
-            // Check for auto-suggested add-ons
+            // Check for custom text prompt OR add-ons (ask separately, custom text first)
             if (menuItems && menuItems.length > 0) {
               const addedMenuItem = menuItems.find(
                 mi => mi.name.toLowerCase() === aiResponse.item!.name.toLowerCase()
               );
 
               if (addedMenuItem && addedMenuItem.category_id) {
-                const suggestedAddons = await getAutoSuggestedAddons(addedMenuItem.category_id);
+                // Check for custom text prompt first (e.g., "What to write on cake?")
+                let hasCustomTextPrompt = false;
+                if (menuCategories && menuCategories.length > 0) {
+                  const category = menuCategories.find(c => c.id === addedMenuItem.category_id);
+                  if (category?.custom_text_prompt) {
+                    hasCustomTextPrompt = true;
+                    logger.info(`Category has custom_text_prompt: "${category.custom_text_prompt}"`);
+                    // Store pending custom text question for next message
+                    pendingCustomTextMap.set(session.id, {
+                      itemId: savedItem.id,
+                      prompt: category.custom_text_prompt,
+                    });
+                    // Also store addons for AFTER custom text is collected
+                    const suggestedAddons = await getAutoSuggestedAddons(addedMenuItem.category_id);
+                    if (suggestedAddons.length > 0) {
+                      pendingAddonSelectionMap.set(session.id, {
+                        itemId: savedItem.id,
+                        addons: suggestedAddons,
+                      });
+                    }
+                    // Only ask custom text question now, addons will be asked after
+                    replyMessage = aiResponse.reply + '\n\n' + category.custom_text_prompt;
+                  }
+                }
 
-                if (suggestedAddons.length > 0) {
-                  logger.info(`${suggestedAddons.length} add-ons available for ${addedMenuItem.name}`);
-                  // Format and append to reply
-                  const addonsMessage = formatAddonsForCustomer(suggestedAddons);
-                  replyMessage = aiResponse.reply + '\n\n' + addonsMessage;
+                // If no custom text prompt, check for add-ons directly
+                if (!hasCustomTextPrompt) {
+                  const suggestedAddons = await getAutoSuggestedAddons(addedMenuItem.category_id);
+                  if (suggestedAddons.length > 0) {
+                    logger.info(`${suggestedAddons.length} add-ons available for ${addedMenuItem.name}`);
+                    const addonsMessage = formatAddonsForCustomer(suggestedAddons);
+                    replyMessage = aiResponse.reply + '\n\n' + addonsMessage;
+
+                    // Store pending addon selection for next message
+                    pendingAddonSelectionMap.set(session.id, {
+                      itemId: savedItem.id,
+                      addons: suggestedAddons,
+                    });
+                  }
                 }
               }
             }
           } catch (saveError) {
             logger.error(`❌ Failed to save item to DB: ${aiResponse.item.name}`, saveError);
-            replyMessage = "Sorry, I couldn't add that item. Please try again.";
+            const supportPhone = business?.customer_support_phone;
+            replyMessage = `We couldn't add that item to your cart. Please try again.${supportPhone ? `\n\n📞 Need help? Contact: ${supportPhone}` : ''}`;
           }
         }
       } else {
@@ -283,7 +485,8 @@ async function processMessage(
       // Always show updated summary after modification
       const modifiedSummary = await generateOrderSummary(session.id, {
         includeCta: true,
-        ctaMessage: 'Reply *YES* to confirm these items.'
+        ctaMessage: 'Reply *YES* to confirm these items.',
+        timezone: businessTimezone
       });
       replyMessage = aiResponse.reply + '\n\n' + modifiedSummary;
       break;
@@ -301,7 +504,7 @@ async function processMessage(
 
         if (!lastItemId) {
           logger.warn('No last item found for add-on attachment');
-          replyMessage = "Sorry, I couldn't find the item to add this to. Please try ordering again.";
+          replyMessage = "I couldn't find the item to attach this add-on to. Please add an item first, then we can add extras to it.";
           break;
         }
 
@@ -337,7 +540,7 @@ async function processMessage(
                 }
               } else {
                 logger.warn(`Add-on not found: ${aiResponse.addon.addon_name}`);
-                replyMessage = "Sorry, I couldn't find that add-on. Anything else you'd like to order?";
+                replyMessage = "That add-on isn't available. Would you like something else?";
               }
             }
           }
@@ -355,6 +558,21 @@ async function processMessage(
       // Ask for more items after add-ons handled
       logger.info('Continuing with ordering');
       // AI's reply should ask "Anything else?"
+      break;
+
+    case 'save_custom_text':
+      // Save custom text response (e.g., cake message)
+      if (aiResponse.customText) {
+        const lastItemId = lastAddedItemMap.get(session.id);
+        if (lastItemId) {
+          await updateSessionItemCustomText(lastItemId, aiResponse.customText);
+          logger.info(`Custom text saved: "${aiResponse.customText}" for item ${lastItemId}`);
+          // Clear pending custom text if exists
+          pendingCustomTextMap.delete(session.id);
+        } else {
+          logger.warn('No last item found for custom text');
+        }
+      }
       break;
 
     case 'show_menu':
@@ -376,15 +594,39 @@ async function processMessage(
         break;
       }
       // Show summary and ask for delivery/takeaway directly (no separate item confirmation)
-      const summary = await generateOrderSummary(session.id, { includeCta: false });
+      const summary = await generateOrderSummary(session.id, { includeCta: false, timezone: businessTimezone });
       if (business?.supports_delivery && business?.supports_takeaway) {
-        replyMessage = summary + '\n\nWould you like *delivery* or *takeaway*?';
+        // Use interactive buttons for delivery/takeaway choice
+        await saveOutgoingMessage(session.id, summary + '\n\nHow would you like to receive your order?');
+        await sendReplyButtons(phone, summary + '\n\nHow would you like to receive your order?', [
+          { id: 'delivery', title: '🚚 Delivery' },
+          { id: 'takeaway', title: '🏪 Takeaway' },
+        ]);
+        return null; // Don't send another message
       } else if (business?.supports_delivery) {
-        replyMessage = summary + '\n\nPlease share your delivery address.';
+        replyMessage = summary + '\n\nPlease share your delivery address and preferred time.';
       } else {
-        replyMessage = summary + '\n\nPlease select your preferred pickup location.';
+        // Takeaway only - Use interactive list for outlet selection
         if (outlets.length > 0) {
-          replyMessage += '\n\n' + formatOutletsForCustomer(outlets);
+          await updateSessionFulfillmentType(session.id, 'takeaway');
+          await saveOutgoingMessage(session.id, summary + '\n\nPlease select your preferred pickup location.');
+          await sendInteractiveListMessage(
+            phone,
+            '📍 Pickup Locations',
+            summary + '\n\nPlease select your preferred pickup location:',
+            'Choose Location',
+            [{
+              title: 'Available Outlets',
+              rows: outlets.map(o => ({
+                id: o.id,
+                title: o.outlet_name,
+                description: o.address?.substring(0, 72),
+              })),
+            }]
+          );
+          return null; // Don't send another message
+        } else {
+          replyMessage = summary + '\n\nPlease let us know when you would like to pick up your order.';
         }
       }
       break;
@@ -432,23 +674,39 @@ async function processMessage(
 
         // Save delivery address if provided
         if (aiResponse.fulfillment.delivery_address) {
-          const deliveryTime = aiResponse.fulfillment.delivery_time
-            ? parseDeliveryTime(aiResponse.fulfillment.delivery_time)
+          // Try to extract time from AI response first
+          let deliveryTime = aiResponse.fulfillment.delivery_time
+            ? parseDeliveryTime(aiResponse.fulfillment.delivery_time, businessTimezone)
             : null;
+
+          // Fallback: Try to extract time from the original message if AI didn't get it
+          if (!deliveryTime) {
+            const extracted = extractAddressAndTime(messageText, businessTimezone);
+            if (extracted.time) {
+              deliveryTime = extracted.time;
+              logger.info(`Extracted time from message: ${extracted.time}`);
+            }
+          }
 
           await updateSessionDeliveryInfo(session.id, {
             address: aiResponse.fulfillment.delivery_address,
             time: deliveryTime || undefined,
             notes: aiResponse.fulfillment.fulfillment_notes,
           });
-          logger.info(`Delivery info saved: ${aiResponse.fulfillment.delivery_address}`);
+          logger.info(`Delivery info saved: ${aiResponse.fulfillment.delivery_address}, time: ${deliveryTime || 'not provided'}`);
 
-          // Show final invoice with delivery details and ask for confirmation
-          const deliverySummary = await generateOrderSummary(session.id, {
-            includeCta: true,
-            ctaMessage: '\nPlease review your order. Reply *YES* to confirm or you can add more items.',
-          });
-          replyMessage = deliverySummary;
+          // Check if time was provided - if not, ask for it
+          if (!deliveryTime) {
+            replyMessage = `Got it, delivery to ${aiResponse.fulfillment.delivery_address}.\n\n⏰ What time would you like delivery?\n_Examples: 'today 5pm', 'tomorrow 3pm', 'nale 4pm', 'innu evening'_`;
+          } else {
+            // Show final invoice with delivery details and ask for confirmation
+            const deliverySummary = await generateOrderSummary(session.id, {
+              includeCta: true,
+              ctaMessage: '\nPlease review your order. Reply *YES* to confirm or you can add more items.',
+              timezone: businessTimezone
+            });
+            replyMessage = deliverySummary;
+          }
         }
       }
       break;
@@ -478,7 +736,7 @@ async function processMessage(
 
           if (selectedOutlet) {
             const pickupTime = aiResponse.fulfillment.pickup_time
-              ? parseDeliveryTime(aiResponse.fulfillment.pickup_time)
+              ? parseDeliveryTime(aiResponse.fulfillment.pickup_time, businessTimezone)
               : null;
 
             await updateSessionPickupInfo(session.id, {
@@ -488,31 +746,80 @@ async function processMessage(
             });
             logger.info(`Pickup outlet selected: ${selectedOutlet.outlet_name}`);
 
-            // Show final invoice with pickup details and ask for confirmation
-            const pickupSummary = await generateOrderSummary(session.id, {
-              includeCta: true,
-              ctaMessage: `\n📍 Pickup at: ${selectedOutlet.outlet_name}\n\nPlease review your order. Reply *YES* to confirm or you can add more items.`,
-            });
-            replyMessage = pickupSummary;
+            // If time was NOT provided, ask for it
+            if (!pickupTime) {
+              replyMessage = `Great! What time would you like to pick up your order from ${selectedOutlet.outlet_name}?`;
+            } else {
+              // Show final invoice with pickup details and ask for confirmation
+              const pickupSummary = await generateOrderSummary(session.id, {
+                includeCta: true,
+                ctaMessage: `\n📍 Pickup at: ${selectedOutlet.outlet_name}\n🕐 Time: ${pickupTime}\n\nPlease review your order. Reply *YES* to confirm or you can add more items.`,
+                timezone: businessTimezone
+              });
+              replyMessage = pickupSummary;
+            }
           } else {
             // Show outlets list if not found
             const outletsList = formatOutletsForCustomer(outlets);
             replyMessage = aiResponse.reply + '\n\n' + outletsList;
           }
-        } else if (!session.pickup_outlet_id) {
-          // Show outlets list if customer hasn't selected yet
-          const outletsList = formatOutletsForCustomer(outlets);
-          replyMessage = aiResponse.reply + '\n\n' + outletsList;
+        } else if (latestSessionData.pickup_outlet_id && !latestSessionData.pickup_time) {
+          // Outlet already selected, user is providing time
+          const pickupTime = aiResponse.fulfillment.pickup_time
+            ? parseDeliveryTime(aiResponse.fulfillment.pickup_time, businessTimezone)
+            : parseDeliveryTime(messageText, businessTimezone); // Try to parse time from message directly
+
+          if (pickupTime) {
+            await updateSessionPickupInfo(session.id, {
+              outlet_id: latestSessionData.pickup_outlet_id,
+              time: pickupTime,
+            });
+            logger.info(`Pickup time saved: ${pickupTime}`);
+
+            // Find outlet for display
+            const selectedOutlet = outlets.find(o => o.id === latestSessionData.pickup_outlet_id);
+            const outletName = selectedOutlet?.outlet_name || 'selected outlet';
+
+            // Show final invoice with pickup details and ask for confirmation
+            const pickupSummary = await generateOrderSummary(session.id, {
+              includeCta: true,
+              ctaMessage: `\n📍 Pickup at: ${outletName}\n🕐 Time: ${pickupTime}\n\nPlease review your order. Reply *YES* to confirm or you can add more items.`,
+              timezone: businessTimezone
+            });
+            replyMessage = pickupSummary;
+          } else {
+            replyMessage = "I couldn't understand that time format. Please try something like:\n• 'today 5pm'\n• 'tomorrow 10am'\n• 'nale 4pm' (Malayalam for tomorrow)";
+          }
+        } else if (!session.pickup_outlet_id && outlets.length > 0) {
+          // Use interactive list for outlet selection
+          await saveOutgoingMessage(session.id, aiResponse.reply);
+          await sendInteractiveListMessage(
+            phone,
+            '📍 Pickup Locations',
+            aiResponse.reply,
+            'Choose Location',
+            [{
+              title: 'Available Outlets',
+              rows: outlets.map(o => ({
+                id: o.id,
+                title: o.outlet_name,
+                description: o.address?.substring(0, 72),
+              })),
+            }]
+          );
+          return null; // Don't send another message
         }
       }
       break;
 
     case 'confirm_order':
       // Track if fulfillment was just collected in THIS message (not a real confirmation)
-      // Only true if session didn't already have the address/outlet before this message
+      // True if: address/outlet was just provided, OR time was just provided (not a "yes" to confirm)
       const fulfillmentJustCollected = aiResponse.fulfillment && (
         (aiResponse.fulfillment.delivery_address && !latestSessionData.delivery_address) ||
-        (aiResponse.fulfillment.pickup_outlet_id && !latestSessionData.pickup_outlet_id)
+        (aiResponse.fulfillment.pickup_outlet_id && !latestSessionData.pickup_outlet_id) ||
+        (aiResponse.fulfillment.delivery_time && !latestSessionData.delivery_time) ||
+        (aiResponse.fulfillment.pickup_time && !latestSessionData.pickup_time)
       );
 
       // FIRST: If AI provided fulfillment data with confirm_order, SAVE IT NOW
@@ -526,9 +833,19 @@ async function processMessage(
 
         // Save delivery info
         if (aiResponse.fulfillment.fulfillment_type === 'delivery' && aiResponse.fulfillment.delivery_address) {
-          const deliveryTime = aiResponse.fulfillment.delivery_time
-            ? parseDeliveryTime(aiResponse.fulfillment.delivery_time)
+          let deliveryTime = aiResponse.fulfillment.delivery_time
+            ? parseDeliveryTime(aiResponse.fulfillment.delivery_time, businessTimezone)
             : null;
+
+          // Fallback: Try to extract time from original message
+          if (!deliveryTime) {
+            const extracted = extractAddressAndTime(messageText, businessTimezone);
+            if (extracted.time) {
+              deliveryTime = extracted.time;
+              logger.info(`Extracted time from message (confirm_order): ${extracted.time}`);
+            }
+          }
+
           await updateSessionDeliveryInfo(session.id, {
             address: aiResponse.fulfillment.delivery_address,
             time: deliveryTime || undefined,
@@ -557,7 +874,7 @@ async function processMessage(
 
           if (outletId) {
             const pickupTime = aiResponse.fulfillment.pickup_time
-              ? parseDeliveryTime(aiResponse.fulfillment.pickup_time)
+              ? parseDeliveryTime(aiResponse.fulfillment.pickup_time, businessTimezone)
               : null;
             await updateSessionPickupInfo(session.id, {
               outlet_id: outletId,
@@ -572,6 +889,7 @@ async function processMessage(
           const confirmationSummary = await generateOrderSummary(session.id, {
             includeCta: true,
             ctaMessage: '\nPlease review your order. Reply *YES* to confirm or you can add more items.',
+            timezone: businessTimezone
           });
           replyMessage = confirmationSummary;
           break;
@@ -592,7 +910,7 @@ async function processMessage(
       if (!latestSession.fulfillment_type) {
         logger.warn(`⚠️ CONFIRM_ORDER attempted but no fulfillment type! Session: ${session.id}`);
         // Show summary and ask for fulfillment
-        const orderSummary = await generateOrderSummary(session.id, { includeCta: false });
+        const orderSummary = await generateOrderSummary(session.id, { includeCta: false, timezone: businessTimezone });
         if (business?.supports_delivery && business?.supports_takeaway) {
           replyMessage = orderSummary + '\n\nWould you like *delivery* or *takeaway*?';
         } else if (business?.supports_delivery) {
@@ -620,34 +938,53 @@ async function processMessage(
         break;
       }
 
+      // MANDATORY: Check if date/time is provided - orders cannot be confirmed without timing
+      const hasDeliveryTime = latestSession.fulfillment_type === 'delivery' && latestSession.delivery_time;
+      const hasPickupTime = latestSession.fulfillment_type === 'takeaway' && latestSession.pickup_time;
+
+      if (!hasDeliveryTime && !hasPickupTime) {
+        logger.warn(`⚠️ CONFIRM_ORDER attempted but no date/time provided! Session: ${session.id}`);
+        const timeExamples = "Examples: 'today 5pm', 'tomorrow 3pm', 'nale 4pm', 'innu evening'";
+        if (latestSession.fulfillment_type === 'delivery') {
+          replyMessage = `⏰ Please provide a delivery date and time to confirm your order.\n\n${timeExamples}`;
+        } else {
+          replyMessage = `⏰ Please provide a pickup date and time to confirm your order.\n\n${timeExamples}`;
+        }
+        break;
+      }
+
       try {
         logger.info(`📦 Creating order with ${latestSession.items.length} items for session ${session.id}`);
         const order = await createFinalOrder(session.id);
 
+        // businessTimezone is already defined at the start of processMessage
+
         // Build confirmation message with fulfillment details (use LATEST session data)
-        let confirmMsg = `✅ Order confirmed!\n\nOrder ID: ${order.id.substring(0, 8)}\n`;
+        let confirmMsg = `✅ Order confirmed!\n\n📋 Order #: *${order.order_number}*\n💰 Total: ₹${order.total_amount}`;
 
         if (latestSession.fulfillment_type === 'delivery') {
-          confirmMsg += `\n📍 Delivery to: ${latestSession.delivery_address}`;
+          confirmMsg += `\n\n🚚 *Delivery*\n📍 ${latestSession.delivery_address}`;
           if (latestSession.delivery_time) {
-            confirmMsg += `\n🕐 Time: ${latestSession.delivery_time}`;
+            confirmMsg += `\n🕐 Time: ${formatDeliveryTime(latestSession.delivery_time, businessTimezone)}`;
           }
         } else if (latestSession.fulfillment_type === 'takeaway') {
+          confirmMsg += `\n\n🏪 *Takeaway*`;
           const selectedOutlet = outlets.find(o => o.id === latestSession.pickup_outlet_id);
           if (selectedOutlet) {
-            confirmMsg += `\n📍 Pickup at: ${selectedOutlet.outlet_name}`;
+            confirmMsg += `\n📍 ${selectedOutlet.outlet_name}`;
           }
           if (latestSession.pickup_time) {
-            confirmMsg += `\n🕐 Time: ${latestSession.pickup_time}`;
+            confirmMsg += `\n🕐 Time: ${formatDeliveryTime(latestSession.pickup_time, businessTimezone)}`;
           }
         }
 
-        confirmMsg += `\n\nThank you so much for your order! We'll have everything ready for you. Have a wonderful day! 🙏`;
+        confirmMsg += `\n\n_Save your order number *${order.order_number}* to check status or cancel._`;
+        confirmMsg += `\n\nThank you for your order! We'll have everything ready for you. 🙏`;
         replyMessage = confirmMsg;
       } catch (error) {
         logger.error('Failed to create order', error);
-        replyMessage =
-          "I'm sorry, I couldn't process your order right now. Please try again or contact us directly.";
+        const supportPhone = business?.customer_support_phone;
+        replyMessage = `We encountered an issue while processing your order. Please try again.${supportPhone ? `\n\n📞 Need immediate help? Contact us: ${supportPhone}` : ''}\n\n_Your cart items are still saved. Just say 'yes' to try again._`;
       }
       break;
 
@@ -658,14 +995,28 @@ async function processMessage(
 
     case 'cancel_existing_order':
       if (aiResponse.order_id) {
-        const cancelResult = await cancelOrderById(aiResponse.order_id, customer.id);
+        const cancelResult = await cancelOrderById(aiResponse.order_id, customer.id, businessId);
         if (cancelResult.success) {
           replyMessage = `✅ ${cancelResult.message}\n\nIf you'd like to place a new order, just let me know!`;
         } else {
           replyMessage = `❌ ${cancelResult.message}`;
         }
       } else {
-        replyMessage = "Could you please provide the order ID? It's the 8-character code you received when you placed the order (e.g., 424bfda9).";
+        replyMessage = "Could you please provide the order number? It's the code you received when you placed the order (e.g., OKS-1).";
+      }
+      break;
+
+    case 'check_order_status':
+      if (aiResponse.order_id) {
+        const businessTimezoneForStatus = businessTimezone;
+        const statusResult = await getOrderStatus(aiResponse.order_id, customer.id, businessId, businessTimezoneForStatus);
+        if (statusResult.success) {
+          replyMessage = statusResult.message;
+        } else {
+          replyMessage = `❌ ${statusResult.message}`;
+        }
+      } else {
+        replyMessage = "Could you please provide the order number to check its status? (e.g., OKS-1)";
       }
       break;
 
@@ -689,16 +1040,30 @@ async function processMessage(
         // Handle delivery info
         if (aiResponse.fulfillment.fulfillment_type === 'delivery') {
           if (aiResponse.fulfillment.delivery_address) {
-            const deliveryTime = aiResponse.fulfillment.delivery_time
-              ? parseDeliveryTime(aiResponse.fulfillment.delivery_time)
+            let deliveryTime = aiResponse.fulfillment.delivery_time
+              ? parseDeliveryTime(aiResponse.fulfillment.delivery_time, businessTimezone)
               : null;
+
+            // Fallback: Try to extract time from original message
+            if (!deliveryTime) {
+              const extracted = extractAddressAndTime(messageText, businessTimezone);
+              if (extracted.time) {
+                deliveryTime = extracted.time;
+                logger.info(`Extracted time from message (ask_question): ${extracted.time}`);
+              }
+            }
 
             await updateSessionDeliveryInfo(session.id, {
               address: aiResponse.fulfillment.delivery_address,
               time: deliveryTime || undefined,
               notes: aiResponse.fulfillment.fulfillment_notes,
             });
-            logger.info(`Delivery info saved: ${aiResponse.fulfillment.delivery_address}`);
+            logger.info(`Delivery info saved: ${aiResponse.fulfillment.delivery_address}, time: ${deliveryTime || 'not provided'}`);
+
+            // If no time provided, prompt for it
+            if (!deliveryTime) {
+              replyMessage = `Got it, delivery to ${aiResponse.fulfillment.delivery_address}.\n\n⏰ What time would you like delivery?\n_Examples: 'today 5pm', 'tomorrow 3pm', 'nale 4pm', 'innu evening'_`;
+            }
           }
         }
 
@@ -718,7 +1083,7 @@ async function processMessage(
 
             if (selectedOutlet) {
               const pickupTime = aiResponse.fulfillment.pickup_time
-                ? parseDeliveryTime(aiResponse.fulfillment.pickup_time)
+                ? parseDeliveryTime(aiResponse.fulfillment.pickup_time, businessTimezone)
                 : null;
 
               await updateSessionPickupInfo(session.id, {
@@ -794,15 +1159,176 @@ export async function handleWhatsAppWebhook(
 
         logger.info(`Message received for business: ${business.name} (${business.id})`);
 
+        // Get business timezone for date/time handling
+        const businessTimezone = business.timezone || 'Asia/Kolkata';
+
         for (const message of value.messages) {
-          // Only handle text messages for MVP
-          if (message.type !== 'text' || !message.text?.body) {
-            logger.debug(`Skipping non-text message type: ${message.type}`);
+          const phone = sanitizePhoneNumber(message.from);
+
+          // Handle image messages (Feature 4)
+          if (message.type === 'image' && message.image) {
+            logger.info(`Image received from ${phone}: ${message.image.id}`);
+
+            // Find or create customer for notification
+            const customer = await findOrCreateCustomer(phone, business.id);
+            const session = await findOrCreateSession(customer.id, business.id);
+            await saveIncomingMessage(session.id, `[Image: ${message.image.caption || 'No caption'}]`);
+
+            // Notify business admin
+            await notifyBusinessAdmin(business.id, {
+              type: 'customer_image',
+              customerId: customer.id,
+              phone,
+              imageId: message.image.id,
+              message: `Customer sent image${message.image.caption ? ': ' + message.image.caption : ''}`,
+            });
+
+            const supportPhone = business.customer_support_phone;
+            let imageResponse = `I see you've sent an image! 📸\n\nSince I can't view images yet, I've notified our team to check it. They'll respond shortly!`;
+            if (supportPhone) {
+              imageResponse += `\n\n📞 Need immediate help? Contact: ${supportPhone}`;
+            }
+            imageResponse += `\n\nIn the meantime, you can describe what you'd like to order? 😊`;
+            await sendWhatsAppMessage(phone, imageResponse);
+            await saveOutgoingMessage(session.id, imageResponse);
             continue;
           }
 
-          const phone = sanitizePhoneNumber(message.from);
-          const messageText = sanitizeMessage(message.text.body);
+          // Handle location messages (Feature 3)
+          if (message.type === 'location' && message.location) {
+            const location = message.location;
+            logger.info(`Location received from ${phone}: ${location.latitude}, ${location.longitude}`);
+
+            const customer = await findOrCreateCustomer(phone, business.id);
+            const session = await findOrCreateSession(customer.id, business.id);
+            const sessionWithItems = await getSessionWithItems(session.id);
+
+            // Use address/name from location if available, otherwise use a friendly placeholder
+            // The lat/long will be stored in separate columns for map display
+            const displayAddress = location.address || location.name || 'Pinned Location 📍';
+            const logAddress = location.address || location.name || `${location.latitude}, ${location.longitude}`;
+            await saveIncomingMessage(session.id, `[Location: ${logAddress}]`);
+
+            // If customer is in delivery flow and hasn't provided address yet
+            if (sessionWithItems?.fulfillment_type === 'delivery' && !sessionWithItems.delivery_address) {
+              await updateSessionDeliveryInfo(session.id, {
+                address: displayAddress,
+                latitude: location.latitude,
+                longitude: location.longitude,
+              });
+
+              // Ask for time if not yet provided
+              if (!sessionWithItems.delivery_time) {
+                const timePrompt = `📍 Location saved!\n\n⏰ What time would you like delivery?\n_Examples: 'today 5pm', 'tomorrow 3pm', 'nale 4pm'_`;
+                await sendWhatsAppMessage(phone, timePrompt);
+                await saveOutgoingMessage(session.id, timePrompt);
+              } else {
+                const locationSummary = await generateOrderSummary(session.id, {
+                  includeCta: true,
+                  ctaMessage: '\n📍 Location saved! Reply *YES* to confirm your order.',
+                  timezone: businessTimezone
+                });
+                await sendWhatsAppMessage(phone, locationSummary);
+                await saveOutgoingMessage(session.id, locationSummary);
+              }
+            } else {
+              const locationReply = "Thanks for sharing your location! 📍 We've saved it for your delivery.";
+              await sendWhatsAppMessage(phone, locationReply);
+              await saveOutgoingMessage(session.id, locationReply);
+            }
+            continue;
+          }
+
+          // Handle interactive messages (button/list replies) (Feature 2)
+          let messageText = '';
+          if (message.type === 'interactive' && message.interactive) {
+            const interactive = message.interactive;
+
+            if (interactive.type === 'button_reply' && interactive.button_reply) {
+              const buttonId = interactive.button_reply.id;
+              logger.info(`Button reply from ${phone}: ${buttonId}`);
+
+              // Handle takeaway button - show interactive outlet list
+              if (buttonId === 'takeaway') {
+                const customer = await findOrCreateCustomer(phone, business.id);
+                const session = await findOrCreateSession(customer.id, business.id);
+                const businessOutlets = await getBusinessOutlets(business.id);
+
+                // Set fulfillment type to takeaway and CLEAR any previous delivery info
+                await updateSessionFulfillmentType(session.id, 'takeaway');
+
+                if (businessOutlets.length > 0) {
+                  await saveIncomingMessage(session.id, '[Selected: Takeaway]');
+                  const outletPrompt = 'Great! Please select your preferred pickup location:';
+                  await saveOutgoingMessage(session.id, outletPrompt);
+                  await sendInteractiveListMessage(
+                    phone,
+                    '📍 Pickup Locations',
+                    outletPrompt,
+                    'Choose Location',
+                    [{
+                      title: 'Available Outlets',
+                      rows: businessOutlets.map(o => ({
+                        id: o.id,
+                        title: o.outlet_name,
+                        description: o.address?.substring(0, 72),
+                      })),
+                    }]
+                  );
+                  continue;
+                }
+              }
+
+              // Handle delivery button - set fulfillment type and CLEAR any previous takeaway info
+              if (buttonId === 'delivery') {
+                const customer = await findOrCreateCustomer(phone, business.id);
+                const session = await findOrCreateSession(customer.id, business.id);
+
+                // Set fulfillment type to delivery (this will clear takeaway info in the handler)
+                await updateSessionFulfillmentType(session.id, 'delivery');
+                await saveIncomingMessage(session.id, '[Selected: Delivery]');
+                const deliveryPrompt = "Great! Let's set up your 📍 delivery.\n\nYou can either *share your location* or *type your address* with preferred time.\n\n_Examples: 'MG Road, tomorrow 5pm', 'Kottakkal, today 6pm'_";
+                await saveOutgoingMessage(session.id, deliveryPrompt);
+                // Send location request with the prompt
+                await sendLocationRequest(phone, deliveryPrompt);
+                continue;
+              }
+
+              messageText = buttonId;
+            } else if (interactive.type === 'list_reply' && interactive.list_reply) {
+              const selectedId = interactive.list_reply.id;
+              logger.info(`List reply from ${phone}: ${selectedId}`);
+
+              // Handle outlet selection
+              const customer = await findOrCreateCustomer(phone, business.id);
+              const session = await findOrCreateSession(customer.id, business.id);
+              const businessOutlets = await getBusinessOutlets(business.id);
+
+              const selectedOutlet = businessOutlets.find(o => o.id === selectedId);
+              if (selectedOutlet) {
+                await updateSessionFulfillmentType(session.id, 'takeaway');
+                await updateSessionPickupInfo(session.id, { outlet_id: selectedOutlet.id });
+
+                const pickupSummary = await generateOrderSummary(session.id, {
+                  includeCta: true,
+                  ctaMessage: `\n📍 Pickup at: ${selectedOutlet.outlet_name}\n\nReply *YES* to confirm your order.`,
+                  timezone: businessTimezone
+                });
+                await saveIncomingMessage(session.id, `[Selected: ${selectedOutlet.outlet_name}]`);
+                await sendWhatsAppMessage(phone, pickupSummary);
+                await saveOutgoingMessage(session.id, pickupSummary);
+                continue;
+              }
+
+              // If not outlet, treat ID as message text
+              messageText = selectedId;
+            }
+          } else if (message.type === 'text' && message.text?.body) {
+            messageText = sanitizeMessage(message.text.body);
+          } else {
+            logger.debug(`Skipping unsupported message type: ${message.type}`);
+            continue;
+          }
 
           if (!isValidPhoneNumber(phone)) {
             logger.warn(`Invalid phone number: ${message.from}`);
@@ -823,10 +1349,13 @@ export async function handleWhatsAppWebhook(
             }
           } catch (error) {
             logger.error('Error processing message', error);
-            await sendWhatsAppMessage(
-              phone,
-              "I'm sorry, something went wrong. Please try again in a moment."
-            );
+            const supportPhone = business.customer_support_phone;
+            let errorMsg = "We're experiencing a temporary issue. Please try again in a moment.";
+            if (supportPhone) {
+              errorMsg += `\n\n📞 Need immediate help? Contact us: ${supportPhone}`;
+            }
+            errorMsg += "\n\n_Tip: You can continue by telling us what you'd like to order._";
+            await sendWhatsAppMessage(phone, errorMsg);
           }
         }
       }

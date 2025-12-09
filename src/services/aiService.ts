@@ -184,17 +184,20 @@ STEP 2 - CHECKOUT:
 - System will show order summary and ask for delivery/takeaway
 - ⚠️ ONLY proceed to checkout if CART HAS ITEMS!
 
-STEP 3 - FULFILLMENT:
+STEP 3 - FULFILLMENT (IMPORTANT - COLLECT BOTH ADDRESS AND TIME):
 - Customer chooses "delivery" or "takeaway" → use "ask_question" with fulfillment data
 - ONE order = ONE fulfillment type only (no mixing)
-- For delivery: collect address, then time (optional)
-- For takeaway: show outlet list, collect selection, then time (optional)
+- For delivery: ASK for BOTH address AND time in ONE question
+- For takeaway: show outlet list, collect selection AND time
 
-STEP 4 - TIME RULES:
-- Time is OPTIONAL - if customer doesn't specify, that's okay
-- If they DO specify time: Minimum wait ${context.business?.minimum_wait_minutes || 30} minutes
+STEP 4 - TIME RULES (MANDATORY FOR ORDER):
+- ⚠️ TIME IS REQUIRED - orders CANNOT be confirmed without date/time
+- Ask for time along with address: "Please share your delivery address and preferred time"
+- Accept formats: "MG Road, tomorrow 5pm", "tomorrow", "nale 4pm", "innu evening", "today 6:30pm"
+- Malayalam: "innu" = today, "nale" = tomorrow
+- If customer gives address WITHOUT time, ask: "What time would you like delivery?"
+- Minimum wait ${context.business?.minimum_wait_minutes || 30} minutes
 - REJECT past dates/times - say "Please choose a future time"
-- Valid examples: "today 5pm", "tomorrow 10am", "in 2 hours"
 
 STEP 5 - FINAL CONFIRM:
 - After delivery address OR pickup outlet is collected → use "confirm_order"
@@ -213,8 +216,15 @@ INTENT GUIDE:
 - "confirm_order": Customer provided delivery address OR pickup outlet → FINALIZE ORDER
 - "show_menu": Customer asks what's available
 - "item_not_available": Item not in menu
-- "cancel": Customer wants to stop ordering
+- "cancel": Customer wants to stop CURRENT ordering session (no order placed yet)
+- "cancel_existing_order": Customer wants to CANCEL a CONFIRMED order → extract order_id (e.g., "OKS-1")
+- "check_order_status": Customer asks about order STATUS → extract order_id (e.g., "OKS-1")
 - "conversation_ended": Farewell after order complete
+
+ORDER MANAGEMENT:
+- When customer says "cancel order OKS-1" or "cancel my order" → use "cancel_existing_order" with order_id
+- When customer says "status of OKS-1" or "where is my order" → use "check_order_status" with order_id
+- Extract order_id from messages like "OKS-1", "oks-2", "order OKS-3", etc.
 
 EXAMPLES:
 
@@ -235,22 +245,42 @@ ${hasItemsInCart ?
 `{"reply": "Your cart is empty! What would you like to order?", "intent": "ask_question"}`}
 
 Customer: "Delivery" (after seeing summary)
-{"reply": "Please share your delivery address.", "intent": "ask_question", "fulfillment": {"fulfillment_type": "delivery"}}
+{"reply": "Please share your delivery address and preferred time (e.g., 'MG Road, tomorrow 5pm').", "intent": "ask_question", "fulfillment": {"fulfillment_type": "delivery"}}
 
-Customer: "MG Road" (providing delivery address)
-{"reply": "Your order is confirmed! Delivery to MG Road.", "intent": "confirm_order", "fulfillment": {"fulfillment_type": "delivery", "delivery_address": "MG Road"}}
+Customer: "MG Road, tomorrow 5pm" or "MG Road nale 5pm" (address with time)
+{"reply": "Delivery to MG Road, tomorrow at 5pm. Please confirm YES.", "intent": "collect_delivery_info", "fulfillment": {"fulfillment_type": "delivery", "delivery_address": "MG Road", "delivery_time": "tomorrow 5pm"}}
+
+Customer: "MG Road" (address only - WITHOUT time)
+{"reply": "Got it, MG Road. What time would you like delivery? (e.g., 'today 6pm', 'nale 3pm')", "intent": "ask_question", "fulfillment": {"fulfillment_type": "delivery", "delivery_address": "MG Road"}}
+
+Customer: "today 6pm" or "innu 6pm" (time after giving address)
+{"reply": "Delivery to MG Road at 6pm today. Please confirm YES.", "intent": "collect_delivery_info", "fulfillment": {"fulfillment_type": "delivery", "delivery_time": "today 6pm"}}
 
 Customer: "Takeaway" (after seeing summary)
-{"reply": "Please select your pickup location.", "intent": "ask_question", "fulfillment": {"fulfillment_type": "takeaway"}}
+{"reply": "Please select your pickup location and preferred time.", "intent": "ask_question", "fulfillment": {"fulfillment_type": "takeaway"}}
 
 Customer: "Yesterday 5pm" (past time)
 {"reply": "Sorry, that time has passed. Please choose a future time (e.g., today 6pm, tomorrow 10am).", "intent": "ask_question"}
 
+Customer: "Cancel order OKS-1" or "I want to cancel OKS-1"
+{"reply": "I'll cancel order OKS-1 for you.", "intent": "cancel_existing_order", "order_id": "OKS-1"}
+
+Customer: "What's the status of OKS-2?" or "Where is my order OKS-2?"
+{"reply": "Let me check the status of OKS-2.", "intent": "check_order_status", "order_id": "OKS-2"}
+
+Customer: "Cancel my order" (without order number)
+{"reply": "Please provide your order number to cancel (e.g., OKS-1).", "intent": "cancel_existing_order"}
+
+Customer: "Check my order status" (without order number)
+{"reply": "Please provide your order number to check its status (e.g., OKS-1).", "intent": "check_order_status"}
+
 REMEMBER:
 - CART MUST have items before checkout/fulfillment
-- After customer provides delivery address → use "confirm_order" to finalize
+- After customer provides delivery address AND time → use "collect_delivery_info" (system shows invoice)
+- After customer confirms with YES → order is created
 - ONE fulfillment type per order (no mixing delivery+takeaway)
-- Time is optional - don't force customer to provide time
+- ⚠️ TIME IS MANDATORY - always ask for time if not provided with address
+- Malayalam time words: "innu" = today, "nale" = tomorrow
 - Reject past dates/times if provided
 - Keep replies short (1-2 sentences)`;
 }
@@ -306,7 +336,7 @@ function parseAIResponse(responseText: string): AIResponse {
     logger.warn('Failed to parse AI response as JSON', { error, responseText });
 
     return {
-      reply: "I'm sorry, I didn't catch that. Could you please say that again?",
+      reply: "I didn't quite understand that. Could you please rephrase? For example: 'I want a chocolate cake' or 'Show me the menu'.",
       intent: 'ask_question',
     };
   }
@@ -534,8 +564,18 @@ export async function processMessageWithAI(
 
   } catch (error) {
     logger.error('Error processing message with AI', { error });
+
+    // Build professional error message with customer support if available
+    let errorReply = "We're experiencing a temporary issue processing your request. Please try again in a moment.";
+
+    if (context.business?.customer_support_phone) {
+      errorReply += `\n\n📞 Need immediate assistance? Contact us: ${context.business.customer_support_phone}`;
+    }
+
+    errorReply += "\n\n_Tip: You can continue ordering by telling us what you'd like._";
+
     return {
-      reply: "I'm sorry, I'm having trouble right now. Please try again.",
+      reply: errorReply,
       intent: 'ask_question',
     };
   }

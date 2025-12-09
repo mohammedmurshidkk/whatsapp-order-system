@@ -19,6 +19,12 @@ export interface Business {
   custom_ai_prompt?: string | null; // Business-specific AI instructions
   critical_message?: string | null; // Message to send instead of AI (emergencies)
   critical_message_enabled?: boolean; // When true, send critical_message instead of AI
+  // Order numbering
+  order_number_prefix?: string | null; // e.g., "OKS" -> "OKS-1", "OKS-2"
+  // Customer support
+  customer_support_phone?: string | null; // Fallback phone number for customer support
+  // Timezone for date/time display (IANA timezone, e.g., 'Asia/Kolkata')
+  timezone?: string;
   updated_at?: string;
 }
 
@@ -83,6 +89,7 @@ export interface MenuCategory {
   display_order: number;
   is_active: boolean;
   created_at: string;
+  custom_text_prompt?: string | null; // e.g., "What should we write on the cake?"
 }
 
 export interface MenuItemSize {
@@ -177,6 +184,8 @@ export type OrderStatus = 'confirmed' | 'processing' | 'completed' | 'cancelled'
 
 export interface Order {
   id: string;
+  order_number: string; // User-friendly order ID (e.g., "OKS-1")
+  business_id: string;
   session_id: string;
   customer_id: string;
   items: OrderItemData[];
@@ -228,9 +237,11 @@ export type AIIntent =
   | 'add_addon'             // Customer wants to add an add-on
   | 'decline_addon'         // Customer declines add-on
   | 'continue_ordering'     // Continue after add-ons (ask for more items)
+  | 'save_custom_text'      // Save custom text response (e.g., cake message)
   | 'confirm_order'         // Final confirmation (step 2 of 2-step checkout)
   | 'cancel'
-  | 'cancel_existing_order'
+  | 'cancel_existing_order' // Cancel a confirmed order
+  | 'check_order_status'    // Check status of an existing order
   | 'smalltalk'
   | 'show_menu'
   | 'conversation_ended'
@@ -269,6 +280,20 @@ export interface AIResponse {
   fulfillment?: AIFulfillmentResponse; // For fulfillment info
   addon?: AIAddonResponse; // NEW: For add-on responses
   suggested_addons?: string[]; // NEW: List of addon IDs to suggest
+  customText?: string; // For save_custom_text intent (e.g., cake message)
+}
+
+// Notification types (for admin alerts)
+export interface Notification {
+  id: string;
+  business_id: string;
+  type: string; // 'customer_image', 'customer_inquiry', etc.
+  customer_id: string | null;
+  customer_phone: string | null;
+  image_id: string | null;
+  message: string | null;
+  read: boolean;
+  created_at: string;
 }
 
 // WhatsApp webhook types
@@ -276,10 +301,34 @@ export interface WhatsAppWebhookMessage {
   from: string;
   id: string;
   timestamp: string;
+  type: string; // 'text' | 'interactive' | 'location' | 'image'
   text?: {
     body: string;
   };
-  type: string;
+  interactive?: {
+    type: 'button_reply' | 'list_reply';
+    button_reply?: {
+      id: string;
+      title: string;
+    };
+    list_reply?: {
+      id: string;
+      title: string;
+      description?: string;
+    };
+  };
+  location?: {
+    latitude: number;
+    longitude: number;
+    name?: string;
+    address?: string;
+  };
+  image?: {
+    id: string;
+    mime_type: string;
+    sha256: string;
+    caption?: string;
+  };
 }
 
 export interface WhatsAppWebhookEntry {

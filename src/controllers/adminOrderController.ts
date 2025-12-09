@@ -71,6 +71,7 @@ export async function listOrders(req: AuthRequest, res: Response): Promise<void>
       const session = sessionMap.get(order.session_id);
       return {
         id: order.id,
+        order_number: order?.order_number,
         customer_phone: (session?.customers as any)?.phone || 'Unknown',
         items: order.items,
         total: order.total_amount,

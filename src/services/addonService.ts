@@ -247,12 +247,22 @@ export function formatAddonsForAI(addons: MenuAddon[]): string {
 
 /**
  * Find addon by customer input (number or name)
+ * Handles: "1", "one", "candle", "one candle", "add candle", "sparkler candle", etc.
  */
 export function findAddonByCustomerInput(
   input: string,
   addons: MenuAddon[]
 ): MenuAddon | null {
   const normalizedInput = input.toLowerCase().trim();
+
+  // Word to number mapping
+  const wordNumbers: Record<string, number> = {
+    'one': 1, 'first': 1, '1st': 1,
+    'two': 2, 'second': 2, '2nd': 2,
+    'three': 3, 'third': 3, '3rd': 3,
+    'four': 4, 'fourth': 4, '4th': 4,
+    'five': 5, 'fifth': 5, '5th': 5,
+  };
 
   // Check if input is a number (1, 2, 3...)
   const numberMatch = normalizedInput.match(/^(\d+)$/);
@@ -263,7 +273,46 @@ export function findAddonByCustomerInput(
     }
   }
 
-  // Check if input matches addon name
+  // Check if input starts with a word number ("one candle", "first one", etc.)
+  for (const [word, num] of Object.entries(wordNumbers)) {
+    if (normalizedInput.startsWith(word) || normalizedInput === word) {
+      const index = num - 1;
+      if (index >= 0 && index < addons.length) {
+        return addons[index];
+      }
+    }
+  }
+
+  // Check if input contains a number anywhere ("add 1", "option 2", etc.)
+  const anyNumberMatch = normalizedInput.match(/(\d+)/);
+  if (anyNumberMatch) {
+    const index = parseInt(anyNumberMatch[1], 10) - 1;
+    if (index >= 0 && index < addons.length) {
+      return addons[index];
+    }
+  }
+
+  // Extract keywords from input (remove common words)
+  const stopWords = ['add', 'want', 'need', 'please', 'also', 'the', 'a', 'an', 'one', 'yes', 'ok', 'okay'];
+  const inputWords = normalizedInput.split(/\s+/).filter(w => !stopWords.includes(w));
+
+  // Check if any word in input matches any word in addon name
+  for (const addon of addons) {
+    const addonWords = addon.name.toLowerCase().split(/\s+/);
+
+    // Check for any word match
+    for (const inputWord of inputWords) {
+      if (inputWord.length >= 3) { // Only match words with 3+ chars
+        for (const addonWord of addonWords) {
+          if (addonWord.includes(inputWord) || inputWord.includes(addonWord)) {
+            return addon;
+          }
+        }
+      }
+    }
+  }
+
+  // Fallback: Check if input matches addon name directly
   const matchedAddon = addons.find(addon =>
     addon.name.toLowerCase().includes(normalizedInput) ||
     normalizedInput.includes(addon.name.toLowerCase())
