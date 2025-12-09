@@ -1,14 +1,8 @@
 import axios from 'axios';
 import { Message, AIResponse, Session, Business, MenuItem, MenuCategory, BusinessOutlet, MenuAddon } from '../types';
-import { GEMINI_MODEL } from '../config/constants';
 import { formatMessagesForAI } from './messageService';
 import { logger } from '../utils/logger';
-import { OpenRouter } from "@openrouter/sdk";
-
-const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
-const openrouter = new OpenRouter({
-  apiKey: process.env.OPENROUTER_API_KEY
-});
+import { getAIClient } from './aiClient';
 
 export interface AIContext {
   business?: Business;
@@ -463,72 +457,14 @@ export async function processMessageWithAI(
   _sessionContext: Session,
   context: AIContext = {}
 ): Promise<AIResponse> {
-  const apiKey = process.env.GEMINI_API_KEY;
-
-  if (!apiKey) {
-    logger.error('Gemini API key not configured');
-    throw new Error('AI service not configured');
-  }
-
   const prompt = buildPrompt(currentMessage, conversationHistory, context);
 
   try {
-    // const response = await axios.post(
-    //   `${GEMINI_API_URL}?key=${apiKey}`,
-    //   {
-    //     contents: [
-    //       {
-    //         parts: [{ text: prompt }],
-    //       },
-    //     ],
-    //     generationConfig: {
-    //       temperature: 0.3, // Lower temperature for more consistent responses
-    //       maxOutputTokens: 500,
-    //     },
-    //   },
-    //   {
-    //     headers: { 'Content-Type': 'application/json' },
-    //     timeout: 30000,
-    //   }
-    // );
-
-    // const responseText =
-    // response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-    const stream = await openrouter.chat.send({
-      model: "amazon/nova-2-lite-v1:free",
-      messages: [
-        {
-          role: "user",
-          content: prompt
-        }
-      ],
-      stream: true,
-      streamOptions: {
-        includeUsage: true
-      }
-    });
-
-    let response = "";
-
-    for await (const chunk of stream) {
-      const content = chunk.choices[0]?.delta?.content;
-      if (content) {
-        response += content;
-        process.stdout.write(content);
-      }
-      
-      // Usage information comes in the final chunk
-      if (chunk.usage) {
-        console.log("\nReasoning tokens:", chunk.usage.totalTokens);
-      }
-    }
-
-    const responseText = response;
+    const aiClient = getAIClient();
+    const responseText = await aiClient.processMessage(prompt);
 
     if (!responseText) {
-      // logger.error('Empty response from Gemini', response.data);
-      logger.error('Empty response from Gemini', response);
+      logger.error('Empty response from AI provider');
       throw new Error('Empty AI response');
     }
 
@@ -597,37 +533,7 @@ export async function processMessageWithAI(
     return aiResponse;
 
   } catch (error) {
-    if (axios.isAxiosError(error)) {
-      logger.error('Gemini API error', {
-        status: error.response?.status,
-        data: error.response?.data,
-      });
-
-      if (error.code === 'ECONNABORTED') {
-        logger.info('Retrying AI request after timeout...');
-        try {
-          const retryResponse = await axios.post(
-            `${GEMINI_API_URL}?key=${apiKey}`,
-            {
-              contents: [{ parts: [{ text: prompt }] }],
-              generationConfig: { temperature: 0.3, maxOutputTokens: 500 },
-            },
-            { headers: { 'Content-Type': 'application/json' }, timeout: 30000 }
-          );
-
-          const retryText =
-            retryResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (retryText) {
-            return parseAIResponse(retryText);
-          }
-        } catch (retryError) {
-          logger.error('Retry also failed', retryError);
-        }
-      }
-    } else {
-      logger.error('Unexpected AI error', error);
-    }
-
+    logger.error('Error processing message with AI', { error });
     return {
       reply: "I'm sorry, I'm having trouble right now. Please try again.",
       intent: 'ask_question',

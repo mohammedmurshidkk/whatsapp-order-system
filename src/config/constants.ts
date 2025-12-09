@@ -1,6 +1,12 @@
 export const SESSION_TIMEOUT_HOURS = 2;
 export const MESSAGE_HISTORY_LIMIT = 10;
-export const GEMINI_MODEL = 'gemini-2.5-flash';
+
+// AI Provider Configuration
+export const AI_PROVIDER = process.env.AI_PROVIDER || 'GEMINI';
+export const GEMINI_MODEL_NAME = process.env.GEMINI_MODEL_NAME || 'gemini-1.5-flash';
+export const OPENROUTER_MODEL_NAME = process.env.OPENROUTER_MODEL_NAME || 'anthropic/claude-3-haiku';
+export const GROQ_MODEL_NAME = process.env.GROQ_MODEL_NAME || 'llama3-8b-8192';
+
 export const WHATSAPP_API_VERSION = 'v18.0';
 
 // Session status constants
