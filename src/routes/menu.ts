@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, type IRouter } from 'express';
 import multer from 'multer';
 import {
   getMenu,
@@ -20,7 +20,7 @@ import {
 } from '../controllers/menuController';
 import { authMiddleware } from '../middleware/auth';
 
-const router = Router();
+const router: IRouter = Router();
 
 // Configure multer for file uploads (memory storage)
 const upload = multer({

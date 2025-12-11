@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { IRouter, Router } from 'express';
 import {
   listAddonGroups,
   createAddon,
@@ -10,7 +10,7 @@ import {
 } from '../controllers/adminAddonController';
 import { authMiddleware } from '../middleware/auth';
 
-const router = Router();
+const router: IRouter = Router();
 
 // All routes require authentication
 router.use(authMiddleware);

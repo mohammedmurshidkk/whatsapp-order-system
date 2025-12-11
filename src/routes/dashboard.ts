@@ -1,8 +1,8 @@
-import { Router } from 'express';
+import { IRouter, Router } from 'express';
 import { getStats, getRecentOrders, getRecentSessions } from '../controllers/dashboardController';
 import { authMiddleware } from '../middleware/auth';
 
-const router = Router();
+const router: IRouter = Router();
 
 // All routes require authentication
 router.use(authMiddleware);

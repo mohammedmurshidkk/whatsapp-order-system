@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { IRouter, Router } from 'express';
 import multer from 'multer';
 import {
   listMenuItems,
@@ -12,7 +12,7 @@ import {
 } from '../controllers/adminMenuController';
 import { authMiddleware } from '../middleware/auth';
 
-const router = Router();
+const router: IRouter = Router();
 
 // Configure multer for image uploads
 const upload = multer({

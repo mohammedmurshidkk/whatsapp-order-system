@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { IRouter, Router } from 'express';
 import {
   listSessions,
   getSessionDetail,
@@ -7,7 +7,7 @@ import {
 } from '../controllers/adminSessionController';
 import { authMiddleware } from '../middleware/auth';
 
-const router = Router();
+const router: IRouter = Router();
 
 // All routes require authentication
 router.use(authMiddleware);

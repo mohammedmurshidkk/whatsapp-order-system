@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { IRouter, Router } from 'express';
 import multer from 'multer';
 import {
   getProfile,
@@ -11,7 +11,7 @@ import {
 } from '../controllers/adminBusinessController';
 import { authMiddleware } from '../middleware/auth';
 
-const router = Router();
+const router: IRouter = Router();
 
 // Configure multer for logo uploads
 const upload = multer({

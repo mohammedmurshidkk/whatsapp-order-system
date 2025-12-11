@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, IRouter } from 'express';
 import {
   handleWhatsAppWebhook,
   handleWebhookVerification,
@@ -10,7 +10,7 @@ import {
   getSession,
 } from '../controllers/orderController';
 
-const router = Router();
+const router: IRouter = Router();
 
 // WhatsApp webhook endpoints
 router.get('/whatsapp', handleWebhookVerification);
