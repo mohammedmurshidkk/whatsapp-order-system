@@ -15,6 +15,11 @@ import {
 } from '../services/messageService';
 import { processMessageWithAI } from '../services/aiService';
 import {
+  normalizeManglish,
+  containsMalayalamScript,
+  isManglishMessage,
+} from '../services/manglishService';
+import {
   saveOrderItem,
   generateOrderSummary,
   createFinalOrder,
@@ -22,6 +27,8 @@ import {
   removeSessionItem,
   cancelOrderById,
   getOrderStatus,
+  getCustomerActiveOrder,
+  getOrderStatusMessage,
 } from '../services/orderService';
 import {
   getBusinessById,
@@ -57,6 +64,11 @@ import {
   sendInteractiveListMessage,
   sendLocationRequest,
 } from '../services/whatsappService';
+import {
+  processVoiceMessage,
+  isSpeechServiceAvailable,
+  isVoiceEnabled,
+} from '../services/speechService';
 import { notifyBusinessAdmin } from '../services/notificationService';
 import {
   isValidPhoneNumber,
@@ -120,6 +132,20 @@ async function processMessage(
   businessId: string
 ): Promise<string | null> {
   logger.info(`Processing message from ${phone}: ${messageText.substring(0, 50)}...`);
+
+  // Normalize Manglish (Malayalam + English) to English for AI processing
+  const originalMessage = messageText;
+  const normalizedMessage = normalizeManglish(messageText);
+  const wasManglishNormalized = originalMessage.toLowerCase() !== normalizedMessage;
+  const hasMalayalamScript = containsMalayalamScript(originalMessage);
+  const isManglish = isManglishMessage(originalMessage);
+
+  if (wasManglishNormalized) {
+    logger.info(`Manglish normalized: "${originalMessage}" → "${normalizedMessage}"`);
+  }
+
+  // Use normalized message for processing
+  messageText = normalizedMessage;
 
   // Get business context
   const business = await getBusinessById(businessId);
@@ -1008,6 +1034,7 @@ async function processMessage(
 
     case 'check_order_status':
       if (aiResponse.order_id) {
+        // Customer provided order number - look up specific order
         const businessTimezoneForStatus = businessTimezone;
         const statusResult = await getOrderStatus(aiResponse.order_id, customer.id, businessId, businessTimezoneForStatus);
         if (statusResult.success) {
@@ -1016,7 +1043,13 @@ async function processMessage(
           replyMessage = `❌ ${statusResult.message}`;
         }
       } else {
-        replyMessage = "Could you please provide the order number to check its status? (e.g., OKS-1)";
+        // No order number provided - try to find their active order
+        const activeOrder = await getCustomerActiveOrder(customer.id, businessId);
+        if (activeOrder) {
+          replyMessage = getOrderStatusMessage(activeOrder, businessTimezone);
+        } else {
+          replyMessage = "You don't have any active orders right now. Would you like to place one? 😊";
+        }
       }
       break;
 
@@ -1105,6 +1138,20 @@ async function processMessage(
       break;
   }
 
+  // Add Malayalam/Manglish acknowledgment if detected (friendly touch)
+  if (hasMalayalamScript) {
+    // Customer used Malayalam script - acknowledge in Malayalam
+    replyMessage = "മലയാളം മനസ്സിലായി! 😊 " + replyMessage;
+  } else if (isManglish && wasManglishNormalized) {
+    // Customer used Manglish - subtle acknowledgment (only occasionally)
+    // Don't add prefix for every message, just for first interaction or significant ones
+    const shouldAcknowledge = Math.random() < 0.3; // 30% chance to acknowledge
+    if (shouldAcknowledge && !replyMessage.includes('കേരള') && !replyMessage.includes('😊')) {
+      // Add subtle Kerala touch occasionally
+      replyMessage = replyMessage + " 😊";
+    }
+  }
+
   // Save outgoing message
   await saveOutgoingMessage(session.id, replyMessage);
 
@@ -1191,6 +1238,66 @@ export async function handleWhatsAppWebhook(
             imageResponse += `\n\nIn the meantime, you can describe what you'd like to order? 😊`;
             await sendWhatsAppMessage(phone, imageResponse);
             await saveOutgoingMessage(session.id, imageResponse);
+            continue;
+          }
+
+          // Handle voice/audio messages (Feature 2 - Speech-to-Text)
+          if ((message.type === 'audio' || message.type === 'voice') && (message.audio || message.voice)) {
+            const audioId = message.audio?.id || message.voice?.id;
+            logger.info(`Voice message received from ${phone}: ${audioId}`);
+
+            const customer = await findOrCreateCustomer(phone, business.id);
+            const session = await findOrCreateSession(customer.id, business.id);
+
+            // Check if voice feature is enabled (premium feature)
+            if (!isVoiceEnabled()) {
+              logger.info('Voice feature disabled');
+              await saveIncomingMessage(session.id, '[Voice message received]');
+              const notEnabledReply = "Oops! I'm not able to understand voice messages yet. 🙈\n\nCould you please type your message instead? I'd love to help you! 💬";
+              await sendWhatsAppMessage(phone, notEnabledReply);
+              await saveOutgoingMessage(session.id, notEnabledReply);
+              continue;
+            }
+
+            // Check if speech service is available
+            if (!isSpeechServiceAvailable()) {
+              logger.warn('Speech service not configured - voice messages disabled');
+              await saveIncomingMessage(session.id, '[Voice message - transcription unavailable]');
+              const noSpeechReply = "I received your voice message! 🎤\n\nVoice transcription is not available right now. Could you please type your message instead? 😊";
+              await sendWhatsAppMessage(phone, noSpeechReply);
+              await saveOutgoingMessage(session.id, noSpeechReply);
+              continue;
+            }
+
+            try {
+              // Transcribe voice message
+              const transcription = await processVoiceMessage(audioId!);
+              logger.info(`Voice transcribed: "${transcription.substring(0, 50)}..."`);
+
+              // Save the transcription as incoming message
+              await saveIncomingMessage(session.id, `[Voice: ${transcription}]`);
+
+              // Process transcription as a normal text message
+              const reply = await processMessage(phone, transcription, business.id);
+
+              if (reply !== null) {
+                // Prepend transcription confirmation to the reply
+                const voiceReply = `🎤 _"${transcription}"_\n\n${reply}`;
+                await sendWhatsAppMessage(phone, voiceReply);
+                // Note: processMessage already saves outgoing message, so we update it
+              }
+            } catch (error) {
+              logger.error('Voice processing failed', error);
+              await saveIncomingMessage(session.id, '[Voice message - transcription failed]');
+
+              const supportPhone = business.customer_support_phone;
+              let errorReply = "Sorry, I couldn't understand your voice message. 🎤\n\nCould you please type your message instead?";
+              if (supportPhone) {
+                errorReply += `\n\n📞 Need help? Contact: ${supportPhone}`;
+              }
+              await sendWhatsAppMessage(phone, errorReply);
+              await saveOutgoingMessage(session.id, errorReply);
+            }
             continue;
           }
 

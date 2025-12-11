@@ -301,7 +301,7 @@ export interface WhatsAppWebhookMessage {
   from: string;
   id: string;
   timestamp: string;
-  type: string; // 'text' | 'interactive' | 'location' | 'image'
+  type: string; // 'text' | 'interactive' | 'location' | 'image' | 'audio' | 'voice'
   text?: {
     body: string;
   };
@@ -328,6 +328,14 @@ export interface WhatsAppWebhookMessage {
     mime_type: string;
     sha256: string;
     caption?: string;
+  };
+  audio?: {
+    id: string;
+    mime_type: string;
+  };
+  voice?: {
+    id: string;
+    mime_type: string;
   };
 }
 

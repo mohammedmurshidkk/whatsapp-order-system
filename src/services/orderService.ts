@@ -531,6 +531,73 @@ export async function getCustomerOrders(customerId: string): Promise<Order[]> {
   return (data || []) as Order[];
 }
 
+/**
+ * Get customer's most recent active order (for "where's my order?" without order number)
+ * Active statuses: confirmed, processing (not completed/cancelled)
+ */
+export async function getCustomerActiveOrder(customerId: string, businessId: string): Promise<Order | null> {
+  const { data, error } = await supabase
+    .from('orders')
+    .select('*')
+    .eq('customer_id', customerId)
+    .eq('business_id', businessId)
+    .in('status', ['confirmed', 'processing'])
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
+
+  if (error) {
+    // No active order found is not an error
+    if (error.code === 'PGRST116') {
+      return null;
+    }
+    logger.error('Failed to fetch active order', error);
+    return null;
+  }
+
+  return data as Order;
+}
+
+/**
+ * Get formatted status message for an active order
+ * Used when customer asks "where's my order?" without specifying order number
+ */
+export function getOrderStatusMessage(order: Order, timezone: string = 'Asia/Kolkata'): string {
+  const statusEmojis: Record<string, string> = {
+    confirmed: '✅',
+    processing: '👨‍🍳',
+    completed: '🎉',
+    cancelled: '❌',
+  };
+
+  const statusMessages: Record<string, string> = {
+    confirmed: 'Your order is confirmed! We\'re getting it ready.',
+    processing: 'Your order is being prepared! 👨‍🍳',
+    completed: 'Your order has been delivered/picked up.',
+    cancelled: 'This order was cancelled.',
+  };
+
+  let message = `📋 *Order #${order.order_number}*\n\n`;
+  message += `${statusEmojis[order.status] || '📦'} ${statusMessages[order.status] || 'Order in progress'}\n\n`;
+  message += `💰 Total: ₹${order.total_amount}\n`;
+
+  if (order.fulfillment_type === 'delivery' && order.delivery_address) {
+    message += `🚚 Delivery to: ${order.delivery_address}\n`;
+    if (order.delivery_time) {
+      message += `⏰ Time: ${formatDeliveryTime(order.delivery_time, timezone)}\n`;
+    }
+  } else if (order.fulfillment_type === 'takeaway') {
+    message += `🏪 Takeaway\n`;
+    if (order.pickup_time) {
+      message += `⏰ Time: ${formatDeliveryTime(order.pickup_time, timezone)}\n`;
+    }
+  }
+
+  message += `\n_Need help? Just ask!_`;
+
+  return message;
+}
+
 // Cancel an order by order_number (must belong to same business)
 export async function cancelOrderById(
   orderNumber: string,
