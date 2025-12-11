@@ -1,0 +1,241 @@
+import { Response } from 'express';
+import { supabase } from '../config/database';
+import { AuthRequest, getBusinessId } from '../middleware/auth';
+import { logger } from '../utils/logger';
+
+// List sessions with filters
+export async function listSessions(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const { status, page = '1', limit = '20' } = req.query;
+    const pageNum = parseInt(page as string);
+    const limitNum = parseInt(limit as string);
+    const offset = (pageNum - 1) * limitNum;
+
+    // Build query
+    let query = supabase
+      .from('sessions')
+      .select(`
+        id,
+        status,
+        ai_paused,
+        total_items,
+        last_message_at,
+        created_at,
+        customers (
+          phone
+        )
+      `, { count: 'exact' })
+      .eq('business_id', businessId)
+      .order('last_message_at', { ascending: false });
+
+    // Filter by status
+    if (status && status !== 'all') {
+      query = query.eq('status', status);
+    }
+
+    // Apply pagination
+    query = query.range(offset, offset + limitNum - 1);
+
+    const { data: sessions, error, count } = await query;
+
+    if (error) {
+      throw error;
+    }
+
+    const enrichedSessions = (sessions || []).map(session => ({
+      id: session.id,
+      customer_phone: (session.customers as any)?.phone || 'Unknown',
+      status: session.status,
+      ai_paused: session.ai_paused,
+      items_count: session.total_items,
+      last_message_at: session.last_message_at,
+      created_at: session.created_at,
+    }));
+
+    res.status(200).json({
+      sessions: enrichedSessions,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total: count || 0,
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to list sessions', error);
+    res.status(500).json({ error: 'Failed to fetch sessions' });
+  }
+}
+
+// Get session detail with messages
+export async function getSessionDetail(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const { sessionId } = req.params;
+
+    // Get session with customer
+    const { data: session, error: sessionError } = await supabase
+      .from('sessions')
+      .select(`
+        *,
+        customers (
+          phone,
+          name
+        )
+      `)
+      .eq('id', sessionId)
+      .eq('business_id', businessId)
+      .single();
+
+    if (sessionError || !session) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+
+    // Get session items
+    const { data: items } = await supabase
+      .from('session_items')
+      .select('*')
+      .eq('session_id', sessionId)
+      .order('created_at', { ascending: true });
+
+    // Get messages
+    const { data: messages } = await supabase
+      .from('messages')
+      .select('id, direction, content, created_at')
+      .eq('session_id', sessionId)
+      .order('created_at', { ascending: true });
+
+    res.status(200).json({
+      session: {
+        ...session,
+        customer_phone: (session.customers as any)?.phone || 'Unknown',
+        customer_name: (session.customers as any)?.name || null,
+        items: items || [],
+      },
+      messages: messages || [],
+    });
+  } catch (error) {
+    logger.error('Failed to get session detail', error);
+    res.status(500).json({ error: 'Failed to fetch session' });
+  }
+}
+
+// Toggle AI pause for session
+export async function toggleAiPause(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const { sessionId } = req.params;
+    const { paused } = req.body;
+
+    if (typeof paused !== 'boolean') {
+      res.status(400).json({ error: 'paused must be a boolean' });
+      return;
+    }
+
+    // Verify session belongs to this business
+    const { data: session } = await supabase
+      .from('sessions')
+      .select('id, business_id')
+      .eq('id', sessionId)
+      .eq('business_id', businessId)
+      .single();
+
+    if (!session) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+
+    // Update AI pause status
+    const { error } = await supabase
+      .from('sessions')
+      .update({
+        ai_paused: paused,
+        paused_at: paused ? new Date().toISOString() : null,
+        paused_by: paused ? (req as any).user?.email : null,
+      })
+      .eq('id', sessionId);
+
+    if (error) {
+      throw error;
+    }
+
+    logger.info(`Session ${sessionId} AI paused: ${paused}`);
+
+    res.status(200).json({ success: true, ai_paused: paused });
+  } catch (error) {
+    logger.error('Failed to toggle AI pause', error);
+    res.status(500).json({ error: 'Failed to toggle AI pause' });
+  }
+}
+
+// Send manual message to customer (when AI is paused)
+export async function sendManualMessage(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const { sessionId } = req.params;
+    const { message } = req.body;
+
+    if (!message || typeof message !== 'string') {
+      res.status(400).json({ error: 'message is required' });
+      return;
+    }
+
+    // Verify session belongs to this business and is active
+    const { data: session } = await supabase
+      .from('sessions')
+      .select('id, business_id, status, customers(phone)')
+      .eq('id', sessionId)
+      .eq('business_id', businessId)
+      .single();
+
+    if (!session) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+
+    // Save message to database
+    const { error: msgError } = await supabase
+      .from('messages')
+      .insert({
+        session_id: sessionId,
+        direction: 'outgoing',
+        content: message,
+        created_at: new Date().toISOString(),
+      });
+
+    if (msgError) {
+      throw msgError;
+    }
+
+    // TODO: Actually send via WhatsApp API
+    // For now, just log and return success
+    const customerPhone = (session.customers as any)?.phone;
+    logger.info(`Manual message sent to ${customerPhone}: ${message.substring(0, 50)}...`);
+
+    res.status(200).json({ success: true });
+  } catch (error) {
+    logger.error('Failed to send manual message', error);
+    res.status(500).json({ error: 'Failed to send message' });
+  }
+}

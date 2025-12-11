@@ -1,15 +1,49 @@
 import { supabase } from '../config/database';
-import { SessionItem, Order, AIItemResponse, OrderItemData, MenuItem } from '../types';
+import { SessionItem, Order, AIItemResponse, OrderItemData, MenuItem, Business } from '../types';
 import {
   getSessionWithItems,
   completeSession,
   updateSessionItemCount,
 } from './sessionService';
 import { searchMenuItem, getBusinessById } from './menuService';
+import { formatDeliveryTime, formatDateForDisplay } from './fulfillmentService';
 import { logger } from '../utils/logger';
 
-// Default business ID (same as webhookController for now)
-const DEFAULT_BUSINESS_ID = 'c3150207-4bf9-4ce4-8478-2e6369c46749';
+/**
+ * Generate the next order number for a business
+ * Format: PREFIX-N (e.g., "OKS-1", "OKS-2")
+ * N resets daily and is unique per business per day
+ */
+async function generateOrderNumber(businessId: string): Promise<string> {
+  // Get business prefix
+  const business = await getBusinessById(businessId);
+  const prefix = business?.order_number_prefix || 'ORD';
+
+  // Get today's date in YYYY-MM-DD format
+  const today = new Date().toISOString().split('T')[0];
+  const startOfDay = `${today}T00:00:00.000Z`;
+  const endOfDay = `${today}T23:59:59.999Z`;
+
+  // Count orders for this business today
+  const { count, error } = await supabase
+    .from('orders')
+    .select('*', { count: 'exact', head: true })
+    .eq('business_id', businessId)
+    .gte('created_at', startOfDay)
+    .lte('created_at', endOfDay);
+
+  if (error) {
+    logger.error('Failed to count daily orders', error);
+    // Fallback: use timestamp-based number
+    return `${prefix}-${Date.now().toString().slice(-6)}`;
+  }
+
+  const nextNumber = (count || 0) + 1;
+  const orderNumber = `${prefix}-${nextNumber}`;
+
+  logger.info(`Generated order number: ${orderNumber} for business ${businessId}`);
+  return orderNumber;
+}
 
 // Helper to get price for an item based on size
 function getItemPrice(menuItem: MenuItem, sizeOrWeight?: string | null): number | null {
@@ -36,7 +70,7 @@ function getItemPrice(menuItem: MenuItem, sizeOrWeight?: string | null): number 
 export async function saveOrderItem(
   sessionId: string,
   item: AIItemResponse,
-  businessId: string = DEFAULT_BUSINESS_ID
+  businessId: string
 ): Promise<SessionItem> {
   // Lookup menu item to get price
   let unitPrice: number | null = null;
@@ -180,7 +214,13 @@ export async function removeSessionItem(
   return true;
 }
 
-export async function generateOrderSummary(sessionId: string): Promise<string> {
+// Generate order summary - can optionally include CTA message
+export async function generateOrderSummary(
+  sessionId: string,
+  options: { includeCta?: boolean; ctaMessage?: string; timezone?: string } = {}
+): Promise<string> {
+  const { includeCta = false, ctaMessage = 'Reply *YES* to confirm your order', timezone = 'Asia/Kolkata' } = options;
+
   const session = await getSessionWithItems(sessionId);
 
   if (!session || session.items.length === 0) {
@@ -217,12 +257,39 @@ export async function generateOrderSummary(sessionId: string): Promise<string> {
 
     summary += '\n';
 
+    // Show add-ons
+    if (item.addons && item.addons.length > 0) {
+      item.addons.forEach((addon) => {
+        const addonTotal = (addon.unit_price || 0) * addon.quantity;
+        grandTotal += addonTotal;
+
+        summary += `   + ${addon.addon_name}`;
+
+        if (addon.quantity > 1) {
+          summary += ` x${addon.quantity}`;
+        }
+
+        if (addon.unit_price !== null && addon.unit_price > 0) {
+          if (addon.quantity > 1) {
+            summary += ` - ₹${addon.unit_price} × ${addon.quantity} = ₹${addonTotal}`;
+          } else {
+            summary += ` - ₹${addon.unit_price}`;
+          }
+        } else {
+          summary += ' - FREE';
+        }
+
+        summary += '\n';
+      });
+    }
+
     if (item.custom_text) {
       summary += `   📝 "${item.custom_text}"\n`;
     }
 
     if (item.delivery_date) {
-      summary += `   📅 ${item.delivery_date}\n`;
+      // Format delivery date using timezone
+      summary += `   📅 ${formatDateForDisplay(item.delivery_date, timezone)}\n`;
     }
 
     if (item.notes) {
@@ -234,8 +301,29 @@ export async function generateOrderSummary(sessionId: string): Promise<string> {
 
   summary += '━━━━━━━━━━━━━━━━━━\n';
   summary += `📦 Total Items: ${session.items.length}\n`;
-  summary += `💰 *Grand Total: ₹${grandTotal}*\n\n`;
-  summary += 'Reply *YES* to confirm your order';
+  summary += `💰 *Grand Total: ₹${grandTotal}*\n`;
+
+  // Add fulfillment info if available
+  if (session.fulfillment_type) {
+    summary += '\n';
+    if (session.fulfillment_type === 'delivery' && session.delivery_address) {
+      summary += `🚚 Delivery to: ${session.delivery_address}\n`;
+      if (session.delivery_time) {
+        // Format time using timezone-aware formatter
+        summary += `⏰ Time: ${formatDeliveryTime(session.delivery_time, timezone)}\n`;
+      }
+    } else if (session.fulfillment_type === 'takeaway' && session.pickup_outlet_id) {
+      summary += `📍 Pickup from outlet\n`;
+      if (session.pickup_time) {
+        // Format time using timezone-aware formatter
+        summary += `⏰ Time: ${formatDeliveryTime(session.pickup_time, timezone)}\n`;
+      }
+    }
+  }
+
+  if (includeCta && ctaMessage) {
+    summary += '\n' + ctaMessage;
+  }
 
   return summary;
 }
@@ -257,6 +345,19 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
     const lineTotal = (item.unit_price || 0) * item.quantity;
     totalAmount += lineTotal;
 
+    // Process add-ons
+    const addons = (item.addons || []).map((addon) => {
+      const addonTotal = (addon.unit_price || 0) * addon.quantity;
+      totalAmount += addonTotal;
+
+      return {
+        addon_name: addon.addon_name,
+        quantity: addon.quantity,
+        unit_price: addon.unit_price || undefined,
+        line_total: addonTotal || undefined,
+      };
+    });
+
     return {
       name: item.item_name,
       quantity: item.quantity,
@@ -266,6 +367,7 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
       custom_text: item.custom_text || undefined,
       delivery_date: item.delivery_date || undefined,
       notes: item.notes || undefined,
+      addons: addons.length > 0 ? addons : undefined,
     };
   });
 
@@ -279,10 +381,16 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
 
   const deliveryDate = deliveryDates.length > 0 ? deliveryDates[0] : null;
 
+  // Generate user-friendly order number (e.g., "OKS-1")
+  const businessId = session.business_id!;
+  const orderNumber = await generateOrderNumber(businessId);
+
   // Create the order
   const { data: order, error } = await supabase
     .from('orders')
     .insert({
+      order_number: orderNumber,
+      business_id: businessId,
       session_id: sessionId,
       customer_id: session.customer_id,
       items: orderItems,
@@ -292,6 +400,14 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
       status: 'confirmed',
       created_at: new Date().toISOString(),
       delivery_date: deliveryDate,
+      fulfillment_type: session.fulfillment_type || null,
+      delivery_address: session.delivery_address || null,
+      delivery_latitude: session.delivery_latitude || null,
+      delivery_longitude: session.delivery_longitude || null,
+      delivery_time: session.delivery_time || null,
+      pickup_outlet_id: session.pickup_outlet_id || null,
+      pickup_time: session.pickup_time || null,
+      fulfillment_notes: session.fulfillment_notes || null,
     })
     .select()
     .single();
@@ -304,7 +420,7 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
   // Mark session as completed
   await completeSession(sessionId);
 
-  logger.info(`Order created: ${order.id} - Total: ₹${totalAmount}`);
+  logger.info(`Order created: ${order.order_number} (ID: ${order.id}) - Total: ₹${totalAmount}`);
 
   // Send notification to business
   await sendOrderNotification(order as Order);
@@ -312,22 +428,60 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
   return order as Order;
 }
 
-export async function sendOrderNotification(order: Order): Promise<void> {
+export async function sendOrderNotification(order: Order, timezone: string = 'Asia/Kolkata'): Promise<void> {
   const notificationMethod = process.env.BUSINESS_NOTIFICATION_METHOD || 'console';
+
+  // Get outlet name if pickup
+  let outletInfo = '';
+  if (order.fulfillment_type === 'takeaway' && order.pickup_outlet_id) {
+    const { data: outlet } = await supabase
+      .from('business_outlets')
+      .select('outlet_name')
+      .eq('id', order.pickup_outlet_id)
+      .single();
+
+    if (outlet) {
+      outletInfo = ` from ${outlet.outlet_name}`;
+    }
+  }
 
   const notificationText = `
 🔔 NEW ORDER RECEIVED
 ━━━━━━━━━━━━━━━━━━━━
-Order ID: ${order.id.substring(0, 8)}
+Order #: ${order.order_number}
 Customer ID: ${order.customer_id.substring(0, 8)}
 Status: ${order.status}
-Delivery Date: ${order.delivery_date || 'Not specified'}
+
+${order.fulfillment_type === 'delivery' ? '🚚 DELIVERY' : order.fulfillment_type === 'takeaway' ? '📍 TAKEAWAY' : ''}
+${order.delivery_address ? `Address: ${order.delivery_address}` : ''}
+${order.pickup_outlet_id ? `Pickup${outletInfo}` : ''}
+${order.delivery_time ? `Time: ${formatDeliveryTime(order.delivery_time, timezone)}` : ''}
+${order.pickup_time ? `Pickup Time: ${formatDeliveryTime(order.pickup_time, timezone)}` : ''}
+${order.fulfillment_notes ? `Notes: ${order.fulfillment_notes}` : ''}
 
 Items:
 ${order.items
   .map(
-    (item, i) =>
-      `${i + 1}. ${item.name}${item.size_or_weight ? ` (${item.size_or_weight})` : ''} x${item.quantity} - ₹${item.line_total || 0}`
+    (item, i) => {
+      let itemText = `${i + 1}. ${item.name}${item.size_or_weight ? ` (${item.size_or_weight})` : ''} x${item.quantity} - ₹${item.line_total || 0}`;
+
+      // Add add-ons if any
+      if (item.addons && item.addons.length > 0) {
+        item.addons.forEach((addon) => {
+          itemText += `\n   + ${addon.addon_name}`;
+          if (addon.quantity > 1) {
+            itemText += ` x${addon.quantity}`;
+          }
+          if (addon.unit_price) {
+            itemText += ` - ₹${addon.line_total || 0}`;
+          } else {
+            itemText += ' - FREE';
+          }
+        });
+      }
+
+      return itemText;
+    }
   )
   .join('\n')}
 
@@ -335,7 +489,7 @@ ${order.items
 Total Items: ${order.total_items}
 💰 TOTAL: ₹${order.total_amount}
 ━━━━━━━━━━━━━━━━━━━━
-Created: ${order.created_at}
+Created: ${formatDeliveryTime(order.created_at, timezone)}
 `;
 
   switch (notificationMethod) {
@@ -377,40 +531,100 @@ export async function getCustomerOrders(customerId: string): Promise<Order[]> {
   return (data || []) as Order[];
 }
 
-// Cancel an order by ID (short ID or full UUID)
-export async function cancelOrderById(
-  orderId: string,
-  customerId: string
-): Promise<{ success: boolean; message: string; order?: Order }> {
-  // orderId could be short (first 8 chars) or full UUID
-  const isShortId = orderId.length <= 8;
+/**
+ * Get customer's most recent active order (for "where's my order?" without order number)
+ * Active statuses: confirmed, processing (not completed/cancelled)
+ */
+export async function getCustomerActiveOrder(customerId: string, businessId: string): Promise<Order | null> {
+  const { data, error } = await supabase
+    .from('orders')
+    .select('*')
+    .eq('customer_id', customerId)
+    .eq('business_id', businessId)
+    .in('status', ['confirmed', 'processing'])
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
 
-  let query = supabase.from('orders').select('*');
-
-  if (isShortId) {
-    // Search by ID starting with the short ID
-    query = query.ilike('id', `${orderId}%`);
-  } else {
-    query = query.eq('id', orderId);
+  if (error) {
+    // No active order found is not an error
+    if (error.code === 'PGRST116') {
+      return null;
+    }
+    logger.error('Failed to fetch active order', error);
+    return null;
   }
 
-  const { data: orders, error: fetchError } = await query;
+  return data as Order;
+}
+
+/**
+ * Get formatted status message for an active order
+ * Used when customer asks "where's my order?" without specifying order number
+ */
+export function getOrderStatusMessage(order: Order, timezone: string = 'Asia/Kolkata'): string {
+  const statusEmojis: Record<string, string> = {
+    confirmed: '✅',
+    processing: '👨‍🍳',
+    completed: '🎉',
+    cancelled: '❌',
+  };
+
+  const statusMessages: Record<string, string> = {
+    confirmed: 'Your order is confirmed! We\'re getting it ready.',
+    processing: 'Your order is being prepared! 👨‍🍳',
+    completed: 'Your order has been delivered/picked up.',
+    cancelled: 'This order was cancelled.',
+  };
+
+  let message = `📋 *Order #${order.order_number}*\n\n`;
+  message += `${statusEmojis[order.status] || '📦'} ${statusMessages[order.status] || 'Order in progress'}\n\n`;
+  message += `💰 Total: ₹${order.total_amount}\n`;
+
+  if (order.fulfillment_type === 'delivery' && order.delivery_address) {
+    message += `🚚 Delivery to: ${order.delivery_address}\n`;
+    if (order.delivery_time) {
+      message += `⏰ Time: ${formatDeliveryTime(order.delivery_time, timezone)}\n`;
+    }
+  } else if (order.fulfillment_type === 'takeaway') {
+    message += `🏪 Takeaway\n`;
+    if (order.pickup_time) {
+      message += `⏰ Time: ${formatDeliveryTime(order.pickup_time, timezone)}\n`;
+    }
+  }
+
+  message += `\n_Need help? Just ask!_`;
+
+  return message;
+}
+
+// Cancel an order by order_number (must belong to same business)
+export async function cancelOrderById(
+  orderNumber: string,
+  customerId: string,
+  businessId: string
+): Promise<{ success: boolean; message: string; order?: Order }> {
+  // Search by order_number within the same business
+  const { data: orders, error: fetchError } = await supabase
+    .from('orders')
+    .select('*')
+    .eq('business_id', businessId)
+    .ilike('order_number', orderNumber.toUpperCase());
 
   if (fetchError || !orders || orders.length === 0) {
     return {
       success: false,
-      message: `Order #${orderId} not found. Please check the order ID and try again.`,
+      message: `Order #${orderNumber} not found. Please check the order number and try again.`,
     };
   }
 
-  // If multiple matches (unlikely but possible), take first
   const order = orders[0] as Order;
 
   // Verify this order belongs to the customer
   if (order.customer_id !== customerId) {
     return {
       success: false,
-      message: `Order #${orderId} not found. Please check the order ID and try again.`,
+      message: `Order #${orderNumber} not found. Please check the order number and try again.`,
     };
   }
 
@@ -418,25 +632,27 @@ export async function cancelOrderById(
   if (order.status === 'cancelled') {
     return {
       success: false,
-      message: `Order #${orderId.substring(0, 8)} is already cancelled.`,
+      message: `Order #${order.order_number} is already cancelled.`,
     };
   }
 
   if (order.status === 'completed') {
     return {
       success: false,
-      message: `Order #${orderId.substring(0, 8)} is already completed and cannot be cancelled.`,
+      message: `Order #${order.order_number} is already completed and cannot be cancelled.`,
     };
   }
 
-  // Cancel the order
-  const { error: updateError } = await supabase
+  // Cancel the order and verify the update
+  const { data: updatedOrder, error: updateError } = await supabase
     .from('orders')
     .update({
       status: 'cancelled',
       updated_at: new Date().toISOString(),
     })
-    .eq('id', order.id);
+    .eq('id', order.id)
+    .select()
+    .single();
 
   if (updateError) {
     logger.error('Failed to cancel order', updateError);
@@ -446,29 +662,96 @@ export async function cancelOrderById(
     };
   }
 
-  logger.info(`Order cancelled: ${order.id}`);
+  // Verify the update was applied
+  if (!updatedOrder || updatedOrder.status !== 'cancelled') {
+    logger.error(`Order cancel update failed - status is still: ${updatedOrder?.status}`);
+    return {
+      success: false,
+      message: 'Failed to cancel order. Please try again or contact us.',
+    };
+  }
+
+  logger.info(`Order cancelled successfully: ${order.order_number} (DB status: ${updatedOrder.status})`);
 
   return {
     success: true,
-    message: `Order #${order.id.substring(0, 8)} has been cancelled successfully.`,
+    message: `Order #${order.order_number} has been cancelled successfully.`,
     order: { ...order, status: 'cancelled' },
   };
 }
 
-// Get order by short ID for a customer
-export async function getOrderByShortId(
-  shortId: string,
-  customerId: string
+// Get order by order_number for a customer (within a business)
+export async function getOrderByOrderNumber(
+  orderNumber: string,
+  customerId: string,
+  businessId: string
 ): Promise<Order | null> {
   const { data: orders } = await supabase
     .from('orders')
     .select('*')
+    .eq('business_id', businessId)
     .eq('customer_id', customerId)
-    .ilike('id', `${shortId}%`);
+    .ilike('order_number', orderNumber.toUpperCase());
 
   if (!orders || orders.length === 0) {
     return null;
   }
 
   return orders[0] as Order;
+}
+
+// Get order status with formatted response
+export async function getOrderStatus(
+  orderNumber: string,
+  customerId: string,
+  businessId: string,
+  timezone: string = 'Asia/Kolkata'
+): Promise<{ success: boolean; message: string; order?: Order }> {
+  const order = await getOrderByOrderNumber(orderNumber, customerId, businessId);
+
+  if (!order) {
+    return {
+      success: false,
+      message: `Order #${orderNumber} not found. Please check the order number and try again.`,
+    };
+  }
+
+  // Format status message
+  const statusEmoji: Record<string, string> = {
+    confirmed: '✅',
+    processing: '🔄',
+    completed: '🎉',
+    cancelled: '❌',
+  };
+
+  const statusText: Record<string, string> = {
+    confirmed: 'Order Confirmed - We are preparing your order',
+    processing: 'Being Prepared - Your order is being prepared',
+    completed: 'Completed - Your order has been delivered/picked up',
+    cancelled: 'Cancelled - This order was cancelled',
+  };
+
+  let message = `📋 *Order Status: #${order.order_number}*\n\n`;
+  message += `${statusEmoji[order.status] || '📦'} *${statusText[order.status] || order.status}*\n\n`;
+  message += `💰 Total: ₹${order.total_amount}\n`;
+
+  if (order.fulfillment_type === 'delivery' && order.delivery_address) {
+    message += `🚚 Delivery to: ${order.delivery_address}\n`;
+    if (order.delivery_time) {
+      message += `⏰ Time: ${formatDeliveryTime(order.delivery_time, timezone)}\n`;
+    }
+  } else if (order.fulfillment_type === 'takeaway') {
+    message += `🏪 Takeaway\n`;
+    if (order.pickup_time) {
+      message += `⏰ Time: ${formatDeliveryTime(order.pickup_time, timezone)}\n`;
+    }
+  }
+
+  message += `\n📅 Ordered: ${formatDeliveryTime(order.created_at, timezone)}`;
+
+  return {
+    success: true,
+    message,
+    order,
+  };
 }

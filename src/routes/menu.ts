@@ -2,14 +2,23 @@ import { Router } from 'express';
 import multer from 'multer';
 import {
   getMenu,
+  getMenuByBusinessId,
   uploadMenu,
+  uploadMenuByBusinessId,
   uploadMenuFile,
+  uploadMenuFileByBusinessId,
   downloadMenu,
+  downloadMenuByBusinessId,
   downloadBlankTemplate,
   downloadSampleTemplate,
   validateMenu,
   importFromFile,
+  importFromFileByBusinessId,
+  uploadAddons,
+  uploadAddonsByBusinessId,
+  downloadAddonsTemplate,
 } from '../controllers/menuController';
+import { authMiddleware } from '../middleware/auth';
 
 const router = Router();
 
@@ -31,32 +40,59 @@ const upload = multer({
   },
 });
 
-// Download CSV templates
-router.get('/template', downloadBlankTemplate);           // Blank template
-router.get('/template/blank', downloadBlankTemplate);     // Same as above
-router.get('/template/sample', downloadSampleTemplate);   // Sample with data
+// ============================================
+// PUBLIC ROUTES (no auth required)
+// Templates and validation
+// ============================================
 
-// Validate CSV without importing
+// Download CSV templates (public - anyone can download templates)
+router.get('/template', downloadBlankTemplate);
+router.get('/template/blank', downloadBlankTemplate);
+router.get('/template/sample', downloadSampleTemplate);
+router.get('/addons/template', downloadAddonsTemplate);
+
+// Validate CSV without importing (public)
 router.post('/validate', validateMenu);
 
-// Get menu for a business
-router.get('/:businessId', getMenu);
+// ============================================
+// SUPER ADMIN ROUTES (no auth, requires businessId)
+// For initial setup via upload.html
+// ============================================
 
-// Upload/import menu - THREE OPTIONS:
+// Get menu by business ID
+router.get('/business/:businessId', getMenuByBusinessId);
 
-// Option 1: Upload CSV file directly (RECOMMENDED)
-// curl -X POST http://localhost:3000/api/menu/{businessId}/upload?replace=true -F "menu=@menu.csv"
-router.post('/:businessId/upload', upload.single('menu'), uploadMenuFile);
+// Upload menu by business ID
+router.post('/business/:businessId/upload', upload.single('menu'), uploadMenuFileByBusinessId);
+router.post('/business/:businessId/import', uploadMenuByBusinessId);
+router.post('/business/:businessId/import-file', importFromFileByBusinessId);
 
-// Option 2: Send CSV as JSON string
-// curl -X POST http://localhost:3000/api/menu/{businessId}/import -H "Content-Type: application/json" -d '{"csv":"...", "replace":true}'
-router.post('/:businessId/import', uploadMenu);
+// Export menu by business ID
+router.get('/business/:businessId/export', downloadMenuByBusinessId);
 
-// Option 3: Import from server file path (for testing)
-// curl -X POST http://localhost:3000/api/menu/{businessId}/import-file -H "Content-Type: application/json" -d '{"filePath":"templates/menu_template.csv", "replace":true}'
-router.post('/:businessId/import-file', importFromFile);
+// Add-ons import by business ID
+router.post('/business/:businessId/addons/import', uploadAddonsByBusinessId);
+
+// ============================================
+// PROTECTED ROUTES (require JWT authentication)
+// For business admin panel
+// ============================================
+
+// Apply auth middleware to all routes below
+router.use(authMiddleware);
+
+// Get menu for authenticated business
+router.get('/', getMenu);
+
+// Upload/import menu
+router.post('/upload', upload.single('menu'), uploadMenuFile);
+router.post('/import', uploadMenu);
+router.post('/import-file', importFromFile);
 
 // Export menu to CSV
-router.get('/:businessId/export', downloadMenu);
+router.get('/export', downloadMenu);
+
+// Add-ons import
+router.post('/addons/import', uploadAddons);
 
 export default router;

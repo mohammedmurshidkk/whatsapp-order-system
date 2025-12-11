@@ -5,6 +5,15 @@ import path from 'path';
 import webhookRoutes from './routes/webhook';
 import menuRoutes from './routes/menu';
 import sessionRoutes from './routes/session';
+// Admin routes
+import authRoutes from './routes/auth';
+import dashboardRoutes from './routes/dashboard';
+import adminOrderRoutes from './routes/adminOrders';
+import adminSessionRoutes from './routes/adminSessions';
+import adminMenuRoutes from './routes/adminMenu';
+import adminCategoryRoutes from './routes/adminCategories';
+import adminAddonRoutes from './routes/adminAddons';
+import adminBusinessRoutes from './routes/adminBusiness';
 import { logger } from './utils/logger';
 import { handleTestMessage } from './controllers/webhookController';
 
@@ -12,7 +21,7 @@ import { handleTestMessage } from './controllers/webhookController';
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 
 // Middleware
 app.use(cors());
@@ -41,6 +50,16 @@ app.get('/health', (_req: Request, res: Response) => {
 app.use('/webhook', webhookRoutes);
 app.use('/api/menu', menuRoutes);
 app.use('/api/sessions', sessionRoutes);
+
+// Admin API routes
+app.use('/api/auth', authRoutes);
+app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/orders', adminOrderRoutes);
+app.use('/api/admin/sessions', adminSessionRoutes);
+app.use('/api/admin/menu', adminMenuRoutes);
+app.use('/api/categories', adminCategoryRoutes);
+app.use('/api/addons', adminAddonRoutes);
+app.use('/api/business', adminBusinessRoutes);
 
 // Test routes (same as webhook for convenience)
 app.post('/test/message', handleTestMessage);

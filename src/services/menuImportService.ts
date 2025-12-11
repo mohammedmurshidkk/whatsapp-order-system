@@ -11,6 +11,7 @@ interface CSVMenuRow {
   is_customizable: string;
   requires_date: string;
   special_notes: string;
+  image_url?:string
 }
 
 interface ImportResult {
@@ -247,6 +248,7 @@ export async function importMenuFromCSV(
           description: row.description || null,
           price: sizes ? null : price, // Only set price if no sizes
           sizes: sizes,
+          image_url: row.image_url || null,
           is_customizable: parseBoolean(row.is_customizable),
           requires_date: parseBoolean(row.requires_date),
           special_notes: row.special_notes || null,

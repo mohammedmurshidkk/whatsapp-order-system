@@ -3,14 +3,24 @@ import {
   getSessionDetails,
   pauseSessionAI,
   resumeSessionAI,
-  getActiveSessions,
+  getSessions,
   findSessionByPhone,
 } from '../controllers/sessionController';
+import { authMiddleware } from '../middleware/auth';
 
 const router = Router();
 
-// Get active sessions for a business
-router.get('/business/:businessId/active', getActiveSessions);
+// All routes require authentication
+router.use(authMiddleware);
+
+// Get sessions for authenticated business
+// Query params: ?status=active|completed|expired|all (default: all)
+//               ?page=1&limit=20
+// Examples:
+//   GET /api/sessions              → all sessions
+//   GET /api/sessions?status=active → only active sessions
+//   GET /api/sessions?status=completed&page=2&limit=10
+router.get('/', getSessions);
 
 // Find session by customer phone
 router.get('/phone/:phone', findSessionByPhone);
