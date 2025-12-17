@@ -180,10 +180,6 @@ function formatMenuItem(item: MenuItem): string {
     text += ` - ₹${item.price}`;
   }
 
-  if (item.is_customizable) {
-    text += ' [customizable]';
-  }
-
   text += '\n';
   return text;
 }

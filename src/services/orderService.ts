@@ -39,7 +39,8 @@ async function generateOrderNumber(businessId: string): Promise<string> {
   }
 
   const nextNumber = (count || 0) + 1;
-  const orderNumber = `${prefix}-${nextNumber}`;
+  const dateStr = today.slice(2).replace(/-/g, ''); // "2025-12-16" → "251216"
+  const orderNumber = `${prefix}-${dateStr}-${nextNumber}`;
 
   logger.info(`Generated order number: ${orderNumber} for business ${businessId}`);
   return orderNumber;

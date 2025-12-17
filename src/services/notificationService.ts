@@ -1,6 +1,7 @@
 import { supabase } from '../config/database';
 import { Notification } from '../types';
 import { logger } from '../utils/logger';
+import { emitNewNotification, emitUnreadCount } from './socketService';
 
 /**
  * Create a notification for business admin
@@ -36,7 +37,24 @@ export async function notifyBusinessAdmin(
   }
 
   logger.info(`Notification created: ${notification.type} for business ${businessId}`);
-  return data as Notification;
+
+  // Emit real-time notification to connected admins
+  const savedNotification = data as Notification;
+  emitNewNotification(businessId, {
+    id: savedNotification.id,
+    type: savedNotification.type,
+    customer_phone: savedNotification.customer_phone,
+    message: savedNotification.message,
+    image_id: savedNotification.image_id,
+    read: savedNotification.read,
+    created_at: savedNotification.created_at,
+  });
+
+  // Also emit updated unread count
+  const count = await getUnreadCount(businessId);
+  emitUnreadCount(businessId, count);
+
+  return savedNotification;
 }
 
 /**
@@ -96,4 +114,40 @@ export async function getNotifications(
   }
 
   return (data || []) as Notification[];
+}
+
+/**
+ * Get unread notification count for a business
+ */
+export async function getUnreadCount(businessId: string): Promise<number> {
+  const { count, error } = await supabase
+    .from('notifications')
+    .select('*', { count: 'exact', head: true })
+    .eq('business_id', businessId)
+    .eq('read', false);
+
+  if (error) {
+    logger.error('Failed to get unread count', error);
+    return 0;
+  }
+
+  return count || 0;
+}
+
+/**
+ * Mark all notifications as read for a business
+ */
+export async function markAllNotificationsRead(businessId: string): Promise<boolean> {
+  const { error } = await supabase
+    .from('notifications')
+    .update({ read: true })
+    .eq('business_id', businessId)
+    .eq('read', false);
+
+  if (error) {
+    logger.error('Failed to mark all notifications as read', error);
+    return false;
+  }
+
+  return true;
 }

@@ -105,10 +105,7 @@ export interface MenuItem {
   description: string | null;
   price: number | null;
   sizes: MenuItemSize[] | null;
-  is_customizable: boolean;
-  requires_date: boolean;
   is_available: boolean;
-  special_notes: string | null;
   created_at: string;
   category?: MenuCategory;
 }
@@ -236,6 +233,7 @@ export type AIIntent =
   | 'suggest_addons'        // Suggest add-ons for item
   | 'add_addon'             // Customer wants to add an add-on
   | 'decline_addon'         // Customer declines add-on
+  | 'remove_addon'          // Customer wants to remove an add-on
   | 'continue_ordering'     // Continue after add-ons (ask for more items)
   | 'save_custom_text'      // Save custom text response (e.g., cake message)
   | 'confirm_order'         // Final confirmation (step 2 of 2-step checkout)

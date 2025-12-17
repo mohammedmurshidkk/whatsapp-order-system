@@ -53,10 +53,7 @@ export async function listMenuItems(req: AuthRequest, res: Response): Promise<vo
         // Computed field for UI: which pricing type is used
         pricing_type: item.sizes && item.sizes.length > 0 ? 'sizes' : 'single',
         image_url: item.image_url || null,
-        is_customizable: item.is_customizable,
-        requires_date: item.requires_date,
         is_available: item.is_available,
-        special_notes: item.special_notes,
         created_at: item.created_at,
       })),
     });
@@ -123,10 +120,7 @@ export async function createMenuItem(req: AuthRequest, res: Response): Promise<v
       category_id,
       price,
       sizes,
-      is_customizable = false,
-      requires_date = false,
       is_available = true,
-      special_notes,
     } = req.body;
 
     if (!name) {
@@ -182,10 +176,7 @@ export async function createMenuItem(req: AuthRequest, res: Response): Promise<v
         category_id: category_id || null,
         price: sizes && sizes.length > 0 ? null : price,  // null if using sizes
         sizes: sizes && sizes.length > 0 ? sizes : null,  // null if using single price
-        is_customizable,
-        requires_date,
         is_available,
-        special_notes: special_notes || null,
         created_at: new Date().toISOString(),
       })
       .select()
@@ -233,10 +224,7 @@ export async function updateMenuItem(req: AuthRequest, res: Response): Promise<v
       category_id,
       price,
       sizes,
-      is_customizable,
-      requires_date,
       is_available,
-      special_notes,
     } = req.body;
 
     // Verify item belongs to this business
@@ -281,10 +269,7 @@ export async function updateMenuItem(req: AuthRequest, res: Response): Promise<v
     if (name !== undefined) updateData.name = name;
     if (description !== undefined) updateData.description = description;
     if (category_id !== undefined) updateData.category_id = category_id;
-    if (is_customizable !== undefined) updateData.is_customizable = is_customizable;
-    if (requires_date !== undefined) updateData.requires_date = requires_date;
     if (is_available !== undefined) updateData.is_available = is_available;
-    if (special_notes !== undefined) updateData.special_notes = special_notes;
 
     // Handle price/sizes update
     // If sizes provided with values, clear price and set sizes

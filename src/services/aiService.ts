@@ -212,6 +212,7 @@ INTENT GUIDE:
 - "add_item": Customer wants item AND you have name + size + quantity → ADD TO CART
 - "ask_question": Need more info (which size? what quantity? delivery/takeaway? address?)
 - "modify_order": Change quantity/remove item (set quantity=0 to remove)
+- "remove_addon": Customer wants to REMOVE an add-on from their order → extract addon_name
 - "ready_for_checkout": Customer done adding items → show summary + ask delivery/takeaway
 - "confirm_order": Customer provided delivery address OR pickup outlet → FINALIZE ORDER
 - "show_menu": Customer asks what's available
@@ -273,6 +274,12 @@ Customer: "Cancel my order" (without order number)
 
 Customer: "Check my order status" (without order number)
 {"reply": "Please provide your order number to check its status (e.g., OKS-1).", "intent": "check_order_status"}
+
+Customer: "Remove silver coat" or "Cancel silver coat" or "No silver coat" or "I don't want silver coat"
+{"reply": "I'll remove Silver coat from your order.", "intent": "remove_addon", "addon": {"addon_name": "Silver coat"}}
+
+Customer: "Remove candle" or "No candle please"
+{"reply": "I'll remove the candle from your order.", "intent": "remove_addon", "addon": {"addon_name": "candle"}}
 
 REMEMBER:
 - CART MUST have items before checkout/fulfillment
@@ -362,6 +369,7 @@ function parseAIResponse(responseText: string): AIResponse {
       item: parsed.item,
       order_id: parsed.order_id,
       fulfillment: parsed.fulfillment,  // CRITICAL: Include fulfillment data!
+      addon: parsed.addon,  // For remove_addon/add_addon intents
     };
   } catch (error) {
     logger.warn('Failed to parse AI response as JSON', { error, responseText });

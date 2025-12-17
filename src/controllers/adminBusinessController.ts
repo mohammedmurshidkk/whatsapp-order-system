@@ -42,6 +42,8 @@ export async function getProfile(req: AuthRequest, res: Response): Promise<void>
         closing_message: business.closing_message,
         currency: business.currency,
         is_active: business.is_active,
+        order_number_prefix: business?.order_number_prefix,
+        customer_support_phone: business?.customer_support_phone,
         // Custom AI prompt for business-specific rules
         custom_ai_prompt: business.custom_ai_prompt || null,
         // Critical message - when set, overrides all AI responses
@@ -85,6 +87,8 @@ export async function updateProfile(req: AuthRequest, res: Response): Promise<vo
       delivery_fee,
       free_delivery_above,
       delivery_radius_km,
+      customer_support_phone,
+      order_number_prefix
     } = req.body;
 
     // Build update object (only include provided fields)
@@ -102,6 +106,8 @@ export async function updateProfile(req: AuthRequest, res: Response): Promise<vo
     if (delivery_fee !== undefined) updateData.delivery_fee = delivery_fee;
     if (free_delivery_above !== undefined) updateData.free_delivery_above = free_delivery_above;
     if (delivery_radius_km !== undefined) updateData.delivery_radius_km = delivery_radius_km;
+    if (customer_support_phone !== undefined) updateData.customer_support_phone = customer_support_phone;
+    if (order_number_prefix !== undefined) updateData.order_number_prefix = order_number_prefix;
 
     const { data: business, error } = await supabase
       .from('businesses')

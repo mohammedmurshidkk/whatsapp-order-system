@@ -15,6 +15,8 @@ DROP TABLE IF EXISTS menu_items CASCADE;
 DROP TABLE IF EXISTS menu_categories CASCADE;
 DROP TABLE IF EXISTS business_outlets CASCADE;
 DROP TABLE IF EXISTS customers CASCADE;
+DROP TABLE IF EXISTS admin_users CASCADE;
+DROP TABLE IF EXISTS super_admins CASCADE;
 DROP TABLE IF EXISTS businesses CASCADE;
 
 -- ============================================
@@ -34,9 +36,96 @@ CREATE TABLE businesses (
   delivery_fee DECIMAL(10, 2) DEFAULT 0,
   free_delivery_above DECIMAL(10, 2),
   delivery_radius_km DECIMAL(5, 2),
+  logo_url TEXT,
+  custom_ai_prompt TEXT,
+  critical_message TEXT,
+  critical_message_enabled BOOLEAN DEFAULT false,
+  minimum_wait_minutes INTEGER DEFAULT 30,
+  order_number_prefix VARCHAR(10) DEFAULT 'ORD',
+  customer_support_phone VARCHAR(20),
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
 );
+
+-- ============================================
+-- ADMIN USERS TABLE
+-- ============================================
+CREATE TABLE admin_users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID REFERENCES businesses(id) ON DELETE CASCADE,
+  email VARCHAR(255) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  name VARCHAR(255),
+  role VARCHAR(50) DEFAULT 'admin',
+  is_active BOOLEAN DEFAULT true,
+  last_login TIMESTAMP WITH TIME ZONE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX idx_admin_users_email ON admin_users(email);
+CREATE INDEX idx_admin_users_business ON admin_users(business_id);
+
+-- Helper function to create admin user with hashed password
+CREATE OR REPLACE FUNCTION create_admin_user(
+  p_business_id UUID,
+  p_email VARCHAR(255),
+  p_password VARCHAR(255),
+  p_name VARCHAR(255) DEFAULT NULL
+) RETURNS UUID AS $$
+DECLARE
+  v_user_id UUID;
+BEGIN
+  INSERT INTO admin_users (business_id, email, password_hash, name)
+  VALUES (
+    p_business_id,
+    LOWER(p_email),
+    crypt(p_password, gen_salt('bf')),
+    p_name
+  )
+  RETURNING id INTO v_user_id;
+  RETURN v_user_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ============================================
+-- SUPER ADMINS TABLE (Platform level)
+-- ============================================
+CREATE TABLE super_admins (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email VARCHAR(255) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  name VARCHAR(255),
+  is_active BOOLEAN DEFAULT true,
+  last_login TIMESTAMP WITH TIME ZONE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX idx_super_admins_email ON super_admins(email);
+
+-- Helper function to create super admin
+CREATE OR REPLACE FUNCTION create_super_admin(
+  p_email VARCHAR(255),
+  p_password VARCHAR(255),
+  p_name VARCHAR(255) DEFAULT NULL
+) RETURNS UUID AS $$
+DECLARE
+  v_user_id UUID;
+BEGIN
+  INSERT INTO super_admins (email, password_hash, name)
+  VALUES (
+    LOWER(p_email),
+    crypt(p_password, gen_salt('bf')),
+    p_name
+  )
+  RETURNING id INTO v_user_id;
+  RETURN v_user_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Seed default super admin (Email: superadmin@system.com, Password: SuperAdmin@123)
+SELECT create_super_admin('superadmin@system.com', 'SuperAdmin@123', 'System Admin');
 
 -- ============================================
 -- BUSINESS OUTLETS TABLE
@@ -82,6 +171,7 @@ CREATE TABLE menu_categories (
   image_url TEXT,
   display_order INT DEFAULT 0,
   is_active BOOLEAN DEFAULT true,
+  custom_text_prompt TEXT,
   created_at TIMESTAMP DEFAULT NOW()
 );
 
@@ -99,10 +189,7 @@ CREATE TABLE menu_items (
   price DECIMAL(10, 2),
   sizes JSONB,
   image_url TEXT,
-  is_customizable BOOLEAN DEFAULT false,
-  requires_date BOOLEAN DEFAULT false,
   is_available BOOLEAN DEFAULT true,
-  special_notes TEXT,
   created_at TIMESTAMP DEFAULT NOW()
 );
 
@@ -226,8 +313,10 @@ CREATE INDEX idx_messages_session ON messages(session_id, created_at);
 -- ============================================
 CREATE TABLE orders (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID REFERENCES businesses(id) ON DELETE CASCADE,
   session_id UUID REFERENCES sessions(id),
   customer_id UUID REFERENCES customers(id),
+  order_number VARCHAR(50) NOT NULL,
   items JSONB NOT NULL,
   total_items INT,
   total_amount DECIMAL(10, 2),
@@ -248,6 +337,8 @@ CREATE TABLE orders (
 
 CREATE INDEX idx_orders_customer ON orders(customer_id, created_at);
 CREATE INDEX idx_orders_status ON orders(status, created_at);
+CREATE INDEX idx_orders_business ON orders(business_id);
+CREATE INDEX idx_orders_order_number ON orders(business_id, order_number);
 
 -- ============================================
 -- DONE

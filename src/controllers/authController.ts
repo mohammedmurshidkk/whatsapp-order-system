@@ -14,7 +14,48 @@ export async function login(req: Request, res: Response): Promise<void> {
       return;
     }
 
-    // Find user by email
+    const normalizedEmail = email.toLowerCase();
+
+    // First check super_admins table
+    const { data: superAdmin } = await supabase
+      .from('super_admins')
+      .select('id, email, password_hash, name')
+      .eq('email', normalizedEmail)
+      .eq('is_active', true)
+      .single();
+
+    if (superAdmin) {
+      // Verify superadmin password
+      const validPassword = await bcrypt.compare(password, superAdmin.password_hash);
+      if (!validPassword) {
+        res.status(401).json({ error: 'Invalid email or password' });
+        return;
+      }
+
+      const authUser: AuthUser = {
+        id: superAdmin.id,
+        email: superAdmin.email,
+        role: 'superadmin',
+      };
+
+      const token = generateToken(authUser);
+
+      // Update last login
+      await supabase
+        .from('super_admins')
+        .update({ last_login: new Date().toISOString() })
+        .eq('id', superAdmin.id);
+
+      logger.info(`Superadmin login: ${email}`);
+
+      res.status(200).json({
+        token,
+        user: authUser,
+      });
+      return;
+    }
+
+    // If not superadmin, check admin_users table
     const { data: user, error } = await supabase
       .from('admin_users')
       .select(`
@@ -27,7 +68,7 @@ export async function login(req: Request, res: Response): Promise<void> {
           name
         )
       `)
-      .eq('email', email.toLowerCase())
+      .eq('email', normalizedEmail)
       .eq('is_active', true)
       .single();
 
@@ -47,6 +88,7 @@ export async function login(req: Request, res: Response): Promise<void> {
     const authUser: AuthUser = {
       id: user.id,
       email: user.email,
+      role: 'admin',
       business_id: user.business_id,
       business_name: (user.businesses as any)?.name || 'Unknown Business',
     };
@@ -85,7 +127,7 @@ export async function me(req: Request, res: Response): Promise<void> {
 // Change password
 export async function changePassword(req: Request, res: Response): Promise<void> {
   try {
-    const user = (req as any).user;
+    const user = (req as any).user as AuthUser;
     const { currentPassword, newPassword } = req.body;
 
     if (!currentPassword || !newPassword) {
@@ -98,9 +140,11 @@ export async function changePassword(req: Request, res: Response): Promise<void>
       return;
     }
 
+    const tableName = user.role === 'superadmin' ? 'super_admins' : 'admin_users';
+
     // Get current password hash
     const { data: userData, error } = await supabase
-      .from('admin_users')
+      .from(tableName)
       .select('password_hash')
       .eq('id', user.id)
       .single();
@@ -120,7 +164,7 @@ export async function changePassword(req: Request, res: Response): Promise<void>
     // Hash new password and update
     const newHash = await bcrypt.hash(newPassword, 10);
     await supabase
-      .from('admin_users')
+      .from(tableName)
       .update({ password_hash: newHash, updated_at: new Date().toISOString() })
       .eq('id', user.id);
 

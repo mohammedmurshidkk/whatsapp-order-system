@@ -49,12 +49,14 @@ import {
   parseDeliveryTime,
   extractAddressAndTime,
   formatDeliveryTime,
+  calculateDateTimeFromButtons,
 } from '../services/fulfillmentService';
 import {
   getAutoSuggestedAddons,
   addAddonToSessionItem,
   formatAddonsForCustomer,
   findAddonByCustomerInput,
+  removeAddonFromSession,
 } from '../services/addonService';
 import {
   sendWhatsAppMessage,
@@ -86,6 +88,9 @@ const pendingCustomTextMap = new Map<string, { itemId: string; prompt: string }>
 
 // Track pending addon selections per session
 const pendingAddonSelectionMap = new Map<string, { itemId: string; addons: MenuAddon[] }>(); // sessionId -> { itemId, addons }
+
+// Track pending date selection for time button flow (date selected, waiting for time)
+const pendingDateSelectionMap = new Map<string, { date: 'today' | 'tomorrow'; fulfillmentType: 'delivery' | 'takeaway' }>(); // sessionId -> { date, fulfillmentType }
 
 // Format session items as strings for AI context
 function formatSessionItemsForAI(items: SessionItem[]): string[] {
@@ -337,6 +342,9 @@ async function processMessage(
   // Get recent message history
   const messageHistory = await getRecentMessages(session.id);
 
+  // Check if this is the first message in the session (for welcome message)
+  const isFirstMessage = messageHistory.length === 0;
+
   // Get menu for AI context
   let menuItems;
   let menuCategories;
@@ -578,6 +586,26 @@ async function processMessage(
       // Customer declined add-ons
       logger.info('Customer declined add-ons');
       // Just use AI's reply
+      break;
+
+    case 'remove_addon':
+      // Customer wants to remove an add-on from their order
+      if (aiResponse.addon && aiResponse.addon.addon_name) {
+        const removeResult = await removeAddonFromSession(session.id, aiResponse.addon.addon_name);
+
+        if (removeResult.success) {
+          logger.info(`Add-on removed: ${removeResult.addonName} from ${removeResult.itemName}`);
+          replyMessage = `✅ Removed ${removeResult.addonName} from your ${removeResult.itemName}. Anything else?`;
+
+          // Clear pending addon selection if exists
+          pendingAddonSelectionMap.delete(session.id);
+        } else {
+          logger.warn(`Failed to remove addon: ${aiResponse.addon.addon_name}`);
+          replyMessage = `I couldn't find "${aiResponse.addon.addon_name}" in your order. Would you like me to show your current order?`;
+        }
+      } else {
+        replyMessage = "Which add-on would you like to remove?";
+      }
       break;
 
     case 'continue_ordering':
@@ -848,8 +876,19 @@ async function processMessage(
         (aiResponse.fulfillment.pickup_time && !latestSessionData.pickup_time)
       );
 
+      // Check if fulfillment is ALREADY COMPLETE - don't overwrite with AI's re-sent data
+      // This prevents AI hallucinations (e.g., "10PM" becoming "11:00 AM") from breaking orders
+      const fulfillmentAlreadyComplete = latestSessionData.fulfillment_type && (
+        (latestSessionData.fulfillment_type === 'delivery' && latestSessionData.delivery_address && latestSessionData.delivery_time) ||
+        (latestSessionData.fulfillment_type === 'takeaway' && latestSessionData.pickup_outlet_id && latestSessionData.pickup_time)
+      );
+
       // FIRST: If AI provided fulfillment data with confirm_order, SAVE IT NOW
-      if (aiResponse.fulfillment) {
+      // BUT skip if fulfillment is already complete (user is just confirming with "Yes")
+      if (fulfillmentAlreadyComplete && aiResponse.fulfillment) {
+        logger.info(`✅ Fulfillment already complete - skipping AI re-sent data to prevent overwrite`);
+      }
+      if (aiResponse.fulfillment && !fulfillmentAlreadyComplete) {
         logger.info(`📍 Saving fulfillment data from confirm_order: ${JSON.stringify(aiResponse.fulfillment)}`);
 
         // Save fulfillment type
@@ -1005,7 +1044,8 @@ async function processMessage(
         }
 
         confirmMsg += `\n\n_Save your order number *${order.order_number}* to check status or cancel._`;
-        confirmMsg += `\n\nThank you for your order! We'll have everything ready for you. 🙏`;
+        const closingMsg = business?.closing_message || 'Thank you for your order!';
+        confirmMsg += `\n\n${closingMsg} 🙏`;
         replyMessage = confirmMsg;
       } catch (error) {
         logger.error('Failed to create order', error);
@@ -1136,6 +1176,11 @@ async function processMessage(
     default:
       // Use AI's reply as is
       break;
+  }
+
+  // Prepend welcome message on first message of session
+  if (isFirstMessage && business?.welcome_message) {
+    replyMessage = `${business.welcome_message}\n\n${replyMessage}`;
   }
 
   // Add Malayalam/Manglish acknowledgment if detected (friendly touch)
@@ -1324,11 +1369,15 @@ export async function handleWhatsAppWebhook(
                 longitude: location.longitude,
               });
 
-              // Ask for time if not yet provided
+              // Show date selection buttons instead of asking for time as text
               if (!sessionWithItems.delivery_time) {
-                const timePrompt = `📍 Location saved!\n\n⏰ What time would you like delivery?\n_Examples: 'today 5pm', 'tomorrow 3pm', 'nale 4pm'_`;
-                await sendWhatsAppMessage(phone, timePrompt);
-                await saveOutgoingMessage(session.id, timePrompt);
+                const datePrompt = `📍 Location saved!\n\nWhen would you like delivery?`;
+                await saveOutgoingMessage(session.id, datePrompt);
+                await sendReplyButtons(phone, datePrompt, [
+                  { id: 'date_today_delivery', title: '📅 Today' },
+                  { id: 'date_tomorrow_delivery', title: '📅 Tomorrow' },
+                  { id: 'date_other_delivery', title: '📅 Other' },
+                ]);
               } else {
                 const locationSummary = await generateOrderSummary(session.id, {
                   includeCta: true,
@@ -1401,6 +1450,138 @@ export async function handleWhatsAppWebhook(
                 continue;
               }
 
+              // Handle DATE selection buttons (Today/Tomorrow/Other)
+              if (buttonId.startsWith('date_')) {
+                const customer = await findOrCreateCustomer(phone, business.id);
+                const session = await findOrCreateSession(customer.id, business.id);
+                const isDelivery = buttonId.includes('_delivery');
+                const fulfillmentType = isDelivery ? 'delivery' : 'takeaway';
+
+                if (buttonId.includes('_today_')) {
+                  // Store date selection and show time buttons
+                  pendingDateSelectionMap.set(session.id, { date: 'today', fulfillmentType });
+                  await saveIncomingMessage(session.id, '[Selected: Today]');
+
+                  // Different time options for delivery vs takeaway
+                  const timePrompt = `📅 *Today* - What time?`;
+                  await saveOutgoingMessage(session.id, timePrompt);
+
+                  if (isDelivery) {
+                    // Delivery: In 1 hour, In 1.5 hours, Other
+                    await sendReplyButtons(phone, timePrompt, [
+                      { id: 'time_1hour', title: '🕐 In 1 hour' },
+                      { id: 'time_1_5hour', title: '🕐 In 1.5 hours' },
+                      { id: 'time_other', title: '⏰ Other' },
+                    ]);
+                  } else {
+                    // Takeaway: In 30 min, In 1 hour, Other
+                    await sendReplyButtons(phone, timePrompt, [
+                      { id: 'time_30min', title: '🕐 In 30 min' },
+                      { id: 'time_1hour', title: '🕐 In 1 hour' },
+                      { id: 'time_other', title: '⏰ Other' },
+                    ]);
+                  }
+                  continue;
+                }
+
+                if (buttonId.includes('_tomorrow_')) {
+                  // Store date selection and show time buttons for tomorrow
+                  pendingDateSelectionMap.set(session.id, { date: 'tomorrow', fulfillmentType });
+                  await saveIncomingMessage(session.id, '[Selected: Tomorrow]');
+
+                  const timePrompt = `📅 *Tomorrow* - What time?`;
+                  await saveOutgoingMessage(session.id, timePrompt);
+
+                  // Tomorrow: Morning, Afternoon, Other
+                  await sendReplyButtons(phone, timePrompt, [
+                    { id: 'time_morning', title: '🌅 Morning (10 AM)' },
+                    { id: 'time_afternoon', title: '🌞 Afternoon (2 PM)' },
+                    { id: 'time_other', title: '⏰ Other' },
+                  ]);
+                  continue;
+                }
+
+                if (buttonId.includes('_other_')) {
+                  // User wants to specify custom date/time - fall back to text input
+                  pendingDateSelectionMap.delete(session.id);
+                  await saveIncomingMessage(session.id, '[Selected: Other date]');
+
+                  const customPrompt = `Please type your preferred date and time.\n\n_Examples: 'Monday 5pm', 'Dec 20 at 3pm', 'next week Tuesday morning'_`;
+                  await sendWhatsAppMessage(phone, customPrompt);
+                  await saveOutgoingMessage(session.id, customPrompt);
+                  continue;
+                }
+              }
+
+              // Handle TIME selection buttons
+              if (buttonId.startsWith('time_')) {
+                const customer = await findOrCreateCustomer(phone, business.id);
+                const session = await findOrCreateSession(customer.id, business.id);
+                const sessionWithItems = await getSessionWithItems(session.id);
+                const pendingDate = pendingDateSelectionMap.get(session.id);
+
+                if (buttonId === 'time_other') {
+                  // User wants custom time - fall back to text input
+                  pendingDateSelectionMap.delete(session.id);
+                  await saveIncomingMessage(session.id, '[Selected: Other time]');
+
+                  const dateText = pendingDate?.date === 'tomorrow' ? 'tomorrow' : 'today';
+                  const customPrompt = `Please type your preferred time for ${dateText}.\n\n_Examples: '5pm', '3:30 PM', 'evening'_`;
+                  await sendWhatsAppMessage(phone, customPrompt);
+                  await saveOutgoingMessage(session.id, customPrompt);
+                  continue;
+                }
+
+                // Calculate actual datetime from button selection
+                const dateSelection = pendingDate?.date || 'today';
+                const calculatedTime = calculateDateTimeFromButtons(dateSelection, buttonId, businessTimezone);
+
+                if (!calculatedTime) {
+                  logger.error(`Failed to calculate time for: ${dateSelection} ${buttonId}`);
+                  await sendWhatsAppMessage(phone, "Sorry, there was an issue. Please type your preferred time.");
+                  continue;
+                }
+
+                // Get readable time label
+                const timeLabels: Record<string, string> = {
+                  'time_30min': 'In 30 minutes',
+                  'time_1hour': 'In 1 hour',
+                  'time_1_5hour': 'In 1.5 hours',
+                  'time_morning': 'Morning (10 AM)',
+                  'time_afternoon': 'Afternoon (2 PM)',
+                };
+                const timeLabel = timeLabels[buttonId] || buttonId;
+                await saveIncomingMessage(session.id, `[Selected: ${timeLabel}]`);
+
+                // Save time and show final invoice
+                const fulfillmentType = pendingDate?.fulfillmentType || sessionWithItems?.fulfillment_type;
+
+                if (fulfillmentType === 'delivery') {
+                  await updateSessionDeliveryInfo(session.id, {
+                    address: sessionWithItems?.delivery_address || '',
+                    time: calculatedTime,
+                  });
+                } else {
+                  await updateSessionPickupInfo(session.id, {
+                    outlet_id: sessionWithItems?.pickup_outlet_id || '',
+                    time: calculatedTime,
+                  });
+                }
+
+                // Clear pending date selection
+                pendingDateSelectionMap.delete(session.id);
+
+                // Show final invoice
+                const finalSummary = await generateOrderSummary(session.id, {
+                  includeCta: true,
+                  ctaMessage: '\nPlease review your order. Reply *YES* to confirm.',
+                  timezone: businessTimezone,
+                });
+                await sendWhatsAppMessage(phone, finalSummary);
+                await saveOutgoingMessage(session.id, finalSummary);
+                continue;
+              }
+
               messageText = buttonId;
             } else if (interactive.type === 'list_reply' && interactive.list_reply) {
               const selectedId = interactive.list_reply.id;
@@ -1416,14 +1597,16 @@ export async function handleWhatsAppWebhook(
                 await updateSessionFulfillmentType(session.id, 'takeaway');
                 await updateSessionPickupInfo(session.id, { outlet_id: selectedOutlet.id });
 
-                const pickupSummary = await generateOrderSummary(session.id, {
-                  includeCta: true,
-                  ctaMessage: `\n📍 Pickup at: ${selectedOutlet.outlet_name}\n\nReply *YES* to confirm your order.`,
-                  timezone: businessTimezone
-                });
                 await saveIncomingMessage(session.id, `[Selected: ${selectedOutlet.outlet_name}]`);
-                await sendWhatsAppMessage(phone, pickupSummary);
-                await saveOutgoingMessage(session.id, pickupSummary);
+
+                // Show date selection buttons instead of asking for time as text
+                const datePrompt = `📍 Pickup at: *${selectedOutlet.outlet_name}*\n\nWhen would you like to pick up?`;
+                await saveOutgoingMessage(session.id, datePrompt);
+                await sendReplyButtons(phone, datePrompt, [
+                  { id: 'date_today_takeaway', title: '📅 Today' },
+                  { id: 'date_tomorrow_takeaway', title: '📅 Tomorrow' },
+                  { id: 'date_other_takeaway', title: '📅 Other' },
+                ]);
                 continue;
               }
 
