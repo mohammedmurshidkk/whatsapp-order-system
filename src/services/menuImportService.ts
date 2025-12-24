@@ -8,10 +8,7 @@ interface CSVMenuRow {
   description: string;
   price: string;
   sizes: string;
-  is_customizable: string;
-  requires_date: string;
-  special_notes: string;
-  image_url?:string
+  image_url?: string;
 }
 
 interface ImportResult {
@@ -101,12 +98,6 @@ function parseSizes(sizesStr: string): MenuItemSize[] | null {
   }
 
   return sizes.length > 0 ? sizes : null;
-}
-
-// Convert yes/no/true/false to boolean
-function parseBoolean(value: string): boolean {
-  const lower = value.toLowerCase().trim();
-  return lower === 'yes' || lower === 'true' || lower === '1';
 }
 
 // Get or create category
@@ -249,9 +240,6 @@ export async function importMenuFromCSV(
           price: sizes ? null : price, // Only set price if no sizes
           sizes: sizes,
           image_url: row.image_url || null,
-          is_customizable: parseBoolean(row.is_customizable),
-          requires_date: parseBoolean(row.requires_date),
-          special_notes: row.special_notes || null,
           is_available: true,
         };
 
@@ -317,7 +305,7 @@ export async function exportMenuToCSV(businessId: string): Promise<string> {
   }
 
   // Build CSV
-  const headers = 'category,item_name,description,price,sizes,is_customizable,requires_date,special_notes';
+  const headers = 'category,item_name,description,price,sizes,image_url';
   const rows: string[] = [headers];
 
   for (const item of items || []) {
@@ -332,9 +320,7 @@ export async function exportMenuToCSV(businessId: string): Promise<string> {
       escapeCSV(item.description || ''),
       item.price?.toString() || '',
       sizesStr,
-      item.is_customizable ? 'yes' : 'no',
-      item.requires_date ? 'yes' : 'no',
-      escapeCSV((item as any).special_notes || ''),
+      escapeCSV(item.image_url || ''),
     ].join(',');
 
     rows.push(row);

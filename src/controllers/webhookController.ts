@@ -49,12 +49,14 @@ import {
   parseDeliveryTime,
   extractAddressAndTime,
   formatDeliveryTime,
+  calculateDateTimeFromButtons,
 } from '../services/fulfillmentService';
 import {
   getAutoSuggestedAddons,
   addAddonToSessionItem,
   formatAddonsForCustomer,
   findAddonByCustomerInput,
+  removeAddonFromSession,
 } from '../services/addonService';
 import {
   sendWhatsAppMessage,
@@ -86,6 +88,9 @@ const pendingCustomTextMap = new Map<string, { itemId: string; prompt: string }>
 
 // Track pending addon selections per session
 const pendingAddonSelectionMap = new Map<string, { itemId: string; addons: MenuAddon[] }>(); // sessionId -> { itemId, addons }
+
+// Track pending date selection for time button flow (date selected, waiting for time)
+const pendingDateSelectionMap = new Map<string, { date: 'today' | 'tomorrow'; fulfillmentType: 'delivery' | 'takeaway' }>(); // sessionId -> { date, fulfillmentType }
 
 // Format session items as strings for AI context
 function formatSessionItemsForAI(items: SessionItem[]): string[] {
@@ -175,7 +180,10 @@ async function processMessage(
     const normalizedInput = messageText.toLowerCase().trim();
 
     // Check if user is trying to skip custom text or order something else
-    const wantsToSkip = ['no', 'skip', 'none', 'nothing', 'no thanks', 'nope'].some(s => normalizedInput === s);
+    const skipWords = ['no', 'skip', 'none', 'nothing', 'no thanks', 'nope'];
+    const wantsToSkip = skipWords.some(s => normalizedInput === s) ||
+      /\b(no|don'?t|dont)\b.*(writ|text|message)/i.test(normalizedInput) ||
+      /\b(skip|nothing)\b/i.test(normalizedInput);
     const looksLikeNewOrder = normalizedInput.match(/\b(want|order|give|need|get|add)\b/i) &&
       !normalizedInput.match(/\b(write|message|text)\b/i); // "add candle" but not "add message"
 
@@ -337,6 +345,9 @@ async function processMessage(
   // Get recent message history
   const messageHistory = await getRecentMessages(session.id);
 
+  // Check if this is the first message in the session (for welcome message)
+  const isFirstMessage = messageHistory.length === 0;
+
   // Get menu for AI context
   let menuItems;
   let menuCategories;
@@ -380,6 +391,19 @@ async function processMessage(
 
   let replyMessage = aiResponse.reply;
   let intentToProcess = aiResponse.intent;
+
+  // SERVER-SIDE: Detect custom text change requests (e.g., "change text to Happy Birthday")
+  const customTextChangeMatch = messageText.match(/(?:change|update|make it|write)\s*(?:the\s*)?(?:text|message|writing)?\s*(?:to|into|as)?\s*["']?(.+?)["']?\s*$/i);
+  if (customTextChangeMatch && existingItems.length > 0) {
+    const newCustomText = customTextChangeMatch[1].replace(/^["']|["']$/g, '').trim();
+    if (newCustomText.length > 2) {
+      const lastItemId = lastAddedItemMap.get(session.id);
+      if (lastItemId) {
+        await updateSessionItemCustomText(lastItemId, newCustomText);
+        logger.info(`Custom text updated via server-side detection: "${newCustomText}"`);
+      }
+    }
+  }
 
   // SERVER-SIDE INTENT OVERRIDE: Handle "yes" confirmation robustly
   // This helps when AI model doesn't correctly identify confirm_order intent
@@ -425,10 +449,20 @@ async function processMessage(
               );
 
               if (addedMenuItem && addedMenuItem.category_id) {
-                // Check for custom text prompt first (e.g., "What to write on cake?")
+                // Check for category note (display only) and custom text prompt (expects input)
                 let hasCustomTextPrompt = false;
+                let categoryNoteToShow = '';
+
                 if (menuCategories && menuCategories.length > 0) {
                   const category = menuCategories.find(c => c.id === addedMenuItem.category_id);
+
+                  // Display-only note (no input expected)
+                  if (category?.category_note) {
+                    categoryNoteToShow = category.category_note;
+                    logger.info(`Category has display note: "${category.category_note}"`);
+                  }
+
+                  // Custom text prompt (expects input)
                   if (category?.custom_text_prompt) {
                     hasCustomTextPrompt = true;
                     logger.info(`Category has custom_text_prompt: "${category.custom_text_prompt}"`);
@@ -445,8 +479,16 @@ async function processMessage(
                         addons: suggestedAddons,
                       });
                     }
-                    // Only ask custom text question now, addons will be asked after
-                    replyMessage = aiResponse.reply + '\n\n' + category.custom_text_prompt;
+                    // REPLACE the AI reply - don't ask "Anything else?" when we need custom text
+                    // Build a clean response that only asks for custom text input
+                    const itemDesc = aiResponse.item?.size_or_weight
+                      ? `${addedMenuItem.name} (${aiResponse.item.size_or_weight})`
+                      : addedMenuItem.name;
+                    const notePrefix = categoryNoteToShow ? `_${categoryNoteToShow}_\n\n` : '';
+                    replyMessage = `Added ${itemDesc} to your cart! 🛒\n\n${notePrefix}${category.custom_text_prompt}`;
+                  } else if (categoryNoteToShow) {
+                    // Only display note (no input expected), continue with addons
+                    replyMessage = aiResponse.reply + `\n\n_${categoryNoteToShow}_`;
                   }
                 }
 
@@ -580,6 +622,26 @@ async function processMessage(
       // Just use AI's reply
       break;
 
+    case 'remove_addon':
+      // Customer wants to remove an add-on from their order
+      if (aiResponse.addon && aiResponse.addon.addon_name) {
+        const removeResult = await removeAddonFromSession(session.id, aiResponse.addon.addon_name);
+
+        if (removeResult.success) {
+          logger.info(`Add-on removed: ${removeResult.addonName} from ${removeResult.itemName}`);
+          replyMessage = `✅ Removed ${removeResult.addonName} from your ${removeResult.itemName}. Anything else?`;
+
+          // Clear pending addon selection if exists
+          pendingAddonSelectionMap.delete(session.id);
+        } else {
+          logger.warn(`Failed to remove addon: ${aiResponse.addon.addon_name}`);
+          replyMessage = `I couldn't find "${aiResponse.addon.addon_name}" in your order. Would you like me to show your current order?`;
+        }
+      } else {
+        replyMessage = "Which add-on would you like to remove?";
+      }
+      break;
+
     case 'continue_ordering':
       // Ask for more items after add-ons handled
       logger.info('Continuing with ordering');
@@ -588,17 +650,158 @@ async function processMessage(
 
     case 'save_custom_text':
       // Save custom text response (e.g., cake message)
-      if (aiResponse.customText) {
+      // Try to extract text from AI response or from user message
+      let customTextToSave = aiResponse.customText;
+
+      // Fallback: Extract from user message if AI didn't provide it
+      if (!customTextToSave) {
+        // Pattern: "change text to X", "update message to X", "write X instead"
+        const changeMatch = messageText.match(/(?:change|update|make it|write)\s*(?:the\s*)?(?:text|message|writing)?\s*(?:to|into|as)?\s*["']?(.+?)["']?\s*$/i);
+        if (changeMatch) {
+          customTextToSave = changeMatch[1].replace(/^["']|["']$/g, '').trim();
+        }
+      }
+
+      if (customTextToSave) {
         const lastItemId = lastAddedItemMap.get(session.id);
         if (lastItemId) {
-          await updateSessionItemCustomText(lastItemId, aiResponse.customText);
-          logger.info(`Custom text saved: "${aiResponse.customText}" for item ${lastItemId}`);
+          await updateSessionItemCustomText(lastItemId, customTextToSave);
+          logger.info(`Custom text saved: "${customTextToSave}" for item ${lastItemId}`);
           // Clear pending custom text if exists
           pendingCustomTextMap.delete(session.id);
         } else {
           logger.warn('No last item found for custom text');
         }
       }
+      break;
+
+    case 'modify_custom_text':
+      // Customer wants to change the cake writing
+      let newCustomText = aiResponse.customText;
+
+      // Fallback: Extract from user message if AI didn't provide it
+      if (!newCustomText) {
+        const modifyMatch = messageText.match(/(?:change|update|make it|write)\s*(?:the\s*)?(?:text|message|writing)?\s*(?:to|into|as)?\s*["']?(.+?)["']?\s*$/i);
+        if (modifyMatch) {
+          newCustomText = modifyMatch[1].replace(/^["']|["']$/g, '').trim();
+        }
+      }
+
+      // Helper function to find the target item for custom text
+      const findTargetItemForCustomText = (): typeof existingItems[0] | null => {
+        // 1. Check if AI provided item name
+        if (aiResponse.item?.name) {
+          const aiItemMatch = existingItems.find(item =>
+            item.item_name.toLowerCase().includes(aiResponse.item!.name.toLowerCase()) ||
+            aiResponse.item!.name.toLowerCase().includes(item.item_name.toLowerCase())
+          );
+          if (aiItemMatch) return aiItemMatch;
+        }
+
+        // 2. Try to extract item name from user message
+        // Patterns: "on Black Forest", "on the Rainbow cake", "for chocolate cake"
+        const itemNameMatch = messageText.match(/(?:on|for|to)\s*(?:the\s*)?["']?([a-zA-Z\s]+?)["']?\s*(?:cake)?$/i) ||
+                              messageText.match(/["']?([a-zA-Z\s]+?)["']?\s*(?:cake)?\s*(?:text|message|writing)/i);
+
+        if (itemNameMatch) {
+          const mentionedItem = itemNameMatch[1].trim().toLowerCase();
+          const matchedItem = existingItems.find(item =>
+            item.item_name.toLowerCase().includes(mentionedItem) ||
+            mentionedItem.includes(item.item_name.toLowerCase())
+          );
+          if (matchedItem) return matchedItem;
+        }
+
+        // 3. Check for item names mentioned anywhere in the message
+        for (const item of existingItems) {
+          if (messageText.toLowerCase().includes(item.item_name.toLowerCase())) {
+            return item;
+          }
+        }
+
+        // 4. Fallback: item with existing custom_text or last added item
+        return existingItems.find(item => item.custom_text) || existingItems[existingItems.length - 1] || null;
+      };
+
+      // Filter items that could have custom text (typically cakes)
+      const customizableItems = existingItems.filter(item => {
+        const itemNameLower = item.item_name.toLowerCase();
+        return itemNameLower.includes('cake') || itemNameLower.includes('pastry') ||
+               itemNameLower.includes('cupcake') || item.custom_text;
+      });
+
+      if (newCustomText) {
+        // Find the specific item to update
+        let itemToUpdate = findTargetItemForCustomText();
+
+        if (itemToUpdate) {
+          await updateSessionItemCustomText(itemToUpdate.id, newCustomText);
+          logger.info(`Custom text modified: "${newCustomText}" for item ${itemToUpdate.id} (${itemToUpdate.item_name})`);
+          replyMessage = `Got it! Updated the message on your ${itemToUpdate.item_name} to "${newCustomText}". Anything else?`;
+          // Clear pending custom text only after successfully updating
+          pendingCustomTextMap.delete(session.id);
+        } else {
+          logger.warn('No item found to update custom text');
+          replyMessage = "I couldn't find an item with text to update. Would you like to add something first?";
+        }
+      } else {
+        // No custom text provided - need to SET pending state to wait for user's response
+
+        // Check if multiple customizable items exist and user didn't specify which one
+        if (customizableItems.length > 1) {
+          // Check if user mentioned a specific item
+          let itemToUpdate = findTargetItemForCustomText();
+          const userMentionedSpecificItem = existingItems.some(item =>
+            messageText.toLowerCase().includes(item.item_name.toLowerCase())
+          );
+
+          if (!userMentionedSpecificItem) {
+            // Multiple cakes and user didn't specify - ask which one
+            const cakeList = customizableItems.map((item, i) => `${i + 1}. ${item.item_name}`).join('\n');
+            replyMessage = `You have multiple items. Which one would you like to add writing to?\n\n${cakeList}`;
+            // Don't set pending yet - wait for them to specify which cake
+            break;
+          }
+
+          // User mentioned specific item
+          if (itemToUpdate) {
+            pendingCustomTextMap.set(session.id, {
+              itemId: itemToUpdate.id,
+              prompt: `What would you like written on your ${itemToUpdate.item_name}?`,
+            });
+            replyMessage = `What would you like written on your ${itemToUpdate.item_name}?`;
+          } else {
+            replyMessage = "I couldn't find that item in your order. Which item would you like to add writing to?";
+          }
+        } else {
+          // Single item or no ambiguity
+          const itemToUpdate = findTargetItemForCustomText();
+          if (itemToUpdate) {
+            pendingCustomTextMap.set(session.id, {
+              itemId: itemToUpdate.id,
+              prompt: `What would you like written on your ${itemToUpdate.item_name}?`,
+            });
+            replyMessage = `What would you like written on your ${itemToUpdate.item_name}?`;
+          } else {
+            replyMessage = "I couldn't find an item to update. Would you like to add something first?";
+          }
+        }
+      }
+      break;
+
+    case 'remove_custom_text':
+      // Customer wants to remove the cake writing entirely
+      const itemWithText = existingItems.find(item => item.custom_text);
+      if (itemWithText) {
+        await updateSessionItemCustomText(itemWithText.id, ''); // Clear the custom text
+        logger.info(`Custom text removed for item ${itemWithText.id}`);
+        replyMessage = `Done! I've removed the text from your ${itemWithText.item_name}. Anything else you'd like to change?`;
+      } else {
+        logger.warn('No item found with custom text to remove');
+        replyMessage = "There's no text to remove from your order. Anything else I can help with?";
+      }
+      // Clear pending custom text if exists
+      pendingCustomTextMap.delete(session.id);
       break;
 
     case 'show_menu':
@@ -848,8 +1051,19 @@ async function processMessage(
         (aiResponse.fulfillment.pickup_time && !latestSessionData.pickup_time)
       );
 
+      // Check if fulfillment is ALREADY COMPLETE - don't overwrite with AI's re-sent data
+      // This prevents AI hallucinations (e.g., "10PM" becoming "11:00 AM") from breaking orders
+      const fulfillmentAlreadyComplete = latestSessionData.fulfillment_type && (
+        (latestSessionData.fulfillment_type === 'delivery' && latestSessionData.delivery_address && latestSessionData.delivery_time) ||
+        (latestSessionData.fulfillment_type === 'takeaway' && latestSessionData.pickup_outlet_id && latestSessionData.pickup_time)
+      );
+
       // FIRST: If AI provided fulfillment data with confirm_order, SAVE IT NOW
-      if (aiResponse.fulfillment) {
+      // BUT skip if fulfillment is already complete (user is just confirming with "Yes")
+      if (fulfillmentAlreadyComplete && aiResponse.fulfillment) {
+        logger.info(`✅ Fulfillment already complete - skipping AI re-sent data to prevent overwrite`);
+      }
+      if (aiResponse.fulfillment && !fulfillmentAlreadyComplete) {
         logger.info(`📍 Saving fulfillment data from confirm_order: ${JSON.stringify(aiResponse.fulfillment)}`);
 
         // Save fulfillment type
@@ -1005,7 +1219,8 @@ async function processMessage(
         }
 
         confirmMsg += `\n\n_Save your order number *${order.order_number}* to check status or cancel._`;
-        confirmMsg += `\n\nThank you for your order! We'll have everything ready for you. 🙏`;
+        const closingMsg = business?.closing_message || 'Thank you for your order!';
+        confirmMsg += `\n\n${closingMsg} 🙏`;
         replyMessage = confirmMsg;
       } catch (error) {
         logger.error('Failed to create order', error);
@@ -1136,6 +1351,11 @@ async function processMessage(
     default:
       // Use AI's reply as is
       break;
+  }
+
+  // Prepend welcome message on first message of session
+  if (isFirstMessage && business?.welcome_message) {
+    replyMessage = `${business.welcome_message}\n\n${replyMessage}`;
   }
 
   // Add Malayalam/Manglish acknowledgment if detected (friendly touch)
@@ -1324,11 +1544,15 @@ export async function handleWhatsAppWebhook(
                 longitude: location.longitude,
               });
 
-              // Ask for time if not yet provided
+              // Show date selection buttons instead of asking for time as text
               if (!sessionWithItems.delivery_time) {
-                const timePrompt = `📍 Location saved!\n\n⏰ What time would you like delivery?\n_Examples: 'today 5pm', 'tomorrow 3pm', 'nale 4pm'_`;
-                await sendWhatsAppMessage(phone, timePrompt);
-                await saveOutgoingMessage(session.id, timePrompt);
+                const datePrompt = `📍 Location saved!\n\nWhen would you like delivery?`;
+                await saveOutgoingMessage(session.id, datePrompt);
+                await sendReplyButtons(phone, datePrompt, [
+                  { id: 'date_today_delivery', title: '📅 Today' },
+                  { id: 'date_tomorrow_delivery', title: '📅 Tomorrow' },
+                  { id: 'date_other_delivery', title: '📅 Other' },
+                ]);
               } else {
                 const locationSummary = await generateOrderSummary(session.id, {
                   includeCta: true,
@@ -1401,6 +1625,138 @@ export async function handleWhatsAppWebhook(
                 continue;
               }
 
+              // Handle DATE selection buttons (Today/Tomorrow/Other)
+              if (buttonId.startsWith('date_')) {
+                const customer = await findOrCreateCustomer(phone, business.id);
+                const session = await findOrCreateSession(customer.id, business.id);
+                const isDelivery = buttonId.includes('_delivery');
+                const fulfillmentType = isDelivery ? 'delivery' : 'takeaway';
+
+                if (buttonId.includes('_today_')) {
+                  // Store date selection and show time buttons
+                  pendingDateSelectionMap.set(session.id, { date: 'today', fulfillmentType });
+                  await saveIncomingMessage(session.id, '[Selected: Today]');
+
+                  // Different time options for delivery vs takeaway
+                  const timePrompt = `📅 *Today* - What time?`;
+                  await saveOutgoingMessage(session.id, timePrompt);
+
+                  if (isDelivery) {
+                    // Delivery: In 1 hour, In 1.5 hours, Other
+                    await sendReplyButtons(phone, timePrompt, [
+                      { id: 'time_1hour', title: '🕐 In 1 hour' },
+                      { id: 'time_1_5hour', title: '🕐 In 1.5 hours' },
+                      { id: 'time_other', title: '⏰ Other' },
+                    ]);
+                  } else {
+                    // Takeaway: In 30 min, In 1 hour, Other
+                    await sendReplyButtons(phone, timePrompt, [
+                      { id: 'time_30min', title: '🕐 In 30 min' },
+                      { id: 'time_1hour', title: '🕐 In 1 hour' },
+                      { id: 'time_other', title: '⏰ Other' },
+                    ]);
+                  }
+                  continue;
+                }
+
+                if (buttonId.includes('_tomorrow_')) {
+                  // Store date selection and show time buttons for tomorrow
+                  pendingDateSelectionMap.set(session.id, { date: 'tomorrow', fulfillmentType });
+                  await saveIncomingMessage(session.id, '[Selected: Tomorrow]');
+
+                  const timePrompt = `📅 *Tomorrow* - What time?`;
+                  await saveOutgoingMessage(session.id, timePrompt);
+
+                  // Tomorrow: Morning, Afternoon, Other
+                  await sendReplyButtons(phone, timePrompt, [
+                    { id: 'time_morning', title: '🌅 Morning (10 AM)' },
+                    { id: 'time_afternoon', title: '🌞 Afternoon (2 PM)' },
+                    { id: 'time_other', title: '⏰ Other' },
+                  ]);
+                  continue;
+                }
+
+                if (buttonId.includes('_other_')) {
+                  // User wants to specify custom date/time - fall back to text input
+                  pendingDateSelectionMap.delete(session.id);
+                  await saveIncomingMessage(session.id, '[Selected: Other date]');
+
+                  const customPrompt = `Please type your preferred date and time.\n\n_Examples: 'Monday 5pm', 'Dec 20 at 3pm', 'next week Tuesday morning'_`;
+                  await sendWhatsAppMessage(phone, customPrompt);
+                  await saveOutgoingMessage(session.id, customPrompt);
+                  continue;
+                }
+              }
+
+              // Handle TIME selection buttons
+              if (buttonId.startsWith('time_')) {
+                const customer = await findOrCreateCustomer(phone, business.id);
+                const session = await findOrCreateSession(customer.id, business.id);
+                const sessionWithItems = await getSessionWithItems(session.id);
+                const pendingDate = pendingDateSelectionMap.get(session.id);
+
+                if (buttonId === 'time_other') {
+                  // User wants custom time - fall back to text input
+                  pendingDateSelectionMap.delete(session.id);
+                  await saveIncomingMessage(session.id, '[Selected: Other time]');
+
+                  const dateText = pendingDate?.date === 'tomorrow' ? 'tomorrow' : 'today';
+                  const customPrompt = `Please type your preferred time for ${dateText}.\n\n_Examples: '5pm', '3:30 PM', 'evening'_`;
+                  await sendWhatsAppMessage(phone, customPrompt);
+                  await saveOutgoingMessage(session.id, customPrompt);
+                  continue;
+                }
+
+                // Calculate actual datetime from button selection
+                const dateSelection = pendingDate?.date || 'today';
+                const calculatedTime = calculateDateTimeFromButtons(dateSelection, buttonId, businessTimezone);
+
+                if (!calculatedTime) {
+                  logger.error(`Failed to calculate time for: ${dateSelection} ${buttonId}`);
+                  await sendWhatsAppMessage(phone, "Sorry, there was an issue. Please type your preferred time.");
+                  continue;
+                }
+
+                // Get readable time label
+                const timeLabels: Record<string, string> = {
+                  'time_30min': 'In 30 minutes',
+                  'time_1hour': 'In 1 hour',
+                  'time_1_5hour': 'In 1.5 hours',
+                  'time_morning': 'Morning (10 AM)',
+                  'time_afternoon': 'Afternoon (2 PM)',
+                };
+                const timeLabel = timeLabels[buttonId] || buttonId;
+                await saveIncomingMessage(session.id, `[Selected: ${timeLabel}]`);
+
+                // Save time and show final invoice
+                const fulfillmentType = pendingDate?.fulfillmentType || sessionWithItems?.fulfillment_type;
+
+                if (fulfillmentType === 'delivery') {
+                  await updateSessionDeliveryInfo(session.id, {
+                    address: sessionWithItems?.delivery_address || '',
+                    time: calculatedTime,
+                  });
+                } else {
+                  await updateSessionPickupInfo(session.id, {
+                    outlet_id: sessionWithItems?.pickup_outlet_id || '',
+                    time: calculatedTime,
+                  });
+                }
+
+                // Clear pending date selection
+                pendingDateSelectionMap.delete(session.id);
+
+                // Show final invoice
+                const finalSummary = await generateOrderSummary(session.id, {
+                  includeCta: true,
+                  ctaMessage: '\nPlease review your order. Reply *YES* to confirm.',
+                  timezone: businessTimezone,
+                });
+                await sendWhatsAppMessage(phone, finalSummary);
+                await saveOutgoingMessage(session.id, finalSummary);
+                continue;
+              }
+
               messageText = buttonId;
             } else if (interactive.type === 'list_reply' && interactive.list_reply) {
               const selectedId = interactive.list_reply.id;
@@ -1416,14 +1772,16 @@ export async function handleWhatsAppWebhook(
                 await updateSessionFulfillmentType(session.id, 'takeaway');
                 await updateSessionPickupInfo(session.id, { outlet_id: selectedOutlet.id });
 
-                const pickupSummary = await generateOrderSummary(session.id, {
-                  includeCta: true,
-                  ctaMessage: `\n📍 Pickup at: ${selectedOutlet.outlet_name}\n\nReply *YES* to confirm your order.`,
-                  timezone: businessTimezone
-                });
                 await saveIncomingMessage(session.id, `[Selected: ${selectedOutlet.outlet_name}]`);
-                await sendWhatsAppMessage(phone, pickupSummary);
-                await saveOutgoingMessage(session.id, pickupSummary);
+
+                // Show date selection buttons instead of asking for time as text
+                const datePrompt = `📍 Pickup at: *${selectedOutlet.outlet_name}*\n\nWhen would you like to pick up?`;
+                await saveOutgoingMessage(session.id, datePrompt);
+                await sendReplyButtons(phone, datePrompt, [
+                  { id: 'date_today_takeaway', title: '📅 Today' },
+                  { id: 'date_tomorrow_takeaway', title: '📅 Tomorrow' },
+                  { id: 'date_other_takeaway', title: '📅 Other' },
+                ]);
                 continue;
               }
 
@@ -1483,6 +1841,8 @@ export function handleWebhookVerification(req: Request, res: Response): void {
   logger.debug(`Mode: ${mode}, Token: ${token}, Challenge: ${challenge}`);
 
   const result = verifyWebhookChallenge(mode, token, challenge);
+
+  console.log('#### result', result)
 
   if (result) {
     logger.info('Webhook verified successfully!');

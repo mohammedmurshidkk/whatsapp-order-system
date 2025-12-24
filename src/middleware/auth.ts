@@ -7,8 +7,9 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-producti
 export interface AuthUser {
   id: string;
   email: string;
-  business_id: string;
-  business_name: string;
+  role: 'superadmin' | 'admin';
+  business_id?: string;
+  business_name?: string;
 }
 
 export interface AuthRequest extends Request {
@@ -50,4 +51,13 @@ export function authMiddleware(req: AuthRequest, res: Response, next: NextFuncti
 // Helper to get business_id from authenticated request
 export function getBusinessId(req: AuthRequest): string | null {
   return req.user?.business_id || null;
+}
+
+// Middleware to check if user is superadmin
+export function superadminMiddleware(req: AuthRequest, res: Response, next: NextFunction): void {
+  if (!req.user || req.user.role !== 'superadmin') {
+    res.status(403).json({ error: 'Superadmin access required' });
+    return;
+  }
+  next();
 }

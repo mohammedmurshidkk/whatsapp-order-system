@@ -1,0 +1,186 @@
+{
+  "scenarios": [
+    {
+      "id": "basic_burger_delivery",
+      "name": "Basic Burger Order with Delivery",
+      "description": "User orders a burger with delivery to an address",
+      "steps": [
+        { "user": "Hi", "expect_intent": "ask_question" },
+        { "user": "Burger", "expect_intent": "ask_question", "expect_reply_contains": "size" },
+        { "user": "Large", "expect_intent": "add_item" },
+        { "user": "Nothing", "expect_intent": "ready_for_checkout" },
+        { "user": "Delivery", "expect_intent": "ask_question" },
+        { "user": "Kuttaloor vengara, tomorrow 5pm", "expect_intent": "collect_delivery_info" },
+        { "user": "Yes", "expect_intent": "confirm_order" }
+      ]
+    },
+    {
+      "id": "cake_with_size_inline",
+      "name": "Cake Order with Size in Message",
+      "description": "User orders cake with size specified in same message",
+      "steps": [
+        { "user": "Hi", "expect_intent": "ask_question" },
+        { "user": "Black Forest 1kg", "expect_intent": "add_item" },
+        { "user": "Done", "expect_intent": "ready_for_checkout" }
+      ]
+    },
+    {
+      "id": "cake_takeaway_flow",
+      "name": "Cake Order with Takeaway",
+      "description": "User orders cake and picks up from outlet",
+      "steps": [
+        { "user": "Hi", "expect_intent": "ask_question" },
+        { "user": "cake", "expect_intent": "ask_question", "expect_reply_contains": "size" },
+        { "user": "500g", "expect_intent": "add_item" },
+        { "user": "No", "expect_intent": "ready_for_checkout" },
+        { "user": "Takeaway", "expect_intent": "ask_question" },
+        { "user": "Bun Studio", "expect_intent": "collect_pickup_info" },
+        { "user": "Tomorrow 10am", "expect_intent": "collect_delivery_info" },
+        { "user": "Yes", "expect_intent": "confirm_order" }
+      ]
+    },
+    {
+      "id": "show_menu",
+      "name": "Show Menu Request",
+      "description": "User asks to see the menu",
+      "steps": [
+        { "user": "Hi", "expect_intent": "ask_question" },
+        { "user": "show menu", "expect_intent": "show_menu" }
+      ]
+    },
+    {
+      "id": "modify_custom_text",
+      "name": "Modify Cake Custom Text",
+      "description": "User changes the text on a cake",
+      "steps": [
+        { "user": "Change the text to Happy Birthday", "expect_intent": "modify_custom_text", "expect_custom_text": "Happy Birthday" }
+      ],
+      "setup": {
+        "cart": ["Black Forest (1kg)"]
+      }
+    },
+    {
+      "id": "modify_custom_text_ask",
+      "name": "Modify Custom Text - Ask Flow",
+      "description": "User wants to change text but doesn't provide new text",
+      "steps": [
+        { "user": "Add writing on cake", "expect_intent": "modify_custom_text", "expect_reply_contains": "message" },
+        { "user": "Happy Anniversary", "expect_intent": "modify_custom_text", "expect_custom_text": "Happy Anniversary" }
+      ],
+      "setup": {
+        "cart": ["Black Forest (1kg)"]
+      }
+    },
+    {
+      "id": "remove_custom_text",
+      "name": "Remove Cake Custom Text",
+      "description": "User removes the text from a cake",
+      "steps": [
+        { "user": "Remove the writing", "expect_intent": "remove_custom_text" }
+      ],
+      "setup": {
+        "cart": ["Black Forest (1kg)"]
+      }
+    },
+    {
+      "id": "remove_addon",
+      "name": "Remove Addon from Order",
+      "description": "User removes an addon like candle",
+      "steps": [
+        { "user": "Remove candle", "expect_intent": "remove_addon", "expect_addon": "candle" },
+        { "user": "No silver coat", "expect_intent": "remove_addon", "expect_addon": "silver coat" }
+      ],
+      "setup": {
+        "cart": ["Black Forest (1kg)"]
+      }
+    },
+    {
+      "id": "cancel_order",
+      "name": "Cancel Existing Order",
+      "description": "User cancels a confirmed order",
+      "steps": [
+        { "user": "Cancel order UPS-1", "expect_intent": "cancel_existing_order", "expect_order_id": "UPS-1" }
+      ]
+    },
+    {
+      "id": "cancel_order_no_id",
+      "name": "Cancel Order Without ID",
+      "description": "User tries to cancel without order ID",
+      "steps": [
+        { "user": "Cancel my order", "expect_intent": "cancel_existing_order", "expect_reply_contains": "order number" }
+      ]
+    },
+    {
+      "id": "check_order_status",
+      "name": "Check Order Status",
+      "description": "User checks status of an order",
+      "steps": [
+        { "user": "Status of UPS-2", "expect_intent": "check_order_status", "expect_order_id": "UPS-2" }
+      ]
+    },
+    {
+      "id": "check_order_status_no_id",
+      "name": "Check Order Status Without ID",
+      "description": "User asks where is my order",
+      "steps": [
+        { "user": "Where is my order", "expect_intent": "check_order_status" }
+      ]
+    },
+    {
+      "id": "empty_cart_checkout",
+      "name": "Checkout with Empty Cart",
+      "description": "User tries to checkout without adding items",
+      "steps": [
+        { "user": "Hi", "expect_intent": "ask_question" },
+        { "user": "That's all", "expect_intent": "ask_question", "expect_reply_contains": "empty" }
+      ]
+    },
+    {
+      "id": "delivery_address_with_time",
+      "name": "Delivery Address with Time",
+      "description": "User provides address and time together",
+      "steps": [
+        { "user": "Delivery", "expect_intent": "ask_question" },
+        { "user": "MG Road, tomorrow 5pm", "expect_intent": "collect_delivery_info", "expect_fulfillment": { "delivery_address": "MG Road", "delivery_time": "tomorrow 5pm" } }
+      ],
+      "setup": {
+        "cart": ["Burger (Large)"]
+      }
+    },
+    {
+      "id": "manglish_order",
+      "name": "Manglish Order Flow",
+      "description": "User orders using Malayalam-English mix",
+      "steps": [
+        { "user": "Hi", "expect_intent": "ask_question" },
+        { "user": "Burger large", "expect_intent": "add_item" },
+        { "user": "mathi", "expect_intent": "ready_for_checkout" },
+        { "user": "Delivery", "expect_intent": "ask_question" },
+        { "user": "Kottakkal, nale 5pm", "expect_intent": "collect_delivery_info" },
+        { "user": "sheri", "expect_intent": "confirm_order" }
+      ]
+    },
+    {
+      "id": "multiple_items",
+      "name": "Multiple Items Order",
+      "description": "User orders multiple items",
+      "steps": [
+        { "user": "Hi", "expect_intent": "ask_question" },
+        { "user": "Black Forest 1kg", "expect_intent": "add_item" },
+        { "user": "Also add a burger large", "expect_intent": "add_item" },
+        { "user": "Done", "expect_intent": "ready_for_checkout" }
+      ]
+    },
+    {
+      "id": "quantity_change",
+      "name": "Change Item Quantity",
+      "description": "User changes quantity of an item",
+      "steps": [
+        { "user": "Make it 2", "expect_intent": "modify_order", "expect_quantity": 2 }
+      ],
+      "setup": {
+        "cart": ["Burger (Large)"]
+      }
+    }
+  ]
+}

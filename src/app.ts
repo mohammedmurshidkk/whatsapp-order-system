@@ -1,4 +1,5 @@
 import express, { Request, Response, NextFunction, Express } from 'express';
+import { createServer } from 'http';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
@@ -14,14 +15,21 @@ import adminMenuRoutes from './routes/adminMenu';
 import adminCategoryRoutes from './routes/adminCategories';
 import adminAddonRoutes from './routes/adminAddons';
 import adminBusinessRoutes from './routes/adminBusiness';
+import adminNotificationRoutes from './routes/adminNotifications';
+import superadminRoutes from './routes/superadmin';
 import { logger } from './utils/logger';
 import { handleTestMessage } from './controllers/webhookController';
+import { initializeSocket } from './services/socketService';
 
 // Load environment variables
 dotenv.config();
 
 const app: Express = express();
+const httpServer = createServer(app);
 const PORT = process.env.PORT || 8080;
+
+// Initialize Socket.IO
+initializeSocket(httpServer);
 
 // Middleware
 app.use(cors());
@@ -60,6 +68,8 @@ app.use('/api/admin/menu', adminMenuRoutes);
 app.use('/api/categories', adminCategoryRoutes);
 app.use('/api/addons', adminAddonRoutes);
 app.use('/api/business', adminBusinessRoutes);
+app.use('/api/notifications', adminNotificationRoutes);
+app.use('/api/superadmin', superadminRoutes);
 
 // Test routes (same as webhook for convenience)
 app.post('/test/message', handleTestMessage);
@@ -75,14 +85,15 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// Start server
-app.listen(PORT, () => {
+// Start server (using httpServer for Socket.IO support)
+httpServer.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
   logger.info(`Health check: http://localhost:${PORT}/health`);
   logger.info(`Test endpoint: POST http://localhost:${PORT}/test/message`);
   logger.info(`WhatsApp webhook: POST http://localhost:${PORT}/webhook/whatsapp`);
   logger.info(`Menu API: http://localhost:${PORT}/api/menu`);
+  logger.info(`Socket.IO: ws://localhost:${PORT}`);
 });
 
 export default app;

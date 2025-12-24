@@ -137,41 +137,61 @@ function getNowInTimezone(timezone: string): Date {
  * @param localDate - Date object with local time values
  * @param timezone - IANA timezone (e.g., 'Asia/Kolkata')
  */
-function localToUTC(year: number, month: number, day: number, hours: number, minutes: number, timezone: string): string {
-  // Create a date string in the format expected by the timezone
-  const localDateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00`;
+function localToUTC(year: number, month: number, day: number, hours: number, minutes: number, timezone: string): string | null {
+  try {
+    // Validate inputs to prevent Invalid Date errors
+    if (isNaN(year) || isNaN(month) || isNaN(day) || isNaN(hours) || isNaN(minutes)) {
+      logger.error(`localToUTC received invalid parameters: year=${year}, month=${month}, day=${day}, hours=${hours}, minutes=${minutes}`);
+      return null;
+    }
 
-  // Get timezone offset for that specific date/time
-  // We use Intl to find what offset that timezone has at that local time
-  const formatter = new Intl.DateTimeFormat('en-US', {
-    timeZone: timezone,
-    timeZoneName: 'longOffset',
-  });
+    // Ensure timezone has a valid value
+    const tz = timezone || 'Asia/Kolkata';
 
-  // Create a test date (assume UTC first, then adjust)
-  const testDate = new Date(localDateStr + 'Z');
+    // Create a date string in the format expected by the timezone
+    const localDateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00`;
 
-  // Get the offset string (e.g., "GMT+05:30")
-  const parts = formatter.formatToParts(testDate);
-  const tzPart = parts.find(p => p.type === 'timeZoneName');
-  const offsetStr = tzPart?.value || '+00:00';
+    // Get timezone offset for that specific date/time
+    // We use Intl to find what offset that timezone has at that local time
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      timeZoneName: 'longOffset',
+    });
 
-  // Parse offset (e.g., "GMT+5:30" -> +5.5 hours)
-  const offsetMatch = offsetStr.match(/GMT([+-])(\d{1,2}):?(\d{2})?/);
-  if (offsetMatch) {
-    const sign = offsetMatch[1] === '+' ? 1 : -1;
-    const offsetHours = parseInt(offsetMatch[2], 10);
-    const offsetMinutes = parseInt(offsetMatch[3] || '0', 10);
-    const totalOffsetMinutes = sign * (offsetHours * 60 + offsetMinutes);
+    // Create a test date (assume UTC first, then adjust)
+    const testDate = new Date(localDateStr + 'Z');
 
-    // Create the local date and subtract the offset to get UTC
-    const localMs = new Date(localDateStr).getTime();
-    const utcMs = localMs - (totalOffsetMinutes * 60 * 1000);
-    return new Date(utcMs).toISOString();
+    // Validate test date
+    if (isNaN(testDate.getTime())) {
+      logger.error(`localToUTC created invalid testDate from: ${localDateStr}Z`);
+      return null;
+    }
+
+    // Get the offset string (e.g., "GMT+05:30")
+    const parts = formatter.formatToParts(testDate);
+    const tzPart = parts.find(p => p.type === 'timeZoneName');
+    const offsetStr = tzPart?.value || '+00:00';
+
+    // Parse offset (e.g., "GMT+5:30" -> +5.5 hours)
+    const offsetMatch = offsetStr.match(/GMT([+-])(\d{1,2}):?(\d{2})?/);
+    if (offsetMatch) {
+      const sign = offsetMatch[1] === '+' ? 1 : -1;
+      const offsetHours = parseInt(offsetMatch[2], 10);
+      const offsetMinutes = parseInt(offsetMatch[3] || '0', 10);
+      const totalOffsetMinutes = sign * (offsetHours * 60 + offsetMinutes);
+
+      // Create the local date and subtract the offset to get UTC
+      const localMs = new Date(localDateStr).getTime();
+      const utcMs = localMs - (totalOffsetMinutes * 60 * 1000);
+      return new Date(utcMs).toISOString();
+    }
+
+    // Fallback: return as-is (assume server timezone matches)
+    return new Date(localDateStr).toISOString();
+  } catch (error) {
+    logger.error(`localToUTC error: ${error}`);
+    return null;
   }
-
-  // Fallback: return as-is (assume server timezone matches)
-  return new Date(localDateStr).toISOString();
 }
 
 /**
@@ -186,18 +206,27 @@ function localToUTC(year: number, month: number, day: number, hours: number, min
  * @param timezone - Business timezone (IANA format, e.g., 'Asia/Kolkata')
  */
 export function parseDeliveryTime(timeText: string, timezone: string = 'Asia/Kolkata'): string | null {
+  // Ensure timezone has a valid value even if null/undefined is explicitly passed
+  const tz = timezone || 'Asia/Kolkata';
   const normalizedTime = timeText.toLowerCase().trim();
 
   // Get current time in business timezone
-  const nowInTz = getNowInTimezone(timezone);
+  const nowInTz = getNowInTimezone(tz);
+
+  // Validate that we got a valid date
+  if (isNaN(nowInTz.getTime())) {
+    logger.error(`Invalid date from getNowInTimezone with timezone: ${tz}`);
+    return null;
+  }
+
   const todayYear = nowInTz.getFullYear();
   const todayMonth = nowInTz.getMonth();
   const todayDay = nowInTz.getDate();
   const currentHour = nowInTz.getHours();
 
-  // Malayalam word mappings
+  // Malayalam word mappings (including common typos)
   const todayWords = ['today', 'innu', 'ഇന്ന്', 'இன்று'];
-  const tomorrowWords = ['tomorrow', 'nale', 'നാളെ', 'நாளை', 'tmrw', 'tmr', 'kal'];
+  const tomorrowWords = ['tomorrow', 'tomorow', 'tommorow', 'tmrw', 'tmr', 'nale', 'നാളെ', 'நாளை', 'kal'];
 
   // Helper to extract hours and minutes from time text
   function extractTime(text: string): { hours: number; minutes: number } | null {
@@ -228,7 +257,7 @@ export function parseDeliveryTime(timeText: string, timezone: string = 'Asia/Kol
     const hours = time?.hours ?? 12;  // Default noon
     const minutes = time?.minutes ?? 0;
 
-    return localToUTC(tomorrowDate.getFullYear(), tomorrowDate.getMonth(), tomorrowDate.getDate(), hours, minutes, timezone);
+    return localToUTC(tomorrowDate.getFullYear(), tomorrowDate.getMonth(), tomorrowDate.getDate(), hours, minutes, tz);
   }
 
   // Check for today (including Malayalam "innu")
@@ -243,7 +272,7 @@ export function parseDeliveryTime(timeText: string, timezone: string = 'Asia/Kol
       return null;
     }
 
-    return localToUTC(todayYear, todayMonth, todayDay, hours, minutes, timezone);
+    return localToUTC(todayYear, todayMonth, todayDay, hours, minutes, tz);
   }
 
   // Handle 24-hour time format (like "20:00")
@@ -262,7 +291,7 @@ export function parseDeliveryTime(timeText: string, timezone: string = 'Asia/Kol
     const isPast = hours < currentHour || (hours === currentHour && minutes <= nowInTz.getMinutes());
     const targetDate = isPast ? new Date(todayYear, todayMonth, todayDay + 1) : new Date(todayYear, todayMonth, todayDay);
 
-    return localToUTC(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), hours, minutes, timezone);
+    return localToUTC(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), hours, minutes, tz);
   }
 
   // Handle specific time (5pm, 2:30pm, etc.)
@@ -271,7 +300,7 @@ export function parseDeliveryTime(timeText: string, timezone: string = 'Asia/Kol
     const isPast = time.hours < currentHour || (time.hours === currentHour && time.minutes <= nowInTz.getMinutes());
     const targetDate = isPast ? new Date(todayYear, todayMonth, todayDay + 1) : new Date(todayYear, todayMonth, todayDay);
 
-    return localToUTC(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), time.hours, time.minutes, timezone);
+    return localToUTC(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), time.hours, time.minutes, tz);
   }
 
   // Handle "evening", "morning", "afternoon" (English and Malayalam)
@@ -282,19 +311,19 @@ export function parseDeliveryTime(timeText: string, timezone: string = 'Asia/Kol
   if (eveningWords.some(w => normalizedTime.includes(w))) {
     const isPast = currentHour >= 18;
     const targetDate = isPast ? new Date(todayYear, todayMonth, todayDay + 1) : new Date(todayYear, todayMonth, todayDay);
-    return localToUTC(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 18, 0, timezone);
+    return localToUTC(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 18, 0, tz);
   }
 
   if (morningWords.some(w => normalizedTime.includes(w))) {
     // Morning is always tomorrow (can't order for same day morning if it's already past)
     const targetDate = new Date(todayYear, todayMonth, todayDay + 1);
-    return localToUTC(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 10, 0, timezone);
+    return localToUTC(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 10, 0, tz);
   }
 
   if (afternoonWords.some(w => normalizedTime.includes(w))) {
     const isPast = currentHour >= 14;
     const targetDate = isPast ? new Date(todayYear, todayMonth, todayDay + 1) : new Date(todayYear, todayMonth, todayDay);
-    return localToUTC(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 14, 0, timezone);
+    return localToUTC(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 14, 0, tz);
   }
 
   // Handle "in X hours"
@@ -303,7 +332,7 @@ export function parseDeliveryTime(timeText: string, timezone: string = 'Asia/Kol
     const hoursToAdd = parseInt(inHoursMatch[1], 10);
     const resultTime = new Date(nowInTz);
     resultTime.setHours(resultTime.getHours() + hoursToAdd);
-    return localToUTC(resultTime.getFullYear(), resultTime.getMonth(), resultTime.getDate(), resultTime.getHours(), resultTime.getMinutes(), timezone);
+    return localToUTC(resultTime.getFullYear(), resultTime.getMonth(), resultTime.getDate(), resultTime.getHours(), resultTime.getMinutes(), tz);
   }
 
   // Default: return null if can't parse
@@ -454,4 +483,100 @@ export async function calculateDeliveryFee(
   }
 
   return business.delivery_fee || 0;
+}
+
+/**
+ * Calculate datetime from interactive button selection
+ * @param dateSelection - 'today' | 'tomorrow'
+ * @param timeSelection - 'time_30min' | 'time_1hour' | 'time_1_5hour' | 'time_morning' | 'time_afternoon'
+ * @param timezone - Business timezone
+ * @returns ISO string in UTC
+ */
+export function calculateDateTimeFromButtons(
+  dateSelection: 'today' | 'tomorrow',
+  timeSelection: string,
+  timezone: string = 'Asia/Kolkata'
+): string | null {
+  const tz = timezone || 'Asia/Kolkata';
+  const nowInTz = getNowInTimezone(tz);
+
+  if (isNaN(nowInTz.getTime())) {
+    logger.error(`Invalid date from getNowInTimezone with timezone: ${tz}`);
+    return null;
+  }
+
+  let targetDate = new Date(nowInTz);
+
+  // Set to tomorrow if selected
+  if (dateSelection === 'tomorrow') {
+    targetDate.setDate(targetDate.getDate() + 1);
+  }
+
+  let hours: number;
+  let minutes: number = 0;
+
+  switch (timeSelection) {
+    case 'time_30min':
+      // Add 30 minutes to current time (only valid for today)
+      if (dateSelection === 'today') {
+        targetDate = new Date(nowInTz);
+        targetDate.setMinutes(targetDate.getMinutes() + 30);
+        hours = targetDate.getHours();
+        minutes = targetDate.getMinutes();
+      } else {
+        // Fallback to morning for tomorrow
+        hours = 10;
+      }
+      break;
+
+    case 'time_1hour':
+      // Add 1 hour to current time (only valid for today)
+      if (dateSelection === 'today') {
+        targetDate = new Date(nowInTz);
+        targetDate.setHours(targetDate.getHours() + 1);
+        hours = targetDate.getHours();
+        minutes = targetDate.getMinutes();
+      } else {
+        // Fallback to morning for tomorrow
+        hours = 10;
+      }
+      break;
+
+    case 'time_1_5hour':
+      // Add 1.5 hours to current time (only valid for today)
+      if (dateSelection === 'today') {
+        targetDate = new Date(nowInTz);
+        targetDate.setMinutes(targetDate.getMinutes() + 90);
+        hours = targetDate.getHours();
+        minutes = targetDate.getMinutes();
+      } else {
+        // Fallback to morning for tomorrow
+        hours = 10;
+      }
+      break;
+
+    case 'time_morning':
+      hours = 10; // 10 AM
+      break;
+
+    case 'time_afternoon':
+      hours = 14; // 2 PM
+      break;
+
+    case 'time_evening':
+      hours = 18; // 6 PM
+      break;
+
+    default:
+      return null;
+  }
+
+  return localToUTC(
+    targetDate.getFullYear(),
+    targetDate.getMonth(),
+    targetDate.getDate(),
+    hours,
+    minutes,
+    tz
+  );
 }

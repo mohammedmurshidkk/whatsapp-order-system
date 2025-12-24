@@ -230,10 +230,10 @@ export async function linkAddonToCategory(req: AuthRequest, res: Response): Prom
       return;
     }
 
-    const { addonId, categoryId, is_auto_suggested = true } = req.body;
+    const { addon_id, category_id, is_auto_suggested = true } = req.body;
 
-    if (!addonId || !categoryId) {
-      res.status(400).json({ error: 'addonId and categoryId are required' });
+    if (!addon_id || !category_id) {
+      res.status(400).json({ error: 'addon_id and categoryId are required' });
       return;
     }
 
@@ -241,7 +241,7 @@ export async function linkAddonToCategory(req: AuthRequest, res: Response): Prom
     const { data: addon } = await supabase
       .from('menu_addons')
       .select('id')
-      .eq('id', addonId)
+      .eq('id', addon_id)
       .eq('business_id', businessId)
       .single();
 
@@ -254,7 +254,7 @@ export async function linkAddonToCategory(req: AuthRequest, res: Response): Prom
     const { data: category } = await supabase
       .from('menu_categories')
       .select('id')
-      .eq('id', categoryId)
+      .eq('id', category_id)
       .eq('business_id', businessId)
       .single();
 
@@ -267,8 +267,8 @@ export async function linkAddonToCategory(req: AuthRequest, res: Response): Prom
     const { error } = await supabase
       .from('category_addons')
       .upsert({
-        menu_category_id: categoryId,
-        addon_id: addonId,
+        menu_category_id: category_id,
+        addon_id: addon_id,
         is_auto_suggested,
         created_at: new Date().toISOString(),
       }, {
@@ -279,7 +279,7 @@ export async function linkAddonToCategory(req: AuthRequest, res: Response): Prom
       throw error;
     }
 
-    logger.info(`Addon ${addonId} linked to category ${categoryId}`);
+    logger.info(`Addon ${addon_id} linked to category ${category_id}`);
 
     res.status(200).json({ success: true });
   } catch (error) {
@@ -297,24 +297,24 @@ export async function unlinkAddonFromCategory(req: AuthRequest, res: Response): 
       return;
     }
 
-    const { addonId, categoryId } = req.body;
+    const { addon_id, category_id } = req.body;
 
-    if (!addonId || !categoryId) {
-      res.status(400).json({ error: 'addonId and categoryId are required' });
+    if (!addon_id || !category_id) {
+      res.status(400).json({ error: 'addon_id and category_id are required' });
       return;
     }
 
     const { error } = await supabase
       .from('category_addons')
       .delete()
-      .eq('addon_id', addonId)
-      .eq('menu_category_id', categoryId);
+      .eq('addon_id', addon_id)
+      .eq('menu_category_id', category_id);
 
     if (error) {
       throw error;
     }
 
-    logger.info(`Addon ${addonId} unlinked from category ${categoryId}`);
+    logger.info(`Addon ${addon_id} unlinked from category ${category_id}`);
 
     res.status(200).json({ success: true });
   } catch (error) {
@@ -352,6 +352,7 @@ export async function getCategoryAddons(req: AuthRequest, res: Response): Promis
       .from('category_addons')
       .select(`
         id,
+        addon_id,
         is_auto_suggested,
         suggestion_priority,
         addon:menu_addons(id, name, price, is_available)

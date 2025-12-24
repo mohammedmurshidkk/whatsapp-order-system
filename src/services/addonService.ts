@@ -330,3 +330,62 @@ export function calculateAddonsTotal(addons: SessionItemAddon[]): number {
     return total + (price * addon.quantity);
   }, 0);
 }
+
+/**
+ * Remove an addon from any item in a session (searches all session items)
+ * Returns the removed addon name if successful, null otherwise
+ */
+export async function removeAddonFromSession(
+  sessionId: string,
+  addonName: string
+): Promise<{ success: boolean; addonName?: string; itemName?: string }> {
+  const normalizedName = addonName.toLowerCase().trim();
+
+  // Get all session items for this session
+  const { data: sessionItems } = await supabase
+    .from('session_items')
+    .select('id, item_name')
+    .eq('session_id', sessionId);
+
+  if (!sessionItems || sessionItems.length === 0) {
+    return { success: false };
+  }
+
+  // Check each session item for the addon
+  for (const item of sessionItems) {
+    const { data: addons } = await supabase
+      .from('session_item_addons')
+      .select('*')
+      .eq('session_item_id', item.id);
+
+    if (!addons || addons.length === 0) continue;
+
+    // Find matching addon
+    const matchingAddon = addons.find(addon =>
+      addon.addon_name.toLowerCase().includes(normalizedName) ||
+      normalizedName.includes(addon.addon_name.toLowerCase())
+    );
+
+    if (matchingAddon) {
+      // Delete the addon
+      const { error } = await supabase
+        .from('session_item_addons')
+        .delete()
+        .eq('id', matchingAddon.id);
+
+      if (error) {
+        logger.error('Failed to remove addon from session', error);
+        return { success: false };
+      }
+
+      logger.info(`Add-on removed: ${matchingAddon.addon_name} from ${item.item_name}`);
+      return {
+        success: true,
+        addonName: matchingAddon.addon_name,
+        itemName: item.item_name
+      };
+    }
+  }
+
+  return { success: false };
+}
