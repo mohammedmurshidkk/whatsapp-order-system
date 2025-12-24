@@ -172,6 +172,7 @@ CREATE TABLE menu_categories (
   display_order INT DEFAULT 0,
   is_active BOOLEAN DEFAULT true,
   custom_text_prompt TEXT,
+  category_note TEXT,
   created_at TIMESTAMP DEFAULT NOW()
 );
 

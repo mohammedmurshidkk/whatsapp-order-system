@@ -89,7 +89,8 @@ export interface MenuCategory {
   display_order: number;
   is_active: boolean;
   created_at: string;
-  custom_text_prompt?: string | null; // e.g., "What should we write on the cake?"
+  custom_text_prompt?: string | null; // e.g., "What should we write on the cake?" (expects input)
+  category_note?: string | null; // Display-only message (no input expected)
 }
 
 export interface MenuItemSize {
@@ -210,6 +211,7 @@ export interface OrderItemData {
   unit_price?: number;
   line_total?: number;
   custom_text?: string;
+  custom_text_prompt?: string; // The question asked (from category)
   delivery_date?: string;
   notes?: string;
   addons?: Array<{
@@ -217,7 +219,7 @@ export interface OrderItemData {
     quantity: number;
     unit_price?: number;
     line_total?: number;
-  }>; // NEW: Add-ons for this item
+  }>;
 }
 
 // AI types
@@ -236,6 +238,8 @@ export type AIIntent =
   | 'remove_addon'          // Customer wants to remove an add-on
   | 'continue_ordering'     // Continue after add-ons (ask for more items)
   | 'save_custom_text'      // Save custom text response (e.g., cake message)
+  | 'modify_custom_text'    // Customer wants to change cake writing
+  | 'remove_custom_text'    // Customer wants to remove cake writing
   | 'confirm_order'         // Final confirmation (step 2 of 2-step checkout)
   | 'cancel'
   | 'cancel_existing_order' // Cancel a confirmed order

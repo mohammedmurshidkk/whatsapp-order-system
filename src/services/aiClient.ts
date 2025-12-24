@@ -23,7 +23,9 @@ class GeminiClient implements AIClient {
     this.apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL_NAME}:generateContent`;
   }
 
-  async processMessage(prompt: string): Promise<string | null> {
+  async processMessage(prompt: string, retryCount = 0): Promise<string | null> {
+    const MAX_RETRIES = 2;
+
     try {
       const response = await axios.post(
         `${this.apiUrl}?key=${this.apiKey}`,
@@ -39,20 +41,37 @@ class GeminiClient implements AIClient {
           timeout: 30000,
         }
       );
-      return response.data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
-    } catch (error) {
-      if (axios.isAxiosError(error) && error.code === 'ECONNABORTED') {
-        logger.warn('Gemini API timeout. Retrying...');
-        // Simplified retry for brevity
-        const retryResponse = await axios.post(
-          `${this.apiUrl}?key=${this.apiKey}`,
-          { contents: [{ parts: [{ text: prompt }] }] },
-          { timeout: 30000 }
-        );
-        return retryResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
+
+      const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
+
+      // Retry on empty response (Gemini sometimes returns empty)
+      if (!text && retryCount < MAX_RETRIES) {
+        logger.warn(`Gemini returned empty response. Retry ${retryCount + 1}/${MAX_RETRIES}...`);
+        await new Promise(r => setTimeout(r, 500)); // Small delay before retry
+        return this.processMessage(prompt, retryCount + 1);
       }
+
+      return text;
+    } catch (error) {
+      const status = (error as any).response?.status;
+      const isRetryable = axios.isAxiosError(error) && (
+        error.code === 'ECONNABORTED' ||  // Timeout
+        !error.response ||                  // Network error
+        status === 503 ||                   // Model overloaded
+        status === 429 ||                   // Rate limited
+        status === 500                      // Server error
+      );
+
+      // Retry with exponential backoff
+      if (retryCount < MAX_RETRIES && isRetryable) {
+        const delay = Math.pow(2, retryCount) * 1000; // 1s, 2s, 4s
+        logger.warn(`Gemini API error (${status || 'network'}). Retry ${retryCount + 1}/${MAX_RETRIES} after ${delay}ms...`);
+        await new Promise(r => setTimeout(r, delay));
+        return this.processMessage(prompt, retryCount + 1);
+      }
+
       logger.error('Gemini API error', {
-        status: (error as any).response?.status,
+        status: status,
         data: (error as any).response?.data,
       });
       throw error;
@@ -71,18 +90,40 @@ class OpenRouterClient implements AIClient {
     this.openrouter = new OpenRouter({ apiKey: process.env.OPENROUTER_API_KEY });
   }
 
-  async processMessage(prompt: string): Promise<string | null> {
-    const stream = await this.openrouter.chat.send({
-      model: OPENROUTER_MODEL_NAME,
-      messages: [{ role: "user", content: prompt }],
-      stream: true,
-    });
+  async processMessage(prompt: string, retryCount = 0): Promise<string | null> {
+    const MAX_RETRIES = 2;
 
-    let responseText = "";
-    for await (const chunk of stream) {
-      responseText += chunk.choices[0]?.delta?.content || "";
+    try {
+      const stream = await this.openrouter.chat.send({
+        model: OPENROUTER_MODEL_NAME,
+        messages: [{ role: "user", content: prompt }],
+        stream: true,
+        maxTokens: 500
+      });
+
+      let responseText = "";
+      for await (const chunk of stream) {
+        responseText += chunk.choices[0]?.delta?.content || "";
+      }
+
+      // Retry on empty response
+      if (!responseText && retryCount < MAX_RETRIES) {
+        logger.warn(`OpenRouter returned empty response. Retry ${retryCount + 1}/${MAX_RETRIES}...`);
+        await new Promise(r => setTimeout(r, 500));
+        return this.processMessage(prompt, retryCount + 1);
+      }
+
+      return responseText || null;
+    } catch (error) {
+      // Retry on network/timeout errors
+      if (retryCount < MAX_RETRIES) {
+        logger.warn(`OpenRouter API error. Retry ${retryCount + 1}/${MAX_RETRIES}...`, error);
+        await new Promise(r => setTimeout(r, 500));
+        return this.processMessage(prompt, retryCount + 1);
+      }
+      logger.error('OpenRouter API error', error);
+      throw error;
     }
-    return responseText;
   }
 }
 

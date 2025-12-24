@@ -180,7 +180,10 @@ async function processMessage(
     const normalizedInput = messageText.toLowerCase().trim();
 
     // Check if user is trying to skip custom text or order something else
-    const wantsToSkip = ['no', 'skip', 'none', 'nothing', 'no thanks', 'nope'].some(s => normalizedInput === s);
+    const skipWords = ['no', 'skip', 'none', 'nothing', 'no thanks', 'nope'];
+    const wantsToSkip = skipWords.some(s => normalizedInput === s) ||
+      /\b(no|don'?t|dont)\b.*(writ|text|message)/i.test(normalizedInput) ||
+      /\b(skip|nothing)\b/i.test(normalizedInput);
     const looksLikeNewOrder = normalizedInput.match(/\b(want|order|give|need|get|add)\b/i) &&
       !normalizedInput.match(/\b(write|message|text)\b/i); // "add candle" but not "add message"
 
@@ -389,6 +392,19 @@ async function processMessage(
   let replyMessage = aiResponse.reply;
   let intentToProcess = aiResponse.intent;
 
+  // SERVER-SIDE: Detect custom text change requests (e.g., "change text to Happy Birthday")
+  const customTextChangeMatch = messageText.match(/(?:change|update|make it|write)\s*(?:the\s*)?(?:text|message|writing)?\s*(?:to|into|as)?\s*["']?(.+?)["']?\s*$/i);
+  if (customTextChangeMatch && existingItems.length > 0) {
+    const newCustomText = customTextChangeMatch[1].replace(/^["']|["']$/g, '').trim();
+    if (newCustomText.length > 2) {
+      const lastItemId = lastAddedItemMap.get(session.id);
+      if (lastItemId) {
+        await updateSessionItemCustomText(lastItemId, newCustomText);
+        logger.info(`Custom text updated via server-side detection: "${newCustomText}"`);
+      }
+    }
+  }
+
   // SERVER-SIDE INTENT OVERRIDE: Handle "yes" confirmation robustly
   // This helps when AI model doesn't correctly identify confirm_order intent
   const isYesMessage = /^(yes|yeah|yep|yup|confirm|ok|okay|sure|go ahead)$/i.test(messageText.trim());
@@ -433,10 +449,20 @@ async function processMessage(
               );
 
               if (addedMenuItem && addedMenuItem.category_id) {
-                // Check for custom text prompt first (e.g., "What to write on cake?")
+                // Check for category note (display only) and custom text prompt (expects input)
                 let hasCustomTextPrompt = false;
+                let categoryNoteToShow = '';
+
                 if (menuCategories && menuCategories.length > 0) {
                   const category = menuCategories.find(c => c.id === addedMenuItem.category_id);
+
+                  // Display-only note (no input expected)
+                  if (category?.category_note) {
+                    categoryNoteToShow = category.category_note;
+                    logger.info(`Category has display note: "${category.category_note}"`);
+                  }
+
+                  // Custom text prompt (expects input)
                   if (category?.custom_text_prompt) {
                     hasCustomTextPrompt = true;
                     logger.info(`Category has custom_text_prompt: "${category.custom_text_prompt}"`);
@@ -453,8 +479,16 @@ async function processMessage(
                         addons: suggestedAddons,
                       });
                     }
-                    // Only ask custom text question now, addons will be asked after
-                    replyMessage = aiResponse.reply + '\n\n' + category.custom_text_prompt;
+                    // REPLACE the AI reply - don't ask "Anything else?" when we need custom text
+                    // Build a clean response that only asks for custom text input
+                    const itemDesc = aiResponse.item?.size_or_weight
+                      ? `${addedMenuItem.name} (${aiResponse.item.size_or_weight})`
+                      : addedMenuItem.name;
+                    const notePrefix = categoryNoteToShow ? `_${categoryNoteToShow}_\n\n` : '';
+                    replyMessage = `Added ${itemDesc} to your cart! 🛒\n\n${notePrefix}${category.custom_text_prompt}`;
+                  } else if (categoryNoteToShow) {
+                    // Only display note (no input expected), continue with addons
+                    replyMessage = aiResponse.reply + `\n\n_${categoryNoteToShow}_`;
                   }
                 }
 
@@ -616,17 +650,158 @@ async function processMessage(
 
     case 'save_custom_text':
       // Save custom text response (e.g., cake message)
-      if (aiResponse.customText) {
+      // Try to extract text from AI response or from user message
+      let customTextToSave = aiResponse.customText;
+
+      // Fallback: Extract from user message if AI didn't provide it
+      if (!customTextToSave) {
+        // Pattern: "change text to X", "update message to X", "write X instead"
+        const changeMatch = messageText.match(/(?:change|update|make it|write)\s*(?:the\s*)?(?:text|message|writing)?\s*(?:to|into|as)?\s*["']?(.+?)["']?\s*$/i);
+        if (changeMatch) {
+          customTextToSave = changeMatch[1].replace(/^["']|["']$/g, '').trim();
+        }
+      }
+
+      if (customTextToSave) {
         const lastItemId = lastAddedItemMap.get(session.id);
         if (lastItemId) {
-          await updateSessionItemCustomText(lastItemId, aiResponse.customText);
-          logger.info(`Custom text saved: "${aiResponse.customText}" for item ${lastItemId}`);
+          await updateSessionItemCustomText(lastItemId, customTextToSave);
+          logger.info(`Custom text saved: "${customTextToSave}" for item ${lastItemId}`);
           // Clear pending custom text if exists
           pendingCustomTextMap.delete(session.id);
         } else {
           logger.warn('No last item found for custom text');
         }
       }
+      break;
+
+    case 'modify_custom_text':
+      // Customer wants to change the cake writing
+      let newCustomText = aiResponse.customText;
+
+      // Fallback: Extract from user message if AI didn't provide it
+      if (!newCustomText) {
+        const modifyMatch = messageText.match(/(?:change|update|make it|write)\s*(?:the\s*)?(?:text|message|writing)?\s*(?:to|into|as)?\s*["']?(.+?)["']?\s*$/i);
+        if (modifyMatch) {
+          newCustomText = modifyMatch[1].replace(/^["']|["']$/g, '').trim();
+        }
+      }
+
+      // Helper function to find the target item for custom text
+      const findTargetItemForCustomText = (): typeof existingItems[0] | null => {
+        // 1. Check if AI provided item name
+        if (aiResponse.item?.name) {
+          const aiItemMatch = existingItems.find(item =>
+            item.item_name.toLowerCase().includes(aiResponse.item!.name.toLowerCase()) ||
+            aiResponse.item!.name.toLowerCase().includes(item.item_name.toLowerCase())
+          );
+          if (aiItemMatch) return aiItemMatch;
+        }
+
+        // 2. Try to extract item name from user message
+        // Patterns: "on Black Forest", "on the Rainbow cake", "for chocolate cake"
+        const itemNameMatch = messageText.match(/(?:on|for|to)\s*(?:the\s*)?["']?([a-zA-Z\s]+?)["']?\s*(?:cake)?$/i) ||
+                              messageText.match(/["']?([a-zA-Z\s]+?)["']?\s*(?:cake)?\s*(?:text|message|writing)/i);
+
+        if (itemNameMatch) {
+          const mentionedItem = itemNameMatch[1].trim().toLowerCase();
+          const matchedItem = existingItems.find(item =>
+            item.item_name.toLowerCase().includes(mentionedItem) ||
+            mentionedItem.includes(item.item_name.toLowerCase())
+          );
+          if (matchedItem) return matchedItem;
+        }
+
+        // 3. Check for item names mentioned anywhere in the message
+        for (const item of existingItems) {
+          if (messageText.toLowerCase().includes(item.item_name.toLowerCase())) {
+            return item;
+          }
+        }
+
+        // 4. Fallback: item with existing custom_text or last added item
+        return existingItems.find(item => item.custom_text) || existingItems[existingItems.length - 1] || null;
+      };
+
+      // Filter items that could have custom text (typically cakes)
+      const customizableItems = existingItems.filter(item => {
+        const itemNameLower = item.item_name.toLowerCase();
+        return itemNameLower.includes('cake') || itemNameLower.includes('pastry') ||
+               itemNameLower.includes('cupcake') || item.custom_text;
+      });
+
+      if (newCustomText) {
+        // Find the specific item to update
+        let itemToUpdate = findTargetItemForCustomText();
+
+        if (itemToUpdate) {
+          await updateSessionItemCustomText(itemToUpdate.id, newCustomText);
+          logger.info(`Custom text modified: "${newCustomText}" for item ${itemToUpdate.id} (${itemToUpdate.item_name})`);
+          replyMessage = `Got it! Updated the message on your ${itemToUpdate.item_name} to "${newCustomText}". Anything else?`;
+          // Clear pending custom text only after successfully updating
+          pendingCustomTextMap.delete(session.id);
+        } else {
+          logger.warn('No item found to update custom text');
+          replyMessage = "I couldn't find an item with text to update. Would you like to add something first?";
+        }
+      } else {
+        // No custom text provided - need to SET pending state to wait for user's response
+
+        // Check if multiple customizable items exist and user didn't specify which one
+        if (customizableItems.length > 1) {
+          // Check if user mentioned a specific item
+          let itemToUpdate = findTargetItemForCustomText();
+          const userMentionedSpecificItem = existingItems.some(item =>
+            messageText.toLowerCase().includes(item.item_name.toLowerCase())
+          );
+
+          if (!userMentionedSpecificItem) {
+            // Multiple cakes and user didn't specify - ask which one
+            const cakeList = customizableItems.map((item, i) => `${i + 1}. ${item.item_name}`).join('\n');
+            replyMessage = `You have multiple items. Which one would you like to add writing to?\n\n${cakeList}`;
+            // Don't set pending yet - wait for them to specify which cake
+            break;
+          }
+
+          // User mentioned specific item
+          if (itemToUpdate) {
+            pendingCustomTextMap.set(session.id, {
+              itemId: itemToUpdate.id,
+              prompt: `What would you like written on your ${itemToUpdate.item_name}?`,
+            });
+            replyMessage = `What would you like written on your ${itemToUpdate.item_name}?`;
+          } else {
+            replyMessage = "I couldn't find that item in your order. Which item would you like to add writing to?";
+          }
+        } else {
+          // Single item or no ambiguity
+          const itemToUpdate = findTargetItemForCustomText();
+          if (itemToUpdate) {
+            pendingCustomTextMap.set(session.id, {
+              itemId: itemToUpdate.id,
+              prompt: `What would you like written on your ${itemToUpdate.item_name}?`,
+            });
+            replyMessage = `What would you like written on your ${itemToUpdate.item_name}?`;
+          } else {
+            replyMessage = "I couldn't find an item to update. Would you like to add something first?";
+          }
+        }
+      }
+      break;
+
+    case 'remove_custom_text':
+      // Customer wants to remove the cake writing entirely
+      const itemWithText = existingItems.find(item => item.custom_text);
+      if (itemWithText) {
+        await updateSessionItemCustomText(itemWithText.id, ''); // Clear the custom text
+        logger.info(`Custom text removed for item ${itemWithText.id}`);
+        replyMessage = `Done! I've removed the text from your ${itemWithText.item_name}. Anything else you'd like to change?`;
+      } else {
+        logger.warn('No item found with custom text to remove');
+        replyMessage = "There's no text to remove from your order. Anything else I can help with?";
+      }
+      // Clear pending custom text if exists
+      pendingCustomTextMap.delete(session.id);
       break;
 
     case 'show_menu':
@@ -1666,6 +1841,8 @@ export function handleWebhookVerification(req: Request, res: Response): void {
   logger.debug(`Mode: ${mode}, Token: ${token}, Challenge: ${challenge}`);
 
   const result = verifyWebhookChallenge(mode, token, challenge);
+
+  console.log('#### result', result)
 
   if (result) {
     logger.info('Webhook verified successfully!');

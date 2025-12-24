@@ -109,6 +109,41 @@ export async function getSessionDetail(req: AuthRequest, res: Response): Promise
       .eq('session_id', sessionId)
       .order('created_at', { ascending: true });
 
+    // Get menu items with categories for this business (to get custom_text_prompt)
+    const { data: menuItems } = await supabase
+      .from('menu_items')
+      .select('name, category_id, menu_categories(custom_text_prompt)')
+      .eq('business_id', businessId);
+
+    // Create a map of item name -> custom_text_prompt
+    const promptMap = new Map<string, string | null>();
+    if (menuItems) {
+      for (const mi of menuItems) {
+        const prompt = (mi.menu_categories as any)?.custom_text_prompt || null;
+        promptMap.set(mi.name.toLowerCase(), prompt);
+      }
+    }
+
+    // Fetch addons for each item and include custom_text_prompt
+    const itemsWithAddons = await Promise.all(
+      (items || []).map(async (item) => {
+        const { data: addons } = await supabase
+          .from('session_item_addons')
+          .select('*')
+          .eq('session_item_id', item.id)
+          .order('created_at', { ascending: true });
+
+        // Get the custom_text_prompt for this item
+        const customTextPrompt = promptMap.get(item.item_name.toLowerCase()) || null;
+
+        return {
+          ...item,
+          custom_text_prompt: customTextPrompt,
+          addons: addons || [],
+        };
+      })
+    );
+
     // Get messages
     const { data: messages } = await supabase
       .from('messages')
@@ -121,7 +156,7 @@ export async function getSessionDetail(req: AuthRequest, res: Response): Promise
         ...session,
         customer_phone: (session.customers as any)?.phone || 'Unknown',
         customer_name: (session.customers as any)?.name || null,
-        items: items || [],
+        items: itemsWithAddons,
       },
       messages: messages || [],
     });

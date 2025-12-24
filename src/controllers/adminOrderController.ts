@@ -66,19 +66,61 @@ export async function listOrders(req: AuthRequest, res: Response): Promise<void>
       });
     }
 
-    // Enrich with customer phone
+    // Get outlet names for takeaway orders
+    const outletIds = filteredOrders
+      .filter(o => o.fulfillment_type === 'takeaway' && o.pickup_outlet_id)
+      .map(o => o.pickup_outlet_id);
+
+    let outletMap = new Map<string, string>();
+    if (outletIds.length > 0) {
+      const { data: outlets } = await supabase
+        .from('business_outlets')
+        .select('id, outlet_name')
+        .in('id', outletIds);
+
+      if (outlets) {
+        outletMap = new Map(outlets.map(o => [o.id, o.outlet_name]));
+      }
+    }
+
+    // Get menu items with custom_text_prompt for enriching order items
+    const { data: menuItems } = await supabase
+      .from('menu_items')
+      .select('name, category_id, menu_categories(custom_text_prompt)')
+      .eq('business_id', businessId);
+
+    const promptMap = new Map<string, string | null>();
+    if (menuItems) {
+      for (const mi of menuItems) {
+        const prompt = (mi.menu_categories as any)?.custom_text_prompt || null;
+        promptMap.set(mi.name.toLowerCase(), prompt);
+      }
+    }
+
+    // Enrich with customer phone, outlet info, and custom_text_prompt
     const enrichedOrders = filteredOrders.map(order => {
       const session = sessionMap.get(order.session_id);
+
+      // Enrich items with custom_text_prompt if not already present
+      const enrichedItems = Array.isArray(order.items)
+        ? order.items.map((item: any) => ({
+            ...item,
+            custom_text_prompt: item.custom_text_prompt || promptMap.get(item.name?.toLowerCase()) || null,
+          }))
+        : order.items;
+
       return {
         id: order.id,
         order_number: order?.order_number,
         customer_phone: (session?.customers as any)?.phone || 'Unknown',
-        items: order.items,
+        items: enrichedItems,
         total: order.total_amount,
         status: order.status,
         created_at: order.created_at,
         fulfillment_type: order.fulfillment_type,
         delivery_address: order.delivery_address,
+        pickup_outlet_id: order.pickup_outlet_id,
+        pickup_outlet_name: order.pickup_outlet_id ? outletMap.get(order.pickup_outlet_id) || null : null,
       };
     });
 

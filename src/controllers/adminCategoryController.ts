@@ -22,7 +22,9 @@ export async function listCategories(req: AuthRequest, res: Response): Promise<v
         description,
         display_order,
         is_active,
-        created_at
+        created_at,
+        custom_text_prompt,
+        category_note
       `)
       .eq('business_id', businessId)
       .order('display_order', { ascending: true });
@@ -65,7 +67,7 @@ export async function createCategory(req: AuthRequest, res: Response): Promise<v
       return;
     }
 
-    const { name, description, is_active = true } = req.body;
+    const { name, description, custom_text_prompt, category_note, is_active = true } = req.body;
 
     if (!name) {
       res.status(400).json({ error: 'name is required' });
@@ -90,6 +92,8 @@ export async function createCategory(req: AuthRequest, res: Response): Promise<v
         name,
         description: description || null,
         display_order: displayOrder,
+        custom_text_prompt: custom_text_prompt, 
+        category_note: category_note,
         is_active,
         created_at: new Date().toISOString(),
       })
@@ -119,7 +123,7 @@ export async function updateCategory(req: AuthRequest, res: Response): Promise<v
     }
 
     const { categoryId } = req.params;
-    const { name, description, display_order, is_active } = req.body;
+    const { name, description, display_order, custom_text_prompt, category_note, is_active } = req.body;
 
     // Verify category belongs to this business
     const { data: existing } = await supabase
@@ -139,6 +143,8 @@ export async function updateCategory(req: AuthRequest, res: Response): Promise<v
     if (name !== undefined) updateData.name = name;
     if (description !== undefined) updateData.description = description;
     if (display_order !== undefined) updateData.display_order = display_order;
+    if (custom_text_prompt !== undefined) updateData.custom_text_prompt = custom_text_prompt;
+    if (category_note !== undefined) updateData.category_note = category_note;
     if (is_active !== undefined) updateData.is_active = is_active;
 
     const { data: category, error } = await supabase

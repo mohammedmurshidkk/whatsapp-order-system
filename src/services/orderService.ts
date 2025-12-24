@@ -340,6 +340,21 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
     throw new Error('No items in session');
   }
 
+  // Fetch menu items with category custom_text_prompt for this business
+  const { data: menuItems } = await supabase
+    .from('menu_items')
+    .select('name, category_id, menu_categories(custom_text_prompt)')
+    .eq('business_id', session.business_id);
+
+  // Create a map of item name -> custom_text_prompt
+  const promptMap = new Map<string, string | null>();
+  if (menuItems) {
+    for (const mi of menuItems) {
+      const prompt = (mi.menu_categories as any)?.custom_text_prompt || null;
+      promptMap.set(mi.name.toLowerCase(), prompt);
+    }
+  }
+
   // Convert session items to order item data with prices
   let totalAmount = 0;
   const orderItems: OrderItemData[] = session.items.map((item) => {
@@ -359,6 +374,9 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
       };
     });
 
+    // Get custom_text_prompt for this item
+    const customTextPrompt = promptMap.get(item.item_name.toLowerCase()) || undefined;
+
     return {
       name: item.item_name,
       quantity: item.quantity,
@@ -366,6 +384,7 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
       unit_price: item.unit_price || undefined,
       line_total: lineTotal || undefined,
       custom_text: item.custom_text || undefined,
+      custom_text_prompt: customTextPrompt,
       delivery_date: item.delivery_date || undefined,
       notes: item.notes || undefined,
       addons: addons.length > 0 ? addons : undefined,
