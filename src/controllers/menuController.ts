@@ -244,7 +244,7 @@ export async function uploadAddonsByBusinessId(req: Request, res: Response): Pro
 // Download blank template
 export async function downloadBlankTemplate(_req: Request, res: Response): Promise<void> {
   try {
-    const blankTemplate = `category,item_name,description,price,sizes,is_customizable,requires_date,special_notes
+    const blankTemplate = `category,item_name,description,price,sizes
 Cakes,Black Forest,Classic black forest cake,,500g:400|1kg:750|2kg:1400,yes,yes,Best consumed within 24 hours
 ,,,,,,,
 ,,,,,,,
@@ -270,7 +270,7 @@ export async function downloadSampleTemplate(_req: Request, res: Response): Prom
       res.setHeader('Content-Disposition', 'attachment; filename=menu_template_sample.csv');
       res.status(200).send(template);
     } else {
-      const sampleTemplate = `category,item_name,description,price,sizes,is_customizable,requires_date,special_notes
+      const sampleTemplate = `category,item_name,description,price,sizes
 Cakes,Black Forest,Classic black forest cake with cherries,,500g:400|1kg:750|2kg:1400,yes,yes,Best consumed within 24 hours
 Cakes,Chocolate Truffle,Rich chocolate truffle cake,,500g:350|1kg:650|2kg:1200,yes,yes,Keep refrigerated
 Hot Beverages,Coffee,Fresh brewed coffee,,small:30|medium:50|large:70,no,no,

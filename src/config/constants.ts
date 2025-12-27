@@ -1,4 +1,10 @@
 export const SESSION_TIMEOUT_HOURS = 2;
+
+// WhatsApp Provider Configuration
+// 'meta' = Meta Business API (official, paid)
+// 'webjs' = whatsapp-web.js (unofficial, free)
+export type WhatsAppProvider = 'meta' | 'webjs';
+export const WHATSAPP_PROVIDER: WhatsAppProvider = (process.env.WHATSAPP_PROVIDER as WhatsAppProvider) || 'meta';
 export const MESSAGE_HISTORY_LIMIT = 10;
 
 // AI Provider Configuration
