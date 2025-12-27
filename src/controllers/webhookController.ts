@@ -65,7 +65,7 @@ import {
   sendReplyButtons,
   sendInteractiveListMessage,
   sendLocationRequest,
-} from '../services/whatsappService';
+} from '../services/whatsapp';
 import {
   processVoiceMessage,
   isSpeechServiceAvailable,
@@ -131,7 +131,11 @@ function isItemDuplicate(
   });
 }
 
-async function processMessage(
+/**
+ * Core message processing logic - shared between Meta and WebJS handlers
+ * Exported as processMessageForWebJS for use by webjsHandler
+ */
+export async function processMessage(
   phone: string,
   messageText: string,
   businessId: string
@@ -1911,3 +1915,9 @@ export async function handleTestMessage(
     });
   }
 }
+
+/**
+ * Alias for processMessage - used by webjsHandler
+ * Keeping separate name for clarity in imports
+ */
+export const processMessageForWebJS = processMessage;

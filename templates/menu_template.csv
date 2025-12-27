@@ -1,4 +1,4 @@
-category,item_name,description,price,sizes,is_customizable,requires_date,special_notes,image_url
+category,item_name,description,price,sizes
 Cakes,Black Forest,Classic black forest cake with cherries,,500g:400|1kg:750|2kg:1400,yes,yes,Best consumed within 24 hours,https://example.com/images/black-forest.jpg
 Cakes,Chocolate Truffle,Rich chocolate truffle cake,,500g:350|1kg:650|2kg:1200,yes,yes,Keep refrigerated,https://example.com/images/chocolate-truffle.jpg
 Cakes,Pineapple Cake,Fresh pineapple cream cake,,500g:350|1kg:650|2kg:1200,yes,yes,,

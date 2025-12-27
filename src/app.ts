@@ -17,9 +17,12 @@ import adminAddonRoutes from './routes/adminAddons';
 import adminBusinessRoutes from './routes/adminBusiness';
 import adminNotificationRoutes from './routes/adminNotifications';
 import superadminRoutes from './routes/superadmin';
+import whatsappAuthRoutes from './routes/whatsappAuth';
+import { WHATSAPP_PROVIDER } from './config/constants';
 import { logger } from './utils/logger';
 import { handleTestMessage } from './controllers/webhookController';
 import { initializeSocket } from './services/socketService';
+import { requestLogger } from './middleware/requestLogger';
 
 // Load environment variables
 dotenv.config();
@@ -34,16 +37,12 @@ initializeSocket(httpServer);
 // Middleware
 app.use(cors());
 app.use(express.json());
+app.use(requestLogger);
 app.use(express.urlencoded({ extended: true }));
 
 // Serve static files (for upload page)
 app.use(express.static(path.join(__dirname, '../public')));
 
-// Request logging middleware
-app.use((req: Request, _res: Response, next: NextFunction) => {
-  logger.debug(`${req.method} ${req.path}`);
-  next();
-});
 
 // Health check endpoint
 app.get('/health', (_req: Request, res: Response) => {
@@ -71,6 +70,9 @@ app.use('/api/business', adminBusinessRoutes);
 app.use('/api/notifications', adminNotificationRoutes);
 app.use('/api/superadmin', superadminRoutes);
 
+// WhatsApp authentication routes (for QR code, status)
+app.use('/api/whatsapp/auth', whatsappAuthRoutes);
+
 // Test routes (same as webhook for convenience)
 app.post('/test/message', handleTestMessage);
 
@@ -81,19 +83,55 @@ app.use((_req: Request, res: Response) => {
 
 // Error handler
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-  logger.error('Unhandled error', err);
+  logger.error('Unhandled error', { error: logger.formatError(err) });
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// Start server (using httpServer for Socket.IO support)
-httpServer.listen(PORT, () => {
+// Initialize WhatsApp client for webjs provider
+async function initializeWhatsApp(): Promise<void> {
+  if (WHATSAPP_PROVIDER === 'webjs') {
+    try {
+      logger.info('Initializing WhatsApp Web.js client...');
+
+      // Import dynamically to avoid loading when not needed
+      const { initializeClient, setMessageHandler } = await import('./services/whatsapp/webjsClient');
+      const { handleWebjsMessage } = await import('./controllers/webjsHandler');
+
+      // Set up message handler
+      setMessageHandler(handleWebjsMessage);
+
+      // Initialize the client
+      await initializeClient();
+
+      logger.info('WhatsApp Web.js initialization started');
+      logger.info('Visit /api/whatsapp/auth/qr-page to scan QR code');
+    } catch (error) {
+      logger.error('Failed to initialize WhatsApp Web.js', { error: logger.formatError(error) });
+    }
+  } else {
+    logger.info('Using Meta WhatsApp Business API');
+  }
+}
+
+// Start server
+app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  logger.info(`WhatsApp Provider: ${WHATSAPP_PROVIDER}`);
   logger.info(`Health check: http://localhost:${PORT}/health`);
   logger.info(`Test endpoint: POST http://localhost:${PORT}/test/message`);
-  logger.info(`WhatsApp webhook: POST http://localhost:${PORT}/webhook/whatsapp`);
+
+  if (WHATSAPP_PROVIDER === 'meta') {
+    logger.info(`WhatsApp webhook: POST http://localhost:${PORT}/webhook/whatsapp`);
+  } else {
+    logger.info(`WhatsApp Auth: http://localhost:${PORT}/api/whatsapp/auth/qr-page`);
+  }
+
   logger.info(`Menu API: http://localhost:${PORT}/api/menu`);
   logger.info(`Socket.IO: ws://localhost:${PORT}`);
+
+  // Initialize WhatsApp after server starts
+  initializeWhatsApp();
 });
 
 export default app;

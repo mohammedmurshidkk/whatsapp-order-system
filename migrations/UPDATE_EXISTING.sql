@@ -28,11 +28,6 @@ ALTER TABLE menu_categories ADD COLUMN IF NOT EXISTS custom_text_prompt TEXT;
 -- Add category_note for display-only messages (no input expected)
 ALTER TABLE menu_categories ADD COLUMN IF NOT EXISTS category_note TEXT;
 
--- Remove unused columns from menu_items (if they exist)
-ALTER TABLE menu_items DROP COLUMN IF EXISTS is_customizable;
-ALTER TABLE menu_items DROP COLUMN IF EXISTS requires_date;
-ALTER TABLE menu_items DROP COLUMN IF EXISTS special_notes;
-
 -- Create business_outlets if not exists
 CREATE TABLE IF NOT EXISTS business_outlets (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
