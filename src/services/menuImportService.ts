@@ -19,37 +19,132 @@ interface ImportResult {
   errors: string[];
 }
 
-// Parse CSV string to rows
+// Parse CSV/TSV string to rows (handles multiline quoted fields)
 function parseCSV(csvContent: string): CSVMenuRow[] {
-  const lines = csvContent.trim().split('\n');
+  // Detect delimiter from header row
+  const firstLine = csvContent.split('\n')[0];
+  const delimiter = firstLine.includes('\t') ? '\t' : ',';
+  logger.info(`Detected delimiter: ${delimiter === '\t' ? 'TAB' : 'COMMA'}`);
 
-  if (lines.length < 2) {
+  // Parse all rows handling multiline quoted fields
+  const allRows = parseCSVWithMultiline(csvContent, delimiter);
+
+  if (allRows.length < 2) {
     throw new Error('CSV must have header row and at least one data row');
   }
 
-  const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/\s+/g, '_'));
+  // Required headers for menu import
+  const requiredHeaders = ['category', 'item_name', 'description', 'price', 'sizes'];
+  const headerRow = allRows[0];
+  const headers = headerRow.map(h => h.trim().toLowerCase().replace(/\s+/g, '_'));
+
+  logger.info(`CSV headers found: ${headers.filter(h => h).join(', ')}`);
+
+  // Validate required headers exist
+  const missingHeaders = requiredHeaders.filter(rh => !headers.includes(rh));
+  if (missingHeaders.length > 0) {
+    throw new Error(`Missing required headers: ${missingHeaders.join(', ')}`);
+  }
+
   const rows: CSVMenuRow[] = [];
+  let skippedCount = 0;
+  const totalDataRows = allRows.length - 1; // Exclude header
 
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
+  for (let i = 1; i < allRows.length; i++) {
+    const rowNum = i + 1; // 1-indexed for user readability
+    const values = allRows[i];
 
-    // Handle CSV parsing with potential commas in quoted fields
-    const values = parseCSVLine(line);
-
-    if (values.length < headers.length) {
-      continue; // Skip incomplete rows
+    // Skip empty rows
+    if (values.length === 0 || values.every(v => !v.trim())) {
+      logger.debug(`Row ${rowNum}: Skipped - empty row`);
+      skippedCount++;
+      continue;
     }
 
     const row: Record<string, string> = {};
     headers.forEach((header, index) => {
-      row[header] = values[index]?.trim() || '';
+      if (header) { // Only map non-empty headers
+        row[header] = values[index]?.trim() || '';
+      }
     });
 
-    // Skip empty rows
-    if (!row.category && !row.item_name) continue;
+    // Skip rows missing required fields
+    if (!row.category && !row.item_name) {
+      logger.warn(`Row ${rowNum}: Skipped - missing both category and item_name`);
+      skippedCount++;
+      continue;
+    }
+
+    if (!row.item_name) {
+      logger.warn(`Row ${rowNum}: Skipped - missing item_name (category: ${row.category})`);
+      skippedCount++;
+      continue;
+    }
+
+    if (!row.category) {
+      logger.warn(`Row ${rowNum}: Skipped - missing category (item: ${row.item_name})`);
+      skippedCount++;
+      continue;
+    }
 
     rows.push(row as unknown as CSVMenuRow);
+  }
+
+  if (skippedCount > 0) {
+    logger.warn(`CSV parsing summary: ${rows.length} rows parsed, ${skippedCount} rows skipped out of ${totalDataRows} total data rows`);
+  } else {
+    logger.info(`CSV parsing complete: ${rows.length} rows parsed successfully`);
+  }
+
+  return rows;
+}
+
+// Parse CSV content handling multiline quoted fields
+function parseCSVWithMultiline(content: string, delimiter: string): string[][] {
+  const rows: string[][] = [];
+  let currentRow: string[] = [];
+  let currentField = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < content.length; i++) {
+    const char = content[i];
+    const nextChar = content[i + 1];
+
+    if (char === '"') {
+      if (inQuotes && nextChar === '"') {
+        // Escaped quote
+        currentField += '"';
+        i++; // Skip next quote
+      } else {
+        // Toggle quote mode
+        inQuotes = !inQuotes;
+      }
+    } else if (char === delimiter && !inQuotes) {
+      // End of field
+      currentRow.push(currentField.trim());
+      currentField = '';
+    } else if (char === '\n' && !inQuotes) {
+      // End of row
+      currentRow.push(currentField.trim());
+      if (currentRow.some(field => field !== '')) {
+        rows.push(currentRow);
+      }
+      currentRow = [];
+      currentField = '';
+    } else if (char === '\r') {
+      // Skip carriage return
+      continue;
+    } else {
+      currentField += char;
+    }
+  }
+
+  // Don't forget the last field/row
+  if (currentField || currentRow.length > 0) {
+    currentRow.push(currentField.trim());
+    if (currentRow.some(field => field !== '')) {
+      rows.push(currentRow);
+    }
   }
 
   return rows;
@@ -224,11 +319,12 @@ export async function importMenuFromCSV(
         const sizes = parseSizes(row.sizes);
         const price = row.price ? parseFloat(row.price) : null;
 
-        // Check if item exists (for update)
+        // Check if item exists in same category (for update)
         const { data: existingItem } = await supabase
           .from('menu_items')
           .select('id')
           .eq('business_id', businessId)
+          .eq('category_id', categoryId)
           .eq('name', row.item_name)
           .single();
 
@@ -244,7 +340,8 @@ export async function importMenuFromCSV(
         };
 
         if (existingItem) {
-          // Update existing item
+          // Update existing item (duplicate in same category)
+          logger.warn(`Row ${rowNum}: Duplicate item "${row.item_name}" in category "${row.category}" - updating existing`);
           const { error } = await supabase
             .from('menu_items')
             .update(itemData)
