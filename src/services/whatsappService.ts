@@ -210,6 +210,73 @@ export async function sendLocationRequest(
 }
 
 /**
+ * Send WhatsApp document message (PDF, etc.)
+ */
+export async function sendDocument(
+  to: string,
+  documentUrl: string,
+  filename: string,
+  caption?: string
+): Promise<void> {
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+
+  if (!phoneNumberId || !accessToken) {
+    logger.info(`[WhatsApp Mock] Document to: ${to}`);
+    logger.info(`[WhatsApp Mock] URL: ${documentUrl}`);
+    logger.info(`[WhatsApp Mock] Filename: ${filename}`);
+    if (caption) logger.info(`[WhatsApp Mock] Caption: ${caption}`);
+    return;
+  }
+
+  const payload: {
+    messaging_product: string;
+    to: string;
+    type: string;
+    document: {
+      link: string;
+      filename: string;
+      caption?: string;
+    };
+  } = {
+    messaging_product: 'whatsapp',
+    to,
+    type: 'document',
+    document: {
+      link: documentUrl,
+      filename,
+    },
+  };
+
+  if (caption) {
+    payload.document.caption = caption;
+  }
+
+  try {
+    await axios.post(
+      `${WHATSAPP_API_BASE}/${phoneNumberId}/messages`,
+      payload,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+    logger.info(`WhatsApp document sent to ${to}: ${filename}`);
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      logger.error('WhatsApp API error (document)', {
+        status: error.response?.status,
+        data: error.response?.data,
+      });
+    } else {
+      logger.error('Failed to send WhatsApp document', error);
+    }
+  }
+}
+
+/**
  * Send WhatsApp interactive list message
  */
 export async function sendInteractiveListMessage(
@@ -229,6 +296,18 @@ export async function sendInteractiveListMessage(
     return;
   }
 
+  // Build rows with optional description (WhatsApp rejects undefined values)
+  const buildRow = (row: { id: string; title: string; description?: string }) => {
+    const result: { id: string; title: string; description?: string } = {
+      id: row.id,
+      title: (row.title || 'Item').substring(0, 24), // Max 24 chars
+    };
+    if (row.description && row.description.trim()) {
+      result.description = row.description.substring(0, 72); // Max 72 chars
+    }
+    return result;
+  };
+
   const payload = {
     messaging_product: 'whatsapp',
     to,
@@ -240,16 +319,14 @@ export async function sendInteractiveListMessage(
       action: {
         button: buttonText.substring(0, 20), // Max 20 chars
         sections: sections.map(section => ({
-          title: section.title.substring(0, 24), // Max 24 chars
-          rows: section.rows.slice(0, 10).map(row => ({ // Max 10 rows per section
-            id: row.id,
-            title: row.title.substring(0, 24), // Max 24 chars
-            description: row.description?.substring(0, 72) // Max 72 chars
-          }))
+          title: (section.title || 'Menu').substring(0, 24), // Max 24 chars
+          rows: section.rows.slice(0, 10).map(buildRow) // Max 10 rows per section
         }))
       }
     }
   };
+
+  logger.debug('Interactive list payload:', JSON.stringify(payload.interactive.action, null, 2));
 
   try {
     await axios.post(

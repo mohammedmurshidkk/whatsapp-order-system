@@ -9,6 +9,8 @@ import {
   toggleAvailability,
   uploadItemImage,
   updateItemPrice,
+  syncMenuPdf,
+  getMenuPdf,
 } from '../controllers/adminMenuController';
 import { authMiddleware } from '../middleware/auth';
 
@@ -31,6 +33,10 @@ const upload = multer({
 
 // All routes require authentication
 router.use(authMiddleware);
+
+// Menu PDF endpoints (before :itemId routes to avoid conflicts)
+router.post('/pdf/sync', syncMenuPdf);  // Generate and upload menu PDF
+router.get('/pdf', getMenuPdf);         // Get menu PDF URL
 
 router.get('/', listMenuItems);
 router.get('/:itemId', getMenuItem);

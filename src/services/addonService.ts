@@ -224,7 +224,7 @@ export function formatAddonsForCustomer(addons: MenuAddon[]): string {
     message += '\n\n';
   });
 
-  message += '_Reply with the number (1, 2, 3...) to add, or say "no thanks" to skip_';
+  message += '_Reply with numbers (e.g., "1, 3" for multiple) or names to add, or say "no thanks" to skip_';
 
   return message;
 }
@@ -319,6 +319,57 @@ export function findAddonByCustomerInput(
   );
 
   return matchedAddon || null;
+}
+
+/**
+ * Find multiple addons by customer input (multi-select)
+ * Handles: "1, 3", "1 and 2", "candle and balloon", "candle, balloon", etc.
+ */
+export function findMultipleAddonsByInput(
+  input: string,
+  addons: MenuAddon[]
+): MenuAddon[] {
+  const normalizedInput = input.toLowerCase().trim();
+  const foundAddons: MenuAddon[] = [];
+  const foundIds = new Set<string>();
+
+  // Split by common separators: comma, "and", "&", space with numbers
+  const parts = normalizedInput
+    .split(/[,&]|\band\b|\s+(?=\d)/)
+    .map(p => p.trim())
+    .filter(p => p.length > 0);
+
+  // If only one part and it might be a single addon
+  if (parts.length === 1) {
+    const single = findAddonByCustomerInput(normalizedInput, addons);
+    if (single) return [single];
+  }
+
+  // Try to find addon for each part
+  for (const part of parts) {
+    const addon = findAddonByCustomerInput(part, addons);
+    if (addon && !foundIds.has(addon.id)) {
+      foundAddons.push(addon);
+      foundIds.add(addon.id);
+    }
+  }
+
+  // Also check for numbers anywhere in input (e.g., "1 3" or "1, 3")
+  const numberMatches = normalizedInput.match(/\d+/g);
+  if (numberMatches) {
+    for (const numStr of numberMatches) {
+      const index = parseInt(numStr, 10) - 1;
+      if (index >= 0 && index < addons.length) {
+        const addon = addons[index];
+        if (!foundIds.has(addon.id)) {
+          foundAddons.push(addon);
+          foundIds.add(addon.id);
+        }
+      }
+    }
+  }
+
+  return foundAddons;
 }
 
 /**

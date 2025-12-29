@@ -144,7 +144,14 @@ ${currentItemsSection}${outletsSection}${fulfillmentStatus}${addonsSection}
 VALID ITEMS: [${itemNamesList}]
 
 📋 JSON RESPONSE FORMAT:
-{"reply": "1-2 sentences", "intent": "add_item|ask_question|modify_order|ready_for_checkout|confirm_order|cancel|show_menu|item_not_available|modify_custom_text|remove_custom_text|cancel_existing_order|check_order_status|conversation_ended", "item": {"name": "exact menu name", "quantity": 1, "size_or_weight": "exact size"}, "fulfillment": {"fulfillment_type": "delivery|takeaway", "delivery_address": "", "delivery_time": ""}, "customText": "cake message", "order_id": "OKS-1"}
+{"reply": "1-2 sentences", "intent": "add_item|ask_question|modify_order|ready_for_checkout|confirm_order|cancel|show_menu|item_not_available|modify_custom_text|remove_custom_text|cancel_existing_order|check_order_status|conversation_ended", "item": {"name": "exact menu name", "quantity": 1, "size_or_weight": "exact size", "notes": "per-item modifier"}, "items": [{"name": "item1", "quantity": 1, "notes": "modifier1"}, {"name": "item2", "quantity": 1, "notes": "modifier2"}], "fulfillment": {"fulfillment_type": "delivery|takeaway", "delivery_address": "", "delivery_time": ""}, "customText": "cake message", "order_id": "OKS-1"}
+
+📝 ITEM NOTES (per-item modifiers):
+- When customer specifies different notes for items, use "items" array instead of "item"
+- Example: "2 burgers - one less spicy, one extra cheese" → items: [{"name": "Burger", "quantity": 1, "notes": "less spicy"}, {"name": "Burger", "quantity": 1, "notes": "extra cheese"}]
+- Example: "2 apple juice - one less sugar, one no ice" → items: [{"name": "Apple Juice", "quantity": 1, "notes": "less sugar"}, {"name": "Apple Juice", "quantity": 1, "notes": "no ice"}]
+- If all items have same modifier, use "item" with total quantity and notes
+- Common modifiers: less sugar, no ice, extra spicy, less spicy, no onion, extra cheese, etc.
 
 🚨 FLOW:
 1. ADD ITEMS: Check menu → if size in message use "add_item" directly ("Rainbow 1kg" → add_item with size). Ask size only if not specified. Never checkout with empty cart.
@@ -220,6 +227,7 @@ function parseAIResponse(responseText: string): AIResponse {
       reply: parsed.reply,
       intent: parsed.intent,
       item: parsed.item,
+      items: parsed.items,  // For multiple items with individual notes
       order_id: parsed.order_id,
       fulfillment: parsed.fulfillment,  // CRITICAL: Include fulfillment data!
       addon: parsed.addon,  // For remove_addon/add_addon intents

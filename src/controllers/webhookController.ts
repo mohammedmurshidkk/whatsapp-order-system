@@ -35,7 +35,14 @@ import {
   getBusinessByPhone,
   getMenuItems,
   getMenuCategories,
+  getMenuItemsByCategory,
   formatMenuForCustomer,
+  buildCategoryListSections,
+  buildCategoriesInGroup,
+  buildItemListSections,
+  buildSizeButtons,
+  getCategoryById,
+  getMenuItemById,
 } from '../services/menuService';
 import {
   getBusinessOutlets,
@@ -56,6 +63,7 @@ import {
   addAddonToSessionItem,
   formatAddonsForCustomer,
   findAddonByCustomerInput,
+  findMultipleAddonsByInput,
   removeAddonFromSession,
 } from '../services/addonService';
 import {
@@ -65,7 +73,10 @@ import {
   sendReplyButtons,
   sendInteractiveListMessage,
   sendLocationRequest,
+  sendDocument,
 } from '../services/whatsapp';
+import { getMenuPdfUrl, menuPdfExists } from '../services/pdfService';
+import { getAddressFromCoordinates } from '../services/geocodingService';
 import {
   processVoiceMessage,
   isSpeechServiceAvailable,
@@ -161,7 +172,7 @@ export async function processMessage(
   logger.info(`Business: ${business?.name || 'NOT FOUND'} (ID: ${businessId})`);
 
   // Get business timezone for date/time parsing and display
-  const businessTimezone = business?.timezone;
+  const businessTimezone = business?.timezone || 'Asia/Kolkata';
 
   // CHECK CRITICAL MESSAGE - If enabled, bypass AI and send critical message
   if (business?.critical_message_enabled && business?.critical_message) {
@@ -218,8 +229,8 @@ export async function processMessage(
       // Fall through to AI processing
     } else {
       // Customer is responding to a custom text question
-      // Clean up common prefixes like "write", "message:", etc.
-      let cleanedText = messageText;
+      // Use originalMessage to preserve case (messageText is lowercased by normalizeManglish)
+      let cleanedText = originalMessage;
       cleanedText = cleanedText.replace(/^(write|message|text|cake message|on cake|write on cake)[:\s]*/i, '').trim();
       // Remove surrounding quotes if present
       cleanedText = cleanedText.replace(/^["'](.*)["']$/, '$1').trim();
@@ -297,17 +308,24 @@ export async function processMessage(
       }
     }
 
-    // Try to find addon by number or name
-    const selectedAddon = findAddonByCustomerInput(messageText, pendingAddon.addons);
+    // Try to find addon(s) by number or name - supports multi-select ("1, 3" or "candle and balloon")
+    const selectedAddons = findMultipleAddonsByInput(messageText, pendingAddon.addons);
 
-    if (selectedAddon) {
-      // Add the addon to the item
-      await addAddonToSessionItem(pendingAddon.itemId, selectedAddon.id, 1);
-      logger.info(`Addon added: ${selectedAddon.name} to item ${pendingAddon.itemId}`);
+    if (selectedAddons.length > 0) {
+      // Add all selected addons to the item
+      const addedNames: string[] = [];
+      for (const addon of selectedAddons) {
+        await addAddonToSessionItem(pendingAddon.itemId, addon.id, 1);
+        const priceText = addon.price ? ` (₹${addon.price})` : ' (FREE)';
+        addedNames.push(`${addon.name}${priceText}`);
+        logger.info(`Addon added: ${addon.name} to item ${pendingAddon.itemId}`);
+      }
       pendingAddonSelectionMap.delete(session.id);
 
       await saveIncomingMessage(session.id, messageText);
-      const addonReply = `Added ${selectedAddon.name}${selectedAddon.price ? ` (₹${selectedAddon.price})` : ' (FREE)'}! Would you like anything else?`;
+      const addonReply = selectedAddons.length === 1
+        ? `Added ${addedNames[0]}! Would you like anything else?`
+        : `Added ${addedNames.join(', ')}! Would you like anything else?`;
       await saveOutgoingMessage(session.id, addonReply);
       return addonReply;
     }
@@ -330,6 +348,52 @@ export async function processMessage(
       const hintReply = `I didn't catch that. Please reply with:\n${addonNames}\n\nOr say "no thanks" to skip add-ons.\n\n💡 _To add a cake message, say "write Happy Birthday" or similar._`;
       await saveOutgoingMessage(session.id, hintReply);
       return hintReply;
+    }
+  }
+
+  // Check if session needs time (has fulfillment type but no time) and user typed a time-like message
+  const sessionForTimeCheck = await getSessionWithItems(session.id);
+  if (sessionForTimeCheck) {
+    const needsDeliveryTime = sessionForTimeCheck.fulfillment_type === 'delivery' &&
+      sessionForTimeCheck.delivery_address && !sessionForTimeCheck.delivery_time;
+    const needsPickupTime = sessionForTimeCheck.fulfillment_type === 'takeaway' &&
+      sessionForTimeCheck.pickup_outlet_id && !sessionForTimeCheck.pickup_time;
+
+    if (needsDeliveryTime || needsPickupTime) {
+      // Check if message looks like a time input
+      const looksLikeTime = /\d{1,2}(?::\d{2})?\s*(?:am|pm)|morning|evening|afternoon|today|tomorrow|nale|innu/i.test(messageText);
+
+      if (looksLikeTime) {
+        logger.info(`Session needs time, parsing: "${messageText}"`);
+        const parsedTime = parseDeliveryTime(messageText, businessTimezone);
+
+        if (parsedTime) {
+          await saveIncomingMessage(session.id, messageText);
+
+          if (needsDeliveryTime) {
+            await updateSessionDeliveryInfo(session.id, {
+              address: sessionForTimeCheck.delivery_address!,
+              time: parsedTime,
+            });
+            logger.info(`Delivery time saved: ${parsedTime}`);
+          } else {
+            await updateSessionPickupInfo(session.id, {
+              outlet_id: sessionForTimeCheck.pickup_outlet_id!,
+              time: parsedTime,
+            });
+            logger.info(`Pickup time saved: ${parsedTime}`);
+          }
+
+          // Show final invoice with confirmation prompt
+          const finalSummary = await generateOrderSummary(session.id, {
+            includeCta: true,
+            ctaMessage: '\nPlease review your order. Reply *YES* to confirm.',
+            timezone: businessTimezone,
+          });
+          await saveOutgoingMessage(session.id, finalSummary);
+          return finalSummary;
+        }
+      }
     }
   }
 
@@ -425,8 +489,52 @@ export async function processMessage(
   // Handle different intents
   switch (intentToProcess) {
     case 'add_item':
+      // Handle multiple items with individual notes (e.g., "2 burgers - one less spicy, one extra cheese")
+      if (aiResponse.items && aiResponse.items.length > 0) {
+        logger.info(`🛒 ADD_ITEM intent received for ${aiResponse.items.length} items with individual notes`);
+
+        let lastSavedItemId: string | null = null;
+        const addedItemNames: string[] = [];
+
+        for (const itemData of aiResponse.items) {
+          if (!itemData.name) continue;
+
+          // Check for duplicates before adding
+          const isDuplicate = isItemDuplicate(existingItems, itemData.name, itemData.size_or_weight);
+          if (isDuplicate) {
+            logger.info(`Duplicate item prevented: ${itemData.name}`);
+            continue;
+          }
+
+          try {
+            const savedItem = await saveOrderItem(session.id, {
+              ...itemData,
+              quantity: itemData.quantity || 1,
+            }, businessId);
+            logger.info(`✅ Item SAVED to DB: ${itemData.name} (ID: ${savedItem.id}, notes: ${itemData.notes || 'none'})`);
+            lastSavedItemId = savedItem.id;
+
+            const itemDesc = itemData.notes
+              ? `${itemData.name}${itemData.size_or_weight ? ` (${itemData.size_or_weight})` : ''} - ${itemData.notes}`
+              : `${itemData.name}${itemData.size_or_weight ? ` (${itemData.size_or_weight})` : ''}`;
+            addedItemNames.push(itemDesc);
+          } catch (saveError) {
+            logger.error(`❌ Failed to save item to DB: ${itemData.name}`, saveError);
+          }
+        }
+
+        if (lastSavedItemId) {
+          lastAddedItemMap.set(session.id, lastSavedItemId);
+        }
+
+        if (addedItemNames.length > 0) {
+          replyMessage = `Added to cart:\n${addedItemNames.map((n, i) => `${i + 1}. ${n}`).join('\n')}\n\nAnything else?`;
+        }
+        break;
+      }
+
       if (aiResponse.item && aiResponse.item.name) {
-        logger.info(`🛒 ADD_ITEM intent received for: ${aiResponse.item.name} (size: ${aiResponse.item.size_or_weight || 'default'}, qty: ${aiResponse.item.quantity || 1})`);
+        logger.info(`🛒 ADD_ITEM intent received for: ${aiResponse.item.name} (size: ${aiResponse.item.size_or_weight || 'default'}, qty: ${aiResponse.item.quantity || 1}, notes: ${aiResponse.item.notes || 'none'})`);
 
         // Check for duplicates before adding
         const isDuplicate = isItemDuplicate(
@@ -809,8 +917,41 @@ export async function processMessage(
       break;
 
     case 'show_menu':
-      // Send formatted menu to customer
+      // Send PDF menu if available, otherwise fallback to interactive/text
+      if (business?.id) {
+        const pdfExists = await menuPdfExists(business.id);
+        if (pdfExists) {
+          const pdfUrl = getMenuPdfUrl(business.id);
+          const menuCaption = `Here's our menu! Browse through and let me know what you'd like to order.`;
+          await saveOutgoingMessage(session.id, `[Menu PDF sent] ${menuCaption}`);
+          await sendDocument(
+            phone,
+            pdfUrl,
+            `${business.name || 'Menu'}.pdf`,
+            menuCaption
+          );
+          return null; // Don't send another message
+        }
+      }
+      // Fallback: Send interactive category list for large menus, text for small menus
       if (menuItems && menuCategories && menuItems.length > 0) {
+        if (menuItems.length > 30 && menuCategories.length > 5) {
+          // Large menu: Use interactive list with smart groupings
+          const categorySections = buildCategoryListSections(menuCategories);
+          if (categorySections.length > 0) {
+            const menuIntro = `Welcome to ${business?.name || 'our cafe'}! Tap below to browse our menu.`;
+            await saveOutgoingMessage(session.id, menuIntro);
+            await sendInteractiveListMessage(
+              phone,
+              'Our Menu',
+              menuIntro,
+              'Browse Menu',
+              categorySections
+            );
+            return null; // Don't send another message
+          }
+        }
+        // Small menu or fallback: use text format
         replyMessage = formatMenuForCustomer(menuItems, menuCategories);
       } else {
         replyMessage =
@@ -1386,7 +1527,7 @@ export async function processMessage(
 
 export async function handleWhatsAppWebhook(
   req: Request,
-  res: Response
+  res: Response,
 ): Promise<void> {
   // Immediately respond with 200 OK (WhatsApp requires fast response)
   res.status(200).send('OK');
@@ -1534,10 +1675,17 @@ export async function handleWhatsAppWebhook(
             const session = await findOrCreateSession(customer.id, business.id);
             const sessionWithItems = await getSessionWithItems(session.id);
 
-            // Use address/name from location if available, otherwise use a friendly placeholder
+            // Use address/name from location if available, otherwise reverse geocode
             // The lat/long will be stored in separate columns for map display
-            const displayAddress = location.address || location.name || 'Pinned Location 📍';
-            const logAddress = location.address || location.name || `${location.latitude}, ${location.longitude}`;
+            let displayAddress = location.address || location.name;
+            
+            // If no address provided by WhatsApp, reverse geocode the coordinates
+            if (!displayAddress) {
+              logger.info(`No address in location data, reverse geocoding ${location.latitude}, ${location.longitude}`);
+              displayAddress = await getAddressFromCoordinates(location.latitude, location.longitude);
+            }
+
+            const logAddress = displayAddress || `${location.latitude}, ${location.longitude}`;
             await saveIncomingMessage(session.id, `[Location: ${logAddress}]`);
 
             // If customer is in delivery flow and hasn't provided address yet
@@ -1627,6 +1775,33 @@ export async function handleWhatsAppWebhook(
                 // Send location request with the prompt
                 await sendLocationRequest(phone, deliveryPrompt);
                 continue;
+              }
+
+              // Handle SIZE selection buttons from menu browser (format: size:{itemId}:{sizeName})
+              if (buttonId.startsWith('size:')) {
+                const parts = buttonId.split(':');
+                if (parts.length >= 3) {
+                  const itemId = parts[1];
+                  const sizeName = parts.slice(2).join(':'); // In case size name has colons
+
+                  const menuItem = await getMenuItemById(itemId);
+                  if (menuItem) {
+                    const customer = await findOrCreateCustomer(phone, business.id);
+                    const session = await findOrCreateSession(customer.id, business.id);
+
+                    await saveIncomingMessage(session.id, `[Selected size: ${sizeName}]`);
+                    await saveOrderItem(session.id, {
+                      name: menuItem.name,
+                      quantity: 1,
+                      size_or_weight: sizeName
+                    }, business.id);
+
+                    const addedMsg = `Added *${menuItem.name}* (${sizeName}) to your order. Anything else?`;
+                    await sendWhatsAppMessage(phone, addedMsg);
+                    await saveOutgoingMessage(session.id, addedMsg);
+                    continue;
+                  }
+                }
               }
 
               // Handle DATE selection buttons (Today/Tomorrow/Other)
@@ -1771,26 +1946,112 @@ export async function handleWhatsAppWebhook(
               const session = await findOrCreateSession(customer.id, business.id);
               const businessOutlets = await getBusinessOutlets(business.id);
 
-              const selectedOutlet = businessOutlets.find(o => o.id === selectedId);
-              if (selectedOutlet) {
-                await updateSessionFulfillmentType(session.id, 'takeaway');
-                await updateSessionPickupInfo(session.id, { outlet_id: selectedOutlet.id });
+              // Handle super group selection (first level: Food, Drinks, etc.)
+              if (selectedId.startsWith('group:')) {
+                const groupName = selectedId.replace('group:', '');
+                const menuCategories = await getMenuCategories(business.id);
+                const categorySections = buildCategoriesInGroup(groupName, menuCategories);
 
-                await saveIncomingMessage(session.id, `[Selected: ${selectedOutlet.outlet_name}]`);
-
-                // Show date selection buttons instead of asking for time as text
-                const datePrompt = `📍 Pickup at: *${selectedOutlet.outlet_name}*\n\nWhen would you like to pick up?`;
-                await saveOutgoingMessage(session.id, datePrompt);
-                await sendReplyButtons(phone, datePrompt, [
-                  { id: 'date_today_takeaway', title: '📅 Today' },
-                  { id: 'date_tomorrow_takeaway', title: '📅 Tomorrow' },
-                  { id: 'date_other_takeaway', title: '📅 Other' },
-                ]);
-                continue;
+                if (categorySections.length > 0 && categorySections[0].rows.length > 0) {
+                  await saveIncomingMessage(session.id, `[Browsing: ${groupName}]`);
+                  await sendInteractiveListMessage(
+                    phone,
+                    groupName,
+                    `Select a category from ${groupName}`,
+                    'View Categories',
+                    categorySections
+                  );
+                  continue;
+                }
+                // Group empty - show menu again
+                messageText = 'menu';
               }
+              // Handle category selection from menu browser
+              else if (selectedId.startsWith('cat:')) {
+                const categoryId = selectedId.replace('cat:', '');
+                const category = await getCategoryById(categoryId);
+                if (category) {
+                  const categoryItems = await getMenuItemsByCategory(business.id, categoryId);
+                  if (categoryItems.length > 0) {
+                    const { sections, hasMore, totalItems } = buildItemListSections(categoryItems, category.name);
+                    const itemListBody = hasMore
+                      ? `${category.name} (${totalItems} items) - Showing first 10`
+                      : `${category.name} (${totalItems} items)`;
 
-              // If not outlet, treat ID as message text
-              messageText = selectedId;
+                    await saveIncomingMessage(session.id, `[Browsing: ${category.name}]`);
+                    await sendInteractiveListMessage(
+                      phone,
+                      category.name,
+                      itemListBody,
+                      'Select Item',
+                      sections
+                    );
+                    continue;
+                  }
+                }
+                // Category not found or empty - show menu again
+                messageText = 'menu';
+              }
+              // Handle item selection from category browser
+              else if (selectedId.startsWith('item:')) {
+                const itemId = selectedId.replace('item:', '');
+                const menuItem = await getMenuItemById(itemId);
+                if (menuItem) {
+                  await saveIncomingMessage(session.id, `[Selected: ${menuItem.name}]`);
+
+                  // Check if item has multiple sizes
+                  if (menuItem.sizes && menuItem.sizes.length > 1) {
+                    // Show size selection buttons
+                    const sizeButtons = buildSizeButtons(menuItem);
+                    const sizePrompt = `*${menuItem.name}*\n\nSelect size:`;
+                    await saveOutgoingMessage(session.id, sizePrompt);
+                    await sendReplyButtons(phone, sizePrompt, sizeButtons);
+                    continue;
+                  } else {
+                    // Single price or single size - add directly
+                    const size = menuItem.sizes?.[0]?.name;
+                    // const price = menuItem.sizes?.[0]?.price || menuItem.price;
+
+                    await saveOrderItem(session.id, {
+                      name: menuItem.name,
+                      quantity: 1,
+                      size_or_weight: size
+                    }, business.id);
+
+                    const addedMsg = size
+                      ? `Added *${menuItem.name}* (${size}) to your order. Anything else?`
+                      : `Added *${menuItem.name}* to your order. Anything else?`;
+                    await sendWhatsAppMessage(phone, addedMsg);
+                    await saveOutgoingMessage(session.id, addedMsg);
+                    continue;
+                  }
+                }
+                // Item not found - continue to normal processing
+                messageText = 'menu';
+              }
+              // Handle outlet selection (existing)
+              else {
+                const selectedOutlet = businessOutlets.find(o => o.id === selectedId);
+                if (selectedOutlet) {
+                  await updateSessionFulfillmentType(session.id, 'takeaway');
+                  await updateSessionPickupInfo(session.id, { outlet_id: selectedOutlet.id });
+
+                  await saveIncomingMessage(session.id, `[Selected: ${selectedOutlet.outlet_name}]`);
+
+                  // Show date selection buttons instead of asking for time as text
+                  const datePrompt = `📍 Pickup at: *${selectedOutlet.outlet_name}*\n\nWhen would you like to pick up?`;
+                  await saveOutgoingMessage(session.id, datePrompt);
+                  await sendReplyButtons(phone, datePrompt, [
+                    { id: 'date_today_takeaway', title: '📅 Today' },
+                    { id: 'date_tomorrow_takeaway', title: '📅 Tomorrow' },
+                    { id: 'date_other_takeaway', title: '📅 Other' },
+                  ]);
+                  continue;
+                }
+
+                // If not outlet, treat ID as message text
+                messageText = selectedId;
+              }
             }
           } else if (message.type === 'text' && message.text?.body) {
             messageText = sanitizeMessage(message.text.body);

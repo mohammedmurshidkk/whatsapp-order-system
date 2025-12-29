@@ -118,9 +118,15 @@ export async function listOrders(req: AuthRequest, res: Response): Promise<void>
         status: order.status,
         created_at: order.created_at,
         fulfillment_type: order.fulfillment_type,
+        // Delivery info
         delivery_address: order.delivery_address,
+        delivery_time: order.delivery_time,
+        delivery_latitude: order.delivery_latitude,
+        delivery_longitude: order.delivery_longitude,
+        // Pickup/Takeaway info
         pickup_outlet_id: order.pickup_outlet_id,
         pickup_outlet_name: order.pickup_outlet_id ? outletMap.get(order.pickup_outlet_id) || null : null,
+        pickup_time: order.pickup_time,
       };
     });
 

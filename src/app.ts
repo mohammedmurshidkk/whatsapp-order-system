@@ -114,7 +114,7 @@ async function initializeWhatsApp(): Promise<void> {
 }
 
 // Start server
-app.listen(PORT, () => {
+httpServer.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
   logger.info(`WhatsApp Provider: ${WHATSAPP_PROVIDER}`);

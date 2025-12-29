@@ -27,6 +27,13 @@ export async function listSessions(req: AuthRequest, res: Response): Promise<voi
         total_items,
         last_message_at,
         created_at,
+        fulfillment_type,
+        delivery_address,
+        delivery_time,
+        delivery_latitude,
+        delivery_longitude,
+        pickup_outlet_id,
+        pickup_time,
         customers (
           phone
         )
@@ -48,6 +55,23 @@ export async function listSessions(req: AuthRequest, res: Response): Promise<voi
       throw error;
     }
 
+    // Get outlet names for takeaway sessions
+    const outletIds = (sessions || [])
+      .filter(s => s.fulfillment_type === 'takeaway' && s.pickup_outlet_id)
+      .map(s => s.pickup_outlet_id);
+
+    let outletMap = new Map<string, string>();
+    if (outletIds.length > 0) {
+      const { data: outlets } = await supabase
+        .from('business_outlets')
+        .select('id, outlet_name')
+        .in('id', outletIds);
+
+      if (outlets) {
+        outletMap = new Map(outlets.map(o => [o.id, o.outlet_name]));
+      }
+    }
+
     const enrichedSessions = (sessions || []).map(session => ({
       id: session.id,
       customer_phone: (session.customers as any)?.phone || 'Unknown',
@@ -56,6 +80,17 @@ export async function listSessions(req: AuthRequest, res: Response): Promise<voi
       items_count: session.total_items,
       last_message_at: session.last_message_at,
       created_at: session.created_at,
+      // Fulfillment data
+      fulfillment_type: session.fulfillment_type,
+      // Delivery info
+      delivery_address: session.delivery_address,
+      delivery_time: session.delivery_time,
+      delivery_latitude: session.delivery_latitude,
+      delivery_longitude: session.delivery_longitude,
+      // Pickup/Takeaway info
+      pickup_outlet_id: session.pickup_outlet_id,
+      pickup_outlet_name: session.pickup_outlet_id ? outletMap.get(session.pickup_outlet_id) || null : null,
+      pickup_time: session.pickup_time,
     }));
 
     res.status(200).json({
@@ -151,11 +186,26 @@ export async function getSessionDetail(req: AuthRequest, res: Response): Promise
       .eq('session_id', sessionId)
       .order('created_at', { ascending: true });
 
+    // Get outlet name if it's a pickup order
+    let pickupOutletName: string | null = null;
+    if (session.pickup_outlet_id) {
+      const { data: outlet } = await supabase
+        .from('business_outlets')
+        .select('outlet_name')
+        .eq('id', session.pickup_outlet_id)
+        .single();
+
+      if (outlet) {
+        pickupOutletName = outlet.outlet_name;
+      }
+    }
+
     res.status(200).json({
       session: {
         ...session,
         customer_phone: (session.customers as any)?.phone || 'Unknown',
         customer_name: (session.customers as any)?.name || null,
+        pickup_outlet_name: pickupOutletName,
         items: itemsWithAddons,
       },
       messages: messages || [],

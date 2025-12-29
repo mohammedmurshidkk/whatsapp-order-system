@@ -79,6 +79,23 @@ export async function sendLocationRequest(to: string, body: string): Promise<voi
 }
 
 /**
+ * Send document (PDF, etc.)
+ * Meta: Native document message
+ * WebJS: MessageMedia attachment
+ */
+export async function sendDocument(
+  to: string,
+  documentUrl: string,
+  filename: string,
+  caption?: string
+): Promise<void> {
+  if (isWebJS) {
+    return webjsProvider.sendDocument(to, documentUrl, filename, caption);
+  }
+  return metaProvider.sendDocument(to, documentUrl, filename, caption);
+}
+
+/**
  * Verify webhook signature (Meta only)
  */
 export function verifyWebhookSignature(signature: string, payload: string): boolean {

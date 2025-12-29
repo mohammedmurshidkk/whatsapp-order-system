@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { supabase } from '../config/database';
 import { AuthRequest, getBusinessId } from '../middleware/auth';
 import { clearMenuCache } from '../services/menuService';
+import { syncMenuPdf as syncPdf, getMenuPdfUrl, menuPdfExists } from '../services/pdfService';
 import { logger } from '../utils/logger';
 
 // Types for price handling
@@ -585,4 +586,52 @@ function validateSizes(sizes: any[]): { valid: boolean; error?: string } {
   }
 
   return { valid: true };
+}
+
+// Sync menu PDF - generates PDF from menu data and uploads to Supabase Storage
+export async function syncMenuPdf(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    logger.info(`Syncing menu PDF for business: ${businessId}`);
+
+    const publicUrl = await syncPdf(businessId);
+
+    res.status(200).json({
+      success: true,
+      url: publicUrl,
+      message: 'Menu PDF synced successfully',
+    });
+  } catch (error) {
+    logger.error('Failed to sync menu PDF', error);
+    const message = error instanceof Error ? error.message : 'Failed to sync menu PDF';
+    res.status(500).json({ error: message });
+  }
+}
+
+// Get menu PDF URL
+export async function getMenuPdf(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const exists = await menuPdfExists(businessId);
+    if (!exists) {
+      res.status(404).json({ error: 'Menu PDF not found. Please sync first.' });
+      return;
+    }
+
+    const url = getMenuPdfUrl(businessId);
+    res.status(200).json({ url });
+  } catch (error) {
+    logger.error('Failed to get menu PDF URL', error);
+    res.status(500).json({ error: 'Failed to get menu PDF URL' });
+  }
 }

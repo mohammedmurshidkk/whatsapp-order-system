@@ -79,6 +79,45 @@ export async function sendLocationRequest(to: string, body: string): Promise<voi
 }
 
 /**
+ * Send document via whatsapp-web.js
+ * Uses MessageMedia.fromUrl to fetch and send the document
+ */
+export async function sendDocument(
+  to: string,
+  documentUrl: string,
+  filename: string,
+  caption?: string
+): Promise<void> {
+  const client = getClient();
+
+  if (!client || !isClientReady()) {
+    logger.warn('[WebJS] Client not ready, document not sent');
+    logger.info(`[WebJS Mock] Document to: ${to}`);
+    logger.info(`[WebJS Mock] URL: ${documentUrl}`);
+    logger.info(`[WebJS Mock] Filename: ${filename}`);
+    return;
+  }
+
+  try {
+    // Dynamic import to avoid loading whatsapp-web.js when not needed
+    const { MessageMedia } = await import('whatsapp-web.js');
+    const media = await MessageMedia.fromUrl(documentUrl, { unsafeMime: true });
+    media.filename = filename;
+
+    const chatId = formatPhoneForWebJS(to);
+    await client.sendMessage(chatId, media, { caption });
+    logMessageSend('WebJS', to, `[Document: ${filename}]`);
+  } catch (error) {
+    logMessageError('WebJS', to, error);
+    // Fallback: send URL as text
+    const fallbackMessage = caption
+      ? `${caption}\n\nDownload: ${documentUrl}`
+      : `Download menu: ${documentUrl}`;
+    await sendMessage(to, fallbackMessage);
+  }
+}
+
+/**
  * Get provider status
  */
 export function getStatus(): ProviderStatus {

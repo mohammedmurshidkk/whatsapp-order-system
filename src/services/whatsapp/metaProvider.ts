@@ -188,6 +188,68 @@ export async function sendInteractiveList(
 }
 
 /**
+ * Send document via Meta API
+ */
+export async function sendDocument(
+  to: string,
+  documentUrl: string,
+  filename: string,
+  caption?: string
+): Promise<void> {
+  const { phoneNumberId, accessToken } = getConfig();
+
+  if (!isConfigured()) {
+    logger.info(`[Meta Mock] Document to: ${to}`);
+    logger.info(`[Meta Mock] URL: ${documentUrl}`);
+    logger.info(`[Meta Mock] Filename: ${filename}`);
+    if (caption) logger.info(`[Meta Mock] Caption: ${caption}`);
+    return;
+  }
+
+  const payload: {
+    messaging_product: string;
+    to: string;
+    type: string;
+    document: {
+      link: string;
+      filename: string;
+      caption?: string;
+    };
+  } = {
+    messaging_product: 'whatsapp',
+    to,
+    type: 'document',
+    document: {
+      link: documentUrl,
+      filename,
+    },
+  };
+
+  if (caption) {
+    payload.document.caption = caption;
+  }
+
+  try {
+    await axios.post(`${WHATSAPP_API_BASE}/${phoneNumberId}/messages`, payload, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+    });
+    logger.info(`Meta document sent to ${to}: ${filename}`);
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      logger.error('Meta API error (document)', {
+        status: error.response?.status,
+        data: error.response?.data,
+      });
+    } else {
+      logMessageError('Meta', to, error);
+    }
+  }
+}
+
+/**
  * Send location request via Meta API
  */
 export async function sendLocationRequest(to: string, body: string): Promise<void> {

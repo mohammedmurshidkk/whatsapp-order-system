@@ -108,33 +108,68 @@ export async function updateSessionPickupInfo(
  * Get current time in a specific timezone
  */
 function getNowInTimezone(timezone: string): Date {
-  // Get current UTC time
-  const now = new Date();
-  // Format it in the target timezone and parse back
-  const formatter = new Intl.DateTimeFormat('en-CA', {
-    timeZone: timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  });
+  try {
+    // Get current UTC time
+    const now = new Date();
 
-  const parts = formatter.formatToParts(now);
-  const dateObj: Record<string, string> = {};
-  parts.forEach(part => {
-    dateObj[part.type] = part.value;
-  });
+    // Use a simpler approach - format and parse
+    const options: Intl.DateTimeFormatOptions = {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    };
 
-  // Create a date string that represents local time in that timezone
-  return new Date(`${dateObj.year}-${dateObj.month}-${dateObj.day}T${dateObj.hour}:${dateObj.minute}:${dateObj.second}`);
+    // Format date parts separately to avoid locale issues
+    const yearFormatter = new Intl.DateTimeFormat('en-US', { timeZone: timezone, year: 'numeric' });
+    const monthFormatter = new Intl.DateTimeFormat('en-US', { timeZone: timezone, month: '2-digit' });
+    const dayFormatter = new Intl.DateTimeFormat('en-US', { timeZone: timezone, day: '2-digit' });
+    const hourFormatter = new Intl.DateTimeFormat('en-US', { timeZone: timezone, hour: '2-digit', hour12: false });
+    const minuteFormatter = new Intl.DateTimeFormat('en-US', { timeZone: timezone, minute: '2-digit' });
+    const secondFormatter = new Intl.DateTimeFormat('en-US', { timeZone: timezone, second: '2-digit' });
+
+    const year = yearFormatter.format(now);
+    const month = monthFormatter.format(now);
+    const day = dayFormatter.format(now);
+    let hour = hourFormatter.format(now).replace(/\D/g, ''); // Remove non-digits
+    const minute = minuteFormatter.format(now).padStart(2, '0');
+    const second = secondFormatter.format(now).padStart(2, '0');
+
+    // Ensure hour is 2 digits
+    hour = hour.padStart(2, '0');
+
+    // Handle hour24 edge case (some locales return 24 instead of 00)
+    if (hour === '24') hour = '00';
+
+    const dateStr = `${year}-${month}-${day}T${hour}:${minute}:${second}`;
+    const result = new Date(dateStr);
+
+    // Validate result
+    if (isNaN(result.getTime())) {
+      logger.error(`getNowInTimezone created invalid date from: ${dateStr}`);
+      // Fallback to current server time
+      return now;
+    }
+
+    return result;
+  } catch (error) {
+    logger.error(`getNowInTimezone error for timezone ${timezone}:`, error);
+    // Fallback to current server time
+    return new Date();
+  }
 }
 
 /**
  * Convert a local datetime in a timezone to UTC ISO string
- * @param localDate - Date object with local time values
+ * @param year - Year
+ * @param month - Month (0-indexed, 0 = January)
+ * @param day - Day of month
+ * @param hours - Hours (0-23)
+ * @param minutes - Minutes
  * @param timezone - IANA timezone (e.g., 'Asia/Kolkata')
  */
 function localToUTC(year: number, month: number, day: number, hours: number, minutes: number, timezone: string): string | null {
@@ -148,46 +183,56 @@ function localToUTC(year: number, month: number, day: number, hours: number, min
     // Ensure timezone has a valid value
     const tz = timezone || 'Asia/Kolkata';
 
-    // Create a date string in the format expected by the timezone
-    const localDateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00`;
+    // Get the timezone offset in minutes for the target timezone
+    // We use a known offset map for common timezones to avoid complex calculations
+    const timezoneOffsets: Record<string, number> = {
+      'Asia/Kolkata': 330,      // UTC+5:30
+      'Asia/Dubai': 240,        // UTC+4
+      'Asia/Singapore': 480,    // UTC+8
+      'Europe/London': 0,       // UTC+0 (ignoring DST for simplicity)
+      'America/New_York': -300, // UTC-5 (ignoring DST)
+      'UTC': 0,
+    };
 
-    // Get timezone offset for that specific date/time
-    // We use Intl to find what offset that timezone has at that local time
-    const formatter = new Intl.DateTimeFormat('en-US', {
-      timeZone: tz,
-      timeZoneName: 'longOffset',
-    });
+    // Get offset in minutes (positive = ahead of UTC)
+    let offsetMinutes = timezoneOffsets[tz];
 
-    // Create a test date (assume UTC first, then adjust)
-    const testDate = new Date(localDateStr + 'Z');
+    // If timezone not in map, try to calculate it
+    if (offsetMinutes === undefined) {
+      try {
+        // Create a date and format it in both UTC and target timezone to find offset
+        const testDate = new Date(Date.UTC(year, month, day, hours, minutes, 0));
+        const utcStr = testDate.toLocaleString('en-US', { timeZone: 'UTC', hour12: false });
+        const tzStr = testDate.toLocaleString('en-US', { timeZone: tz, hour12: false });
 
-    // Validate test date
-    if (isNaN(testDate.getTime())) {
-      logger.error(`localToUTC created invalid testDate from: ${localDateStr}Z`);
-      return null;
+        // Parse both strings to compare
+        const utcParts = utcStr.match(/(\d+)\/(\d+)\/(\d+),?\s*(\d+):(\d+):(\d+)/);
+        const tzParts = tzStr.match(/(\d+)\/(\d+)\/(\d+),?\s*(\d+):(\d+):(\d+)/);
+
+        if (utcParts && tzParts) {
+          const utcDate = new Date(parseInt(utcParts[3]), parseInt(utcParts[1]) - 1, parseInt(utcParts[2]),
+            parseInt(utcParts[4]), parseInt(utcParts[5]), parseInt(utcParts[6]));
+          const tzDate = new Date(parseInt(tzParts[3]), parseInt(tzParts[1]) - 1, parseInt(tzParts[2]),
+            parseInt(tzParts[4]), parseInt(tzParts[5]), parseInt(tzParts[6]));
+
+          offsetMinutes = (tzDate.getTime() - utcDate.getTime()) / (60 * 1000);
+        } else {
+          // Default to Asia/Kolkata if can't calculate
+          offsetMinutes = 330;
+        }
+      } catch {
+        offsetMinutes = 330; // Default to Asia/Kolkata
+      }
     }
 
-    // Get the offset string (e.g., "GMT+05:30")
-    const parts = formatter.formatToParts(testDate);
-    const tzPart = parts.find(p => p.type === 'timeZoneName');
-    const offsetStr = tzPart?.value || '+00:00';
+    // Create UTC time by subtracting the offset from local time
+    // Local 2:00 PM in UTC+5:30 = 2:00 PM - 5:30 hours = 8:30 AM UTC
+    const localDateUTC = Date.UTC(year, month, day, hours, minutes, 0);
+    const utcMs = localDateUTC - (offsetMinutes * 60 * 1000);
 
-    // Parse offset (e.g., "GMT+5:30" -> +5.5 hours)
-    const offsetMatch = offsetStr.match(/GMT([+-])(\d{1,2}):?(\d{2})?/);
-    if (offsetMatch) {
-      const sign = offsetMatch[1] === '+' ? 1 : -1;
-      const offsetHours = parseInt(offsetMatch[2], 10);
-      const offsetMinutes = parseInt(offsetMatch[3] || '0', 10);
-      const totalOffsetMinutes = sign * (offsetHours * 60 + offsetMinutes);
-
-      // Create the local date and subtract the offset to get UTC
-      const localMs = new Date(localDateStr).getTime();
-      const utcMs = localMs - (totalOffsetMinutes * 60 * 1000);
-      return new Date(utcMs).toISOString();
-    }
-
-    // Fallback: return as-is (assume server timezone matches)
-    return new Date(localDateStr).toISOString();
+    const result = new Date(utcMs).toISOString();
+    logger.info(`localToUTC: ${year}-${month + 1}-${day} ${hours}:${minutes} in ${tz} (offset ${offsetMinutes}min) -> ${result}`);
+    return result;
   } catch (error) {
     logger.error(`localToUTC error: ${error}`);
     return null;
@@ -392,57 +437,36 @@ export function extractAddressAndTime(message: string, timezone: string = 'Asia/
 
 /**
  * Format delivery time for display in business timezone
- * Format: DD-MM-YYYY, 12h time (e.g., "10-12-2025, 5:00 PM")
+ * Always shows actual date in DD-MM-YYYY format to avoid confusion
+ * Format: "DD-MM-YYYY at HH:MM AM/PM" (e.g., "30-12-2025 at 5:00 PM")
  * @param isoTime - ISO timestamp (stored in UTC)
  * @param timezone - IANA timezone (e.g., 'Asia/Kolkata'), defaults to 'Asia/Kolkata'
  */
 export function formatDeliveryTime(isoTime: string, timezone: string = 'Asia/Kolkata'): string {
   const date = new Date(isoTime);
-  const now = new Date();
+  // Handle undefined/null timezone explicitly
+  const tz = timezone || 'Asia/Kolkata';
 
   // Create formatters for the target timezone
   const dateFormatter = new Intl.DateTimeFormat('en-GB', {
-    timeZone: timezone,
+    timeZone: tz,
     day: '2-digit',
     month: '2-digit',
     year: 'numeric',
   });
 
   const timeFormatter = new Intl.DateTimeFormat('en-US', {
-    timeZone: timezone,
+    timeZone: tz,
     hour: 'numeric',
     minute: '2-digit',
     hour12: true,
   });
 
-  // Get today and tomorrow in target timezone for comparison
-  const todayInTz = new Intl.DateTimeFormat('en-GB', {
-    timeZone: timezone,
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-  }).format(now);
-
-  const tomorrow = new Date(now);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const tomorrowInTz = new Intl.DateTimeFormat('en-GB', {
-    timeZone: timezone,
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-  }).format(tomorrow);
-
   const dateInTz = dateFormatter.format(date);
   const timeStr = timeFormatter.format(date);
 
-  if (dateInTz === todayInTz) {
-    return `Today at ${timeStr}`;
-  } else if (dateInTz === tomorrowInTz) {
-    return `Tomorrow at ${timeStr}`;
-  } else {
-    // Format as DD-MM-YYYY
-    return `${dateInTz} at ${timeStr}`;
-  }
+  // Always show actual date in DD-MM-YYYY format
+  return `${dateInTz} at ${timeStr}`;
 }
 
 /**

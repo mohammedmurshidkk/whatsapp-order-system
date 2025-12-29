@@ -220,7 +220,9 @@ export async function generateOrderSummary(
   sessionId: string,
   options: { includeCta?: boolean; ctaMessage?: string; timezone?: string } = {}
 ): Promise<string> {
-  const { includeCta = false, ctaMessage = 'Reply *YES* to confirm your order', timezone = 'Asia/Kolkata' } = options;
+  const { includeCta = false, ctaMessage = 'Reply *YES* to confirm your order' } = options;
+  // Handle undefined timezone explicitly (destructuring default doesn't work for explicit undefined)
+  const timezone = options.timezone || 'Asia/Kolkata';
 
   const session = await getSessionWithItems(sessionId);
 

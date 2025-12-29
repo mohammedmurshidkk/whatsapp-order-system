@@ -278,6 +278,7 @@ export interface AIResponse {
   reply: string;
   intent: AIIntent;
   item?: AIItemResponse;
+  items?: AIItemResponse[]; // For multiple items with individual notes
   order_id?: string; // For cancel_existing_order intent
   fulfillment?: AIFulfillmentResponse; // For fulfillment info
   addon?: AIAddonResponse; // NEW: For add-on responses

@@ -14,6 +14,7 @@ ALTER TABLE businesses ADD COLUMN IF NOT EXISTS logo_url TEXT;
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS custom_ai_prompt TEXT;
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS critical_message TEXT;
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS critical_message_enabled BOOLEAN DEFAULT false;
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS timezone VARCHAR(50) DEFAULT 'Asia/Kolkata';
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS minimum_wait_minutes INTEGER DEFAULT 30;
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS order_number_prefix VARCHAR(10) DEFAULT 'ORD';
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS customer_support_phone VARCHAR(20);
@@ -179,11 +180,15 @@ CREATE TABLE IF NOT EXISTS super_admins (
   email VARCHAR(255) NOT NULL UNIQUE,
   password_hash VARCHAR(255) NOT NULL,
   name VARCHAR(255),
+  timezone VARCHAR(50) DEFAULT 'Asia/Kolkata',
   is_active BOOLEAN DEFAULT true,
   last_login TIMESTAMP WITH TIME ZONE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Add timezone column to super_admins if it doesn't exist
+ALTER TABLE super_admins ADD COLUMN IF NOT EXISTS timezone VARCHAR(50) DEFAULT 'Asia/Kolkata';
 
 CREATE INDEX IF NOT EXISTS idx_super_admins_email ON super_admins(email);
 
@@ -191,16 +196,18 @@ CREATE INDEX IF NOT EXISTS idx_super_admins_email ON super_admins(email);
 CREATE OR REPLACE FUNCTION create_super_admin(
   p_email VARCHAR(255),
   p_password VARCHAR(255),
-  p_name VARCHAR(255) DEFAULT NULL
+  p_name VARCHAR(255) DEFAULT NULL,
+  p_timezone VARCHAR(50) DEFAULT 'Asia/Kolkata'
 ) RETURNS UUID AS $$
 DECLARE
   v_user_id UUID;
 BEGIN
-  INSERT INTO super_admins (email, password_hash, name)
+  INSERT INTO super_admins (email, password_hash, name, timezone)
   VALUES (
     LOWER(p_email),
     crypt(p_password, gen_salt('bf')),
-    p_name
+    p_name,
+    COALESCE(p_timezone, 'Asia/Kolkata')
   )
   RETURNING id INTO v_user_id;
   RETURN v_user_id;

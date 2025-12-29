@@ -176,3 +176,77 @@ export async function changePassword(req: Request, res: Response): Promise<void>
     res.status(500).json({ error: 'Failed to change password' });
   }
 }
+
+// Public change password (no auth required - uses email + current password verification)
+export async function changePasswordPublic(req: Request, res: Response): Promise<void> {
+  try {
+    const { email, currentPassword, newPassword } = req.body;
+
+    if (!email || !currentPassword || !newPassword) {
+      res.status(400).json({ error: 'Email, current password, and new password are required' });
+      return;
+    }
+
+    if (newPassword.length < 6) {
+      res.status(400).json({ error: 'New password must be at least 6 characters' });
+      return;
+    }
+
+    const normalizedEmail = email.toLowerCase();
+
+    // Check super_admins first
+    let userData: { id: string; password_hash: string } | null = null;
+    let tableName = '';
+
+    const { data: superAdmin } = await supabase
+      .from('super_admins')
+      .select('id, password_hash')
+      .eq('email', normalizedEmail)
+      .eq('is_active', true)
+      .single();
+
+    if (superAdmin) {
+      userData = superAdmin;
+      tableName = 'super_admins';
+    } else {
+      // Check admin_users
+      const { data: adminUser } = await supabase
+        .from('admin_users')
+        .select('id, password_hash')
+        .eq('email', normalizedEmail)
+        .eq('is_active', true)
+        .single();
+
+      if (adminUser) {
+        userData = adminUser;
+        tableName = 'admin_users';
+      }
+    }
+
+    if (!userData) {
+      res.status(404).json({ error: 'User not found or inactive' });
+      return;
+    }
+
+    // Verify current password
+    const validPassword = await bcrypt.compare(currentPassword, userData.password_hash);
+    if (!validPassword) {
+      res.status(401).json({ error: 'Current password is incorrect' });
+      return;
+    }
+
+    // Hash new password and update
+    const newHash = await bcrypt.hash(newPassword, 10);
+    await supabase
+      .from(tableName)
+      .update({ password_hash: newHash, updated_at: new Date().toISOString() })
+      .eq('id', userData.id);
+
+    logger.info(`Password changed via public API for: ${email}`);
+
+    res.status(200).json({ message: 'Password changed successfully' });
+  } catch (error) {
+    logger.error('Failed to change password (public)', error);
+    res.status(500).json({ error: 'Failed to change password' });
+  }
+}
