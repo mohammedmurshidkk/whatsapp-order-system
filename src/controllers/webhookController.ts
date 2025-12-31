@@ -1840,55 +1840,81 @@ export async function handleWhatsAppWebhook(
           // Handle location messages (Feature 3)
           if (message.type === 'location' && message.location) {
             const location = message.location;
-            logger.info(`Location received from ${phone}: ${location.latitude}, ${location.longitude}`);
+            logger.info(`[DEBUG-LOC] Step 1: Location received from ${phone}: ${location.latitude}, ${location.longitude}`);
 
-            const customer = await findOrCreateCustomer(phone, business.id);
-            const session = await findOrCreateSession(customer.id, business.id);
-            const sessionWithItems = await getSessionWithItems(session.id);
+            try {
+              logger.info(`[DEBUG-LOC] Step 2: Finding/creating customer...`);
+              const customer = await findOrCreateCustomer(phone, business.id);
+              logger.info(`[DEBUG-LOC] Step 2 done: customer.id=${customer.id}`);
 
-            // Use address/name from location if available, otherwise reverse geocode
-            // The lat/long will be stored in separate columns for map display
-            let displayAddress = location.address || location.name;
-            
-            // If no address provided by WhatsApp, reverse geocode the coordinates
-            if (!displayAddress) {
-              logger.info(`No address in location data, reverse geocoding ${location.latitude}, ${location.longitude}`);
-              displayAddress = await getAddressFromCoordinates(location.latitude, location.longitude);
-            }
+              logger.info(`[DEBUG-LOC] Step 3: Finding/creating session...`);
+              const session = await findOrCreateSession(customer.id, business.id);
+              logger.info(`[DEBUG-LOC] Step 3 done: session.id=${session.id}`);
 
-            const logAddress = displayAddress || `${location.latitude}, ${location.longitude}`;
-            await saveIncomingMessage(session.id, `[Location: ${logAddress}]`);
+              logger.info(`[DEBUG-LOC] Step 4: Getting session with items...`);
+              const sessionWithItems = await getSessionWithItems(session.id);
+              logger.info(`[DEBUG-LOC] Step 4 done: fulfillment_type=${sessionWithItems?.fulfillment_type}, delivery_address=${sessionWithItems?.delivery_address}`);
 
-            // If customer is in delivery flow and hasn't provided address yet
-            if (sessionWithItems?.fulfillment_type === 'delivery' && !sessionWithItems.delivery_address) {
-              await updateSessionDeliveryInfo(session.id, {
-                address: displayAddress,
-                latitude: location.latitude,
-                longitude: location.longitude,
-              });
+              // Use address/name from location if available, otherwise reverse geocode
+              // The lat/long will be stored in separate columns for map display
+              let displayAddress = location.address || location.name;
+              logger.info(`[DEBUG-LOC] Step 5: WhatsApp address=${displayAddress || 'NONE'}`);
 
-              // Show date selection buttons instead of asking for time as text
-              if (!sessionWithItems.delivery_time) {
-                const datePrompt = `📍 Location saved!\n\nWhen would you like delivery?`;
-                await saveOutgoingMessage(session.id, datePrompt);
-                await sendReplyButtons(phone, datePrompt, [
-                  { id: 'date_today_delivery', title: '📅 Today' },
-                  { id: 'date_tomorrow_delivery', title: '📅 Tomorrow' },
-                  { id: 'date_other_delivery', title: '📅 Other' },
-                ]);
-              } else {
-                const locationSummary = await generateOrderSummary(session.id, {
-                  includeCta: true,
-                  ctaMessage: '\n📍 Location saved! Reply *YES* to confirm your order.',
-                  timezone: businessTimezone
-                });
-                await sendWhatsAppMessage(phone, locationSummary);
-                await saveOutgoingMessage(session.id, locationSummary);
+              // If no address provided by WhatsApp, reverse geocode the coordinates
+              if (!displayAddress) {
+                logger.info(`[DEBUG-LOC] Step 5a: Reverse geocoding ${location.latitude}, ${location.longitude}`);
+                displayAddress = await getAddressFromCoordinates(location.latitude, location.longitude);
+                logger.info(`[DEBUG-LOC] Step 5a done: geocoded address=${displayAddress}`);
               }
-            } else {
-              const locationReply = "Thanks for sharing your location! 📍 We've saved it for your delivery.";
-              await sendWhatsAppMessage(phone, locationReply);
-              await saveOutgoingMessage(session.id, locationReply);
+
+              const logAddress = displayAddress || `${location.latitude}, ${location.longitude}`;
+              logger.info(`[DEBUG-LOC] Step 6: Saving incoming message...`);
+              await saveIncomingMessage(session.id, `[Location: ${logAddress}]`);
+              logger.info(`[DEBUG-LOC] Step 6 done`);
+
+              // If customer is in delivery flow and hasn't provided address yet
+              if (sessionWithItems?.fulfillment_type === 'delivery' && !sessionWithItems.delivery_address) {
+                logger.info(`[DEBUG-LOC] Step 7: Updating delivery info...`);
+                await updateSessionDeliveryInfo(session.id, {
+                  address: displayAddress,
+                  latitude: location.latitude,
+                  longitude: location.longitude,
+                });
+                logger.info(`[DEBUG-LOC] Step 7 done`);
+
+                // Show date selection buttons instead of asking for time as text
+                if (!sessionWithItems.delivery_time) {
+                  logger.info(`[DEBUG-LOC] Step 8: Sending date buttons...`);
+                  const datePrompt = `📍 Location saved!\n\nWhen would you like delivery?`;
+                  await saveOutgoingMessage(session.id, datePrompt);
+                  await sendReplyButtons(phone, datePrompt, [
+                    { id: 'date_today_delivery', title: '📅 Today' },
+                    { id: 'date_tomorrow_delivery', title: '📅 Tomorrow' },
+                    { id: 'date_other_delivery', title: '📅 Other' },
+                  ]);
+                  logger.info(`[DEBUG-LOC] Step 8 done`);
+                } else {
+                  logger.info(`[DEBUG-LOC] Step 8b: Generating order summary...`);
+                  const locationSummary = await generateOrderSummary(session.id, {
+                    includeCta: true,
+                    ctaMessage: '\n📍 Location saved! Reply *YES* to confirm your order.',
+                    timezone: businessTimezone
+                  });
+                  await sendWhatsAppMessage(phone, locationSummary);
+                  await saveOutgoingMessage(session.id, locationSummary);
+                  logger.info(`[DEBUG-LOC] Step 8b done`);
+                }
+              } else {
+                logger.info(`[DEBUG-LOC] Step 9: Not in delivery flow, sending generic reply...`);
+                const locationReply = "Thanks for sharing your location! 📍 We've saved it for your delivery.";
+                await sendWhatsAppMessage(phone, locationReply);
+                await saveOutgoingMessage(session.id, locationReply);
+                logger.info(`[DEBUG-LOC] Step 9 done`);
+              }
+              logger.info(`[DEBUG-LOC] Location handling complete`);
+            } catch (locError) {
+              logger.error(`[DEBUG-LOC] ERROR at location handling:`, locError);
+              throw locError; // Re-throw to hit outer catch
             }
             continue;
           }
