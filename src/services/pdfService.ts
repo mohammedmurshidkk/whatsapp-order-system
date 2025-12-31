@@ -8,7 +8,8 @@ import { MenuItem, MenuCategory } from '../types';
 const BUCKET_NAME = 'menu-pdfs';
 
 /**
- * Generate styled HTML for menu PDF
+ * Generate styled HTML for menu PDF - Matching sample design
+ * 2 categories side-by-side, black header bars, white background
  */
 function generateMenuHtml(
   businessName: string,
@@ -25,13 +26,15 @@ function generateMenuHtml(
     }
   }
 
-  // Build category sections HTML
-  let sectionsHtml = '';
-  for (const category of categories) {
-    const categoryItems = categoryMap.get(category.id);
-    if (!categoryItems || categoryItems.length === 0) continue;
+  // Filter categories that have items
+  const activeCategories = categories.filter(cat => {
+    const catItems = categoryMap.get(cat.id);
+    return catItems && catItems.length > 0;
+  });
 
-    // Check if items have sizes (for column layout)
+  // Helper to generate category HTML
+  const generateCategoryHtml = (category: MenuCategory, isFullWidth: boolean = false): string => {
+    const categoryItems = categoryMap.get(category.id) || [];
     const hasSizes = categoryItems.some(item => item.sizes && item.sizes.length > 0);
 
     if (hasSizes) {
@@ -42,50 +45,91 @@ function generateMenuHtml(
       });
       const sizeNames = Array.from(allSizes);
 
-      sectionsHtml += `
-        <div class="category-section">
+      return `
+        <div class="category-box ${isFullWidth ? 'full-width' : ''}">
           <div class="category-header">${category.name.toUpperCase()}</div>
-          <div class="size-columns">
-            ${sizeNames.map(sizeName => `
-              <div class="size-column">
-                <div class="size-header">${sizeName}</div>
-                ${categoryItems.map(item => {
-                  const sizeData = item.sizes?.find(s => s.name === sizeName);
-                  if (!sizeData) return '';
-                  return `
-                    <div class="item-row">
-                      <span class="item-name">${item.name}</span>
-                      <span class="item-price">${sizeData.price}</span>
-                    </div>
-                  `;
-                }).join('')}
+          <div class="category-content">
+            <div class="size-row">
+              ${sizeNames.map(sizeName => `<div class="size-label">${sizeName}</div>`).join('')}
+            </div>
+            ${categoryItems.map(item => `
+              <div class="item-row-sizes">
+                <div class="item-info-sizes">
+                  <div class="item-name">${item.name.toUpperCase()}</div>
+                  ${item.description ? `<div class="item-desc">${item.description}</div>` : ''}
+                </div>
+                <div class="item-prices">
+                  ${sizeNames.map(sizeName => {
+                    const sizeData = item.sizes?.find(s => s.name === sizeName);
+                    return `<div class="item-price">${sizeData ? sizeData.price : '-'}</div>`;
+                  }).join('')}
+                </div>
               </div>
             `).join('')}
           </div>
         </div>
       `;
     } else {
-      // Simple list layout (no sizes)
-      sectionsHtml += `
-        <div class="category-section">
-          <div class="category-header-decorated">
-            <span class="header-line"></span>
-            <span class="header-text">${category.name.toUpperCase()}</span>
-            <span class="header-line"></span>
-          </div>
-          <div class="items-list">
+      // Simple items
+      return `
+        <div class="category-box ${isFullWidth ? 'full-width' : ''}">
+          <div class="category-header">${category.name.toUpperCase()}</div>
+          <div class="category-content">
             ${categoryItems.map(item => `
-              <div class="item-card">
+              <div class="item-row">
                 <div class="item-info">
-                  <div class="item-name-large">${item.name}</div>
-                  ${item.description ? `<div class="item-description">${item.description}</div>` : ''}
+                  <div class="item-name">${item.name.toUpperCase()}</div>
+                  ${item.description ? `<div class="item-desc">${item.description}</div>` : ''}
                 </div>
-                <div class="item-price-large">${item.price || '-'}</div>
+                <div class="item-price">${item.price || '-'}</div>
               </div>
             `).join('')}
           </div>
         </div>
       `;
+    }
+  };
+
+  // Build sections - pair categories side by side
+  let sectionsHtml = '';
+  let i = 0;
+  while (i < activeCategories.length) {
+    const cat1 = activeCategories[i];
+    const cat2 = activeCategories[i + 1];
+    const cat1Items = categoryMap.get(cat1.id) || [];
+    const cat2Items = cat2 ? (categoryMap.get(cat2.id) || []) : [];
+
+    // Check if categories have sizes (need more space)
+    const cat1HasSizes = cat1Items.some(item => item.sizes && item.sizes.length > 0);
+    const cat2HasSizes = cat2Items.some(item => item.sizes && item.sizes.length > 0);
+
+    // Make full width if: many sizes, many items, or big size difference between pairs
+    const cat1NeedsFullWidth =
+      (cat1HasSizes && cat1Items.some(item => (item.sizes?.length || 0) > 2)) ||
+      cat1Items.length > 12;
+    const cat2NeedsFullWidth = cat2 && (
+      (cat2HasSizes && cat2Items.some(item => (item.sizes?.length || 0) > 2)) ||
+      cat2Items.length > 12
+    );
+
+    if (cat1NeedsFullWidth || !cat2) {
+      // Single full-width category
+      sectionsHtml += `<div class="row">${generateCategoryHtml(cat1, true)}</div>`;
+      i += 1;
+    } else if (cat2NeedsFullWidth) {
+      // First one in its own row, second one full width
+      sectionsHtml += `<div class="row">${generateCategoryHtml(cat1, true)}</div>`;
+      sectionsHtml += `<div class="row">${generateCategoryHtml(cat2, true)}</div>`;
+      i += 2;
+    } else {
+      // Two categories side by side
+      sectionsHtml += `
+        <div class="row">
+          ${generateCategoryHtml(cat1)}
+          ${generateCategoryHtml(cat2)}
+        </div>
+      `;
+      i += 2;
     }
   }
 
@@ -102,188 +146,180 @@ function generateMenuHtml(
         }
 
         body {
-          font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-          background-color: #C4A77D;
-          color: #2D2D2D;
-          padding: 40px;
+          font-family: 'Georgia', 'Times New Roman', serif;
+          background-color: #f5f5f5;
+          color: #1a1a1a;
+          padding: 20px 25px;
+          font-size: 10px;
         }
 
         .header {
+          background: #1a1a1a;
+          color: #fff;
+          padding: 20px 30px;
+          margin: -20px -25px 20px -25px;
           text-align: center;
-          margin-bottom: 40px;
         }
 
         .business-name {
-          font-size: 36px;
+          font-size: 32px;
           font-weight: bold;
-          color: #3D2B1F;
           letter-spacing: 4px;
           text-transform: uppercase;
         }
 
-        .menu-title {
-          font-size: 18px;
-          color: #5D4E37;
-          margin-top: 8px;
+        .menu-subtitle {
+          font-size: 11px;
           letter-spacing: 2px;
+          margin-top: 5px;
+          opacity: 0.8;
         }
 
-        .category-section {
-          margin-bottom: 40px;
-          page-break-inside: avoid;
-        }
-
-        /* Decorated header style (like Sandwiches sample) */
-        .category-header-decorated {
+        .row {
           display: flex;
-          align-items: center;
-          justify-content: center;
-          margin-bottom: 20px;
+          gap: 15px;
+          margin-bottom: 15px;
+          align-items: flex-start;
         }
 
-        .header-line {
+        .category-box {
           flex: 1;
-          height: 2px;
-          background: linear-gradient(to right, transparent, #3D2B1F, transparent);
-          max-width: 100px;
+          background: #fff;
+          border: 1px solid #e0e0e0;
         }
 
-        .header-text {
-          font-size: 28px;
-          font-weight: bold;
-          color: #3D2B1F;
-          padding: 0 20px;
-          letter-spacing: 6px;
-          text-shadow: 1px 1px 2px rgba(0,0,0,0.1);
+        .category-box.full-width {
+          flex: 1 1 100%;
         }
 
-        /* Simple category header (for size-based) */
         .category-header {
-          font-size: 24px;
-          font-weight: bold;
-          color: #3D2B1F;
-          text-align: center;
-          margin-bottom: 20px;
-          letter-spacing: 4px;
-        }
-
-        /* Size columns layout (like 1KG/500G sample) */
-        .size-columns {
-          display: flex;
-          gap: 40px;
-          justify-content: center;
-        }
-
-        .size-column {
-          flex: 1;
-          max-width: 300px;
-          background: rgba(255,255,255,0.1);
-          border-radius: 8px;
-          padding: 20px;
-        }
-
-        .size-header {
-          background: #3D2B1F;
+          background: #1a1a1a;
           color: #fff;
-          padding: 10px 30px;
-          border-radius: 20px;
-          text-align: center;
+          padding: 8px 15px;
+          font-size: 13px;
           font-weight: bold;
-          font-size: 18px;
-          margin-bottom: 20px;
-          display: inline-block;
-          width: 100%;
+          letter-spacing: 3px;
+          text-align: center;
+          break-after: avoid;
+        }
+
+        .category-content {
+          padding: 12px 15px;
         }
 
         .item-row {
           display: flex;
           justify-content: space-between;
-          padding: 8px 0;
-          border-bottom: 1px dotted rgba(61, 43, 31, 0.3);
+          align-items: flex-start;
+          padding: 6px 0;
+          border-bottom: 1px solid #eee;
         }
 
         .item-row:last-child {
           border-bottom: none;
         }
 
+        .item-info {
+          flex: 1;
+          padding-right: 10px;
+        }
+
         .item-name {
-          font-weight: 600;
-          color: #2D2D2D;
-          font-size: 14px;
-          text-transform: uppercase;
+          font-size: 10px;
+          font-weight: bold;
+          color: #1a1a1a;
+          letter-spacing: 0.5px;
+        }
+
+        .item-desc {
+          font-size: 8px;
+          color: #666;
+          margin-top: 2px;
+          line-height: 1.3;
         }
 
         .item-price {
+          font-size: 10px;
           font-weight: bold;
-          color: #3D2B1F;
-          font-size: 14px;
+          color: #1a1a1a;
+          min-width: 35px;
+          text-align: right;
         }
 
-        /* Items list layout (for non-size items) */
-        .items-list {
-          background: rgba(61, 43, 31, 0.9);
-          border-radius: 12px;
-          padding: 30px;
-          border: 2px solid rgba(196, 167, 125, 0.5);
+        /* Size-based items */
+        .size-row {
+          display: flex;
+          justify-content: flex-end;
+          gap: 10px;
+          padding-bottom: 6px;
+          margin-bottom: 6px;
+          border-bottom: 2px solid #1a1a1a;
         }
 
-        .item-card {
+        .size-label {
+          font-size: 9px;
+          font-weight: bold;
+          color: #1a1a1a;
+          min-width: 45px;
+          text-align: center;
+          background: #f0f0f0;
+          padding: 3px 8px;
+          border-radius: 3px;
+        }
+
+        .item-row-sizes {
           display: flex;
           justify-content: space-between;
-          align-items: flex-start;
-          padding: 15px 0;
-          border-bottom: 1px solid rgba(196, 167, 125, 0.3);
+          align-items: center;
+          padding: 5px 0;
+          border-bottom: 1px solid #eee;
         }
 
-        .item-card:last-child {
+        .item-row-sizes:last-child {
           border-bottom: none;
         }
 
-        .item-info {
+        .item-info-sizes {
           flex: 1;
-          padding-right: 20px;
         }
 
-        .item-name-large {
-          font-size: 20px;
-          font-weight: bold;
-          color: #E8DCC8;
-          margin-bottom: 5px;
+        .item-row-sizes .item-name {
+          flex: 1;
         }
 
-        .item-description {
-          font-size: 13px;
-          color: #B8A88A;
-          line-height: 1.4;
-          font-style: italic;
+        .item-prices {
+          display: flex;
+          gap: 10px;
         }
 
-        .item-price-large {
-          font-size: 22px;
-          font-weight: bold;
-          color: #E8DCC8;
-          min-width: 80px;
-          text-align: right;
+        .item-prices .item-price {
+          min-width: 45px;
+          text-align: center;
         }
 
         .footer {
           text-align: center;
-          margin-top: 40px;
-          padding-top: 20px;
-          border-top: 2px solid rgba(61, 43, 31, 0.3);
+          margin-top: 15px;
+          padding-top: 10px;
+          border-top: 1px solid #ddd;
         }
 
         .footer-text {
-          font-size: 12px;
-          color: #5D4E37;
+          font-size: 8px;
+          color: #888;
+        }
+
+        @page {
+          margin: 8mm;
+          size: A4;
         }
 
         @media print {
           body {
-            padding: 20px;
+            padding: 10px;
           }
-          .category-section {
-            page-break-inside: avoid;
+          .header {
+            margin: -10px -10px 15px -10px;
           }
         }
       </style>
@@ -291,13 +327,13 @@ function generateMenuHtml(
     <body>
       <div class="header">
         <div class="business-name">${businessName}</div>
-        <div class="menu-title">MENU</div>
+        <div class="menu-subtitle">MENU</div>
       </div>
 
       ${sectionsHtml}
 
       <div class="footer">
-        <div class="footer-text">Prices are subject to change. All prices in INR.</div>
+        <div class="footer-text">Prices subject to change • All prices in ₹</div>
       </div>
     </body>
     </html>

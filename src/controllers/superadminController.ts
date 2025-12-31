@@ -379,3 +379,185 @@ export async function deleteBusinessAdmin(req: Request, res: Response): Promise<
     res.status(500).json({ error: 'Failed to delete admin' });
   }
 }
+
+// ============================================
+// Tech Provider Dashboard APIs
+// ============================================
+
+// Get stats for a specific business
+export async function getBusinessStats(req: Request, res: Response): Promise<void> {
+  try {
+    const { id } = req.params;
+
+    // Get business with WhatsApp info
+    const { data: business, error: bizError } = await supabase
+      .from('businesses')
+      .select('id, name, phone, whatsapp_phone_number, whatsapp_phone_number_id, whatsapp_business_account_id, whatsapp_webhook_verified, is_active, created_at')
+      .eq('id', id)
+      .single();
+
+    if (bizError || !business) {
+      res.status(404).json({ error: 'Business not found' });
+      return;
+    }
+
+    // Get order count
+    const { count: orderCount } = await supabase
+      .from('orders')
+      .select('*', { count: 'exact', head: true })
+      .eq('business_id', id);
+
+    // Get session count
+    const { count: sessionCount } = await supabase
+      .from('sessions')
+      .select('*', { count: 'exact', head: true })
+      .eq('business_id', id);
+
+    // Get customer count
+    const { count: customerCount } = await supabase
+      .from('customers')
+      .select('*', { count: 'exact', head: true })
+      .eq('business_id', id);
+
+    // Get message count (via sessions)
+    const { data: sessions } = await supabase
+      .from('sessions')
+      .select('id')
+      .eq('business_id', id);
+
+    let messageCount = 0;
+    if (sessions && sessions.length > 0) {
+      const sessionIds = sessions.map(s => s.id);
+      const { count } = await supabase
+        .from('messages')
+        .select('*', { count: 'exact', head: true })
+        .in('session_id', sessionIds);
+      messageCount = count || 0;
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        business,
+        stats: {
+          messages: messageCount,
+          orders: orderCount || 0,
+          sessions: sessionCount || 0,
+          customers: customerCount || 0,
+        }
+      }
+    });
+  } catch (error) {
+    logger.error('Failed to fetch business stats', error);
+    res.status(500).json({ error: 'Failed to fetch stats' });
+  }
+}
+
+// Get overview analytics for all businesses
+export async function getOverviewAnalytics(req: Request, res: Response): Promise<void> {
+  try {
+    // Total businesses
+    const { count: businessCount } = await supabase
+      .from('businesses')
+      .select('*', { count: 'exact', head: true });
+
+    // Active businesses
+    const { count: activeBusinessCount } = await supabase
+      .from('businesses')
+      .select('*', { count: 'exact', head: true })
+      .eq('is_active', true);
+
+    // Total orders
+    const { count: totalOrders } = await supabase
+      .from('orders')
+      .select('*', { count: 'exact', head: true });
+
+    // Total sessions (approximate message activity)
+    const { count: totalSessions } = await supabase
+      .from('sessions')
+      .select('*', { count: 'exact', head: true });
+
+    // Get all businesses with their WhatsApp numbers
+    const { data: businesses } = await supabase
+      .from('businesses')
+      .select('id, name, phone, whatsapp_phone_number, whatsapp_phone_number_id, whatsapp_business_account_id, whatsapp_webhook_verified, is_active, created_at')
+      .order('created_at', { ascending: false });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        overview: {
+          totalBusinesses: businessCount || 0,
+          activeBusinesses: activeBusinessCount || 0,
+          totalOrders: totalOrders || 0,
+          totalSessions: totalSessions || 0,
+        },
+        businesses: businesses || []
+      }
+    });
+  } catch (error) {
+    logger.error('Failed to fetch overview analytics', error);
+    res.status(500).json({ error: 'Failed to fetch analytics' });
+  }
+}
+
+// Get webhook status for a business
+export async function getWebhookStatus(req: Request, res: Response): Promise<void> {
+  try {
+    const { id } = req.params;
+
+    // Get business webhook config
+    const { data: business, error: bizError } = await supabase
+      .from('businesses')
+      .select('whatsapp_phone_number_id, whatsapp_webhook_verified')
+      .eq('id', id)
+      .single();
+
+    if (bizError || !business) {
+      res.status(404).json({ error: 'Business not found' });
+      return;
+    }
+
+    // Get last inbound message (indicates webhook is working)
+    const { data: sessions } = await supabase
+      .from('sessions')
+      .select('id')
+      .eq('business_id', id);
+
+    let lastMessageTime: string | null = null;
+    if (sessions && sessions.length > 0) {
+      const sessionIds = sessions.map(s => s.id);
+      const { data: lastMessage } = await supabase
+        .from('messages')
+        .select('created_at')
+        .in('session_id', sessionIds)
+        .eq('direction', 'inbound')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .single();
+
+      lastMessageTime = lastMessage?.created_at || null;
+    }
+
+    const isRecent = lastMessageTime &&
+      (Date.now() - new Date(lastMessageTime).getTime()) < 24 * 60 * 60 * 1000; // 24 hours
+
+    let status: 'active' | 'inactive' | 'never_received' = 'never_received';
+    if (lastMessageTime) {
+      status = isRecent ? 'active' : 'inactive';
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        phoneNumberId: business.whatsapp_phone_number_id || null,
+        webhookVerified: business.whatsapp_webhook_verified || false,
+        lastMessageReceived: lastMessageTime,
+        status
+      }
+    });
+  } catch (error) {
+    logger.error('Failed to fetch webhook status', error);
+    res.status(500).json({ error: 'Failed to fetch webhook status' });
+  }
+}

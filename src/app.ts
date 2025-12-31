@@ -16,6 +16,7 @@ import adminCategoryRoutes from './routes/adminCategories';
 import adminAddonRoutes from './routes/adminAddons';
 import adminBusinessRoutes from './routes/adminBusiness';
 import adminNotificationRoutes from './routes/adminNotifications';
+import adminChatRoutes from './routes/adminChat';
 import superadminRoutes from './routes/superadmin';
 import whatsappAuthRoutes from './routes/whatsappAuth';
 import { WHATSAPP_PROVIDER } from './config/constants';
@@ -68,6 +69,7 @@ app.use('/api/categories', adminCategoryRoutes);
 app.use('/api/addons', adminAddonRoutes);
 app.use('/api/business', adminBusinessRoutes);
 app.use('/api/notifications', adminNotificationRoutes);
+app.use('/api/admin/chat', adminChatRoutes);
 app.use('/api/superadmin', superadminRoutes);
 
 // WhatsApp authentication routes (for QR code, status)

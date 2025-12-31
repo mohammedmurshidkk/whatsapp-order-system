@@ -19,7 +19,10 @@ export function initializeSocket(httpServer: HTTPServer): SocketIOServer {
     logger.info(`Socket connected: ${socket.id}`);
 
     // Admin joins their business room
-    socket.on('join_business', (businessId: string) => {
+    socket.on('join_business', (data: string | { businessId: string }) => {
+      // Support both string and object format
+      const businessId = typeof data === 'string' ? data : data?.businessId;
+
       if (!businessId) {
         logger.warn(`Socket ${socket.id} tried to join without businessId`);
         return;
@@ -37,7 +40,8 @@ export function initializeSocket(httpServer: HTTPServer): SocketIOServer {
     });
 
     // Admin leaves business room
-    socket.on('leave_business', (businessId: string) => {
+    socket.on('leave_business', (data: string | { businessId: string }) => {
+      const businessId = typeof data === 'string' ? data : data?.businessId;
       if (!businessId) return;
 
       socket.leave(`business_${businessId}`);
@@ -105,4 +109,69 @@ export function emitNewNotification(
  */
 export function emitUnreadCount(businessId: string, count: number): void {
   emitToBusinessAdmins(businessId, 'notification_count', { count });
+}
+
+/**
+ * Emit notification read event (single notification marked as read)
+ */
+export function emitNotificationRead(businessId: string, notificationId: string): void {
+  emitToBusinessAdmins(businessId, 'notification_read', { id: notificationId });
+}
+
+/**
+ * Emit all notifications read event
+ */
+export function emitNotificationsReadAll(businessId: string): void {
+  emitToBusinessAdmins(businessId, 'notifications_read_all', {});
+}
+
+/**
+ * Emit new message event for real-time chat
+ */
+export function emitNewMessage(
+  businessId: string,
+  message: {
+    id: string;
+    session_id: string;
+    direction: string;
+    content: string;
+    message_type: string;
+    media_url?: string | null;
+    media_mime_type?: string | null;
+    media_caption?: string | null;
+    media_filename?: string | null;
+    media_duration?: number | null;
+    created_at: string;
+  }
+): void {
+  // Wrap in format frontend expects: { session_id, message }
+  emitToBusinessAdmins(businessId, 'new_message', {
+    session_id: message.session_id,
+    message,
+  });
+}
+
+/**
+ * Emit session update event (new session, AI pause, etc.)
+ */
+export function emitSessionUpdate(
+  businessId: string,
+  sessionId: string
+): void {
+  // Frontend expects { session_id: string }
+  emitToBusinessAdmins(businessId, 'session_update', { session_id: sessionId });
+}
+
+/**
+ * Emit message status update (delivered, read)
+ */
+export function emitMessageStatus(
+  businessId: string,
+  data: {
+    message_id: string;
+    session_id: string;
+    status: 'delivered' | 'read';
+  }
+): void {
+  emitToBusinessAdmins(businessId, 'message_status', data);
 }

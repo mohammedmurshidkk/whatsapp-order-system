@@ -7,6 +7,9 @@ import {
   toggleBusinessStatus,
   addBusinessAdmin,
   deleteBusinessAdmin,
+  getBusinessStats,
+  getOverviewAnalytics,
+  getWebhookStatus,
 } from '../controllers/superadminController';
 import { authMiddleware, superadminMiddleware } from '../middleware/auth';
 
@@ -26,5 +29,10 @@ router.patch('/businesses/:id/toggle-status', toggleBusinessStatus);
 // Business admin management
 router.post('/businesses/:id/admins', addBusinessAdmin);
 router.delete('/businesses/:id/admins/:adminId', deleteBusinessAdmin);
+
+// Analytics & Stats (for Tech Provider dashboard)
+router.get('/analytics/overview', getOverviewAnalytics);
+router.get('/businesses/:id/stats', getBusinessStats);
+router.get('/businesses/:id/webhook-status', getWebhookStatus);
 
 export default router;

@@ -94,13 +94,24 @@ export async function markNotificationRead(notificationId: string): Promise<bool
 }
 
 /**
- * Get all notifications for a business (paginated)
+ * Get all notifications for a business (paginated) with total count
  */
 export async function getNotifications(
   businessId: string,
   limit: number = 50,
   offset: number = 0
-): Promise<Notification[]> {
+): Promise<{ notifications: Notification[]; total: number }> {
+  // Get total count
+  const { count, error: countError } = await supabase
+    .from('notifications')
+    .select('*', { count: 'exact', head: true })
+    .eq('business_id', businessId);
+
+  if (countError) {
+    logger.error('Failed to get notifications count', countError);
+  }
+
+  // Get paginated data
   const { data, error } = await supabase
     .from('notifications')
     .select('*')
@@ -110,10 +121,13 @@ export async function getNotifications(
 
   if (error) {
     logger.error('Failed to fetch notifications', error);
-    return [];
+    return { notifications: [], total: 0 };
   }
 
-  return (data || []) as Notification[];
+  return {
+    notifications: (data || []) as Notification[],
+    total: count || 0,
+  };
 }
 
 /**

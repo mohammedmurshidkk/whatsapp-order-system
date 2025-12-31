@@ -19,6 +19,13 @@ ALTER TABLE businesses ADD COLUMN IF NOT EXISTS minimum_wait_minutes INTEGER DEF
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS order_number_prefix VARCHAR(10) DEFAULT 'ORD';
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS customer_support_phone VARCHAR(20);
 
+-- WhatsApp Business API fields (for Tech Provider)
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS whatsapp_phone_number VARCHAR(20);
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS whatsapp_phone_number_id VARCHAR(50);
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS whatsapp_business_account_id VARCHAR(50);
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS whatsapp_access_token TEXT;
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS whatsapp_webhook_verified BOOLEAN DEFAULT false;
+
 -- Add image URLs to menu tables
 ALTER TABLE menu_categories ADD COLUMN IF NOT EXISTS image_url TEXT;
 ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS image_url TEXT;
@@ -221,6 +228,69 @@ BEGIN
     PERFORM create_super_admin('superadmin@system.com', 'SuperAdmin@123', 'System Admin');
   END IF;
 END $$;
+
+-- ============================================
+-- NOTIFICATIONS TABLE
+-- ============================================
+CREATE TABLE IF NOT EXISTS notifications (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  type VARCHAR(50) NOT NULL,
+  customer_id UUID,
+  customer_phone VARCHAR(20),
+  image_id VARCHAR(255),
+  message TEXT,
+  read BOOLEAN DEFAULT false,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_business_id ON notifications(business_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(business_id, read);
+CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications(created_at DESC);
+
+-- ============================================
+-- MESSAGES TABLE - Add media columns
+-- ============================================
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS message_type VARCHAR(20) DEFAULT 'text';
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_url TEXT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_mime_type VARCHAR(100);
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_caption TEXT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_filename TEXT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_duration INTEGER;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_size INTEGER;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS whatsapp_message_id VARCHAR(100);
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'sent';
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_read BOOLEAN DEFAULT false;
+
+CREATE INDEX IF NOT EXISTS idx_messages_whatsapp_id ON messages(whatsapp_message_id);
+
+-- ============================================
+-- MEDIA UPLOADS TABLE (for admin uploads before sending)
+-- ============================================
+CREATE TABLE IF NOT EXISTS media_uploads (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID REFERENCES businesses(id) ON DELETE CASCADE,
+  file_path TEXT NOT NULL,
+  file_url TEXT NOT NULL,
+  mime_type VARCHAR(100) NOT NULL,
+  file_size INTEGER NOT NULL,
+  duration INTEGER,
+  original_filename TEXT,
+  whatsapp_media_id VARCHAR(100),
+  created_at TIMESTAMP DEFAULT NOW(),
+  expires_at TIMESTAMP DEFAULT NOW() + INTERVAL '24 hours'
+);
+
+CREATE INDEX IF NOT EXISTS idx_media_uploads_business ON media_uploads(business_id);
+
+-- ============================================
+-- FIX MESSAGE DIRECTION VALUES
+-- Migrate from 2-value system to 3-value system:
+-- 'incoming' -> 'inbound' (customer messages)
+-- 'outgoing' stays 'outgoing' (AI messages)
+-- 'outbound' for admin replies (new)
+-- ============================================
+UPDATE messages SET direction = 'inbound' WHERE direction = 'incoming';
 
 -- ============================================
 -- DONE

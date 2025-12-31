@@ -12,7 +12,9 @@ import {
   getRecentMessages,
   saveIncomingMessage,
   saveOutgoingMessage,
+  saveIncomingMediaMessage,
 } from '../services/messageService';
+import { processIncomingMedia } from '../services/mediaService';
 import { processMessageWithAI } from '../services/aiService';
 import {
   normalizeManglish,
@@ -1584,7 +1586,25 @@ export async function handleWhatsAppWebhook(
             // Find or create customer for notification
             const customer = await findOrCreateCustomer(phone, business.id);
             const session = await findOrCreateSession(customer.id, business.id);
-            await saveIncomingMessage(session.id, `[Image: ${message.image.caption || 'No caption'}]`);
+
+            // Download and store the image
+            const mediaResult = await processIncomingMedia(
+              message.image.id,
+              message.image.mime_type || 'image/jpeg',
+              business.id
+            );
+
+            // Save message with media info
+            await saveIncomingMediaMessage(
+              session.id,
+              'image',
+              mediaResult?.mediaUrl || '',
+              message.image.mime_type || 'image/jpeg',
+              {
+                caption: message.image.caption,
+                size: mediaResult?.fileSize,
+              }
+            );
 
             // Notify business admin
             await notifyBusinessAdmin(business.id, {
@@ -1595,29 +1615,158 @@ export async function handleWhatsAppWebhook(
               message: `Customer sent image${message.image.caption ? ': ' + message.image.caption : ''}`,
             });
 
-            const supportPhone = business.customer_support_phone;
-            let imageResponse = `I see you've sent an image! 📸\n\nSince I can't view images yet, I've notified our team to check it. They'll respond shortly!`;
-            if (supportPhone) {
-              imageResponse += `\n\n📞 Need immediate help? Contact: ${supportPhone}`;
+            // Don't send automated response if AI is paused (human takeover)
+            if (!session.ai_paused) {
+              const supportPhone = business.customer_support_phone;
+              let imageResponse = `I see you've sent an image! 📸\n\nSince I can't view images yet, I've notified our team to check it. They'll respond shortly!`;
+              if (supportPhone) {
+                imageResponse += `\n\n📞 Need immediate help? Contact: ${supportPhone}`;
+              }
+              imageResponse += `\n\nIn the meantime, you can describe what you'd like to order? 😊`;
+              await sendWhatsAppMessage(phone, imageResponse);
+              await saveOutgoingMessage(session.id, imageResponse);
             }
-            imageResponse += `\n\nIn the meantime, you can describe what you'd like to order? 😊`;
-            await sendWhatsAppMessage(phone, imageResponse);
-            await saveOutgoingMessage(session.id, imageResponse);
+            continue;
+          }
+
+          // Handle video messages
+          if (message.type === 'video' && message.video) {
+            logger.info(`Video received from ${phone}: ${message.video.id}`);
+
+            const customer = await findOrCreateCustomer(phone, business.id);
+            const session = await findOrCreateSession(customer.id, business.id);
+
+            // Download and store the video
+            const mediaResult = await processIncomingMedia(
+              message.video.id,
+              message.video.mime_type || 'video/mp4',
+              business.id
+            );
+
+            // Save message with media info
+            await saveIncomingMediaMessage(
+              session.id,
+              'video',
+              mediaResult?.mediaUrl || '',
+              message.video.mime_type || 'video/mp4',
+              {
+                caption: message.video.caption,
+                size: mediaResult?.fileSize,
+              }
+            );
+
+            // Notify business admin
+            await notifyBusinessAdmin(business.id, {
+              type: 'customer_video',
+              customerId: customer.id,
+              phone,
+              imageId: message.video.id,
+              message: `Customer sent video${message.video.caption ? ': ' + message.video.caption : ''}`,
+            });
+
+            // Don't send automated response if AI is paused (human takeover)
+            if (!session.ai_paused) {
+              const supportPhone = business.customer_support_phone;
+              let videoResponse = `I see you've sent a video! 🎬\n\nI've notified our team to check it. They'll respond shortly!`;
+              if (supportPhone) {
+                videoResponse += `\n\n📞 Need immediate help? Contact: ${supportPhone}`;
+              }
+              videoResponse += `\n\nIn the meantime, you can describe what you'd like to order? 😊`;
+              await sendWhatsAppMessage(phone, videoResponse);
+              await saveOutgoingMessage(session.id, videoResponse);
+            }
+            continue;
+          }
+
+          // Handle document messages
+          if (message.type === 'document' && message.document) {
+            logger.info(`Document received from ${phone}: ${message.document.id}`);
+
+            const customer = await findOrCreateCustomer(phone, business.id);
+            const session = await findOrCreateSession(customer.id, business.id);
+
+            // Download and store the document
+            const mediaResult = await processIncomingMedia(
+              message.document.id,
+              message.document.mime_type || 'application/pdf',
+              business.id
+            );
+
+            // Save message with media info
+            await saveIncomingMediaMessage(
+              session.id,
+              'document',
+              mediaResult?.mediaUrl || '',
+              message.document.mime_type || 'application/pdf',
+              {
+                caption: message.document.caption,
+                filename: message.document.filename,
+                size: mediaResult?.fileSize,
+              }
+            );
+
+            // Notify business admin
+            await notifyBusinessAdmin(business.id, {
+              type: 'customer_document',
+              customerId: customer.id,
+              phone,
+              imageId: message.document.id,
+              message: `Customer sent document: ${message.document.filename || 'document'}`,
+            });
+
+            // Don't send automated response if AI is paused (human takeover)
+            if (!session.ai_paused) {
+              const supportPhone = business.customer_support_phone;
+              let docResponse = `I received your document! 📄\n\nI've notified our team to review it. They'll respond shortly!`;
+              if (supportPhone) {
+                docResponse += `\n\n📞 Need immediate help? Contact: ${supportPhone}`;
+              }
+              await sendWhatsAppMessage(phone, docResponse);
+              await saveOutgoingMessage(session.id, docResponse);
+            }
             continue;
           }
 
           // Handle voice/audio messages (Feature 2 - Speech-to-Text)
           if ((message.type === 'audio' || message.type === 'voice') && (message.audio || message.voice)) {
-            const audioId = message.audio?.id || message.voice?.id;
+            const audioData = message.audio || message.voice;
+            const audioId = audioData?.id;
+            const audioMimeType = audioData?.mime_type || 'audio/ogg';
             logger.info(`Voice message received from ${phone}: ${audioId}`);
 
             const customer = await findOrCreateCustomer(phone, business.id);
             const session = await findOrCreateSession(customer.id, business.id);
 
+            // Download and store the audio (so admin can listen to it)
+            const mediaResult = await processIncomingMedia(
+              audioId!,
+              audioMimeType,
+              business.id
+            );
+
+            // If AI is paused (human takeover), just save the audio and don't process/respond
+            if (session.ai_paused) {
+              logger.info('AI paused - saving voice message without automated response');
+              await saveIncomingMediaMessage(
+                session.id,
+                'audio',
+                mediaResult?.mediaUrl || '',
+                audioMimeType,
+                { size: mediaResult?.fileSize }
+              );
+              continue;
+            }
+
             // Check if voice feature is enabled (premium feature)
             if (!isVoiceEnabled()) {
               logger.info('Voice feature disabled');
-              await saveIncomingMessage(session.id, '[Voice message received]');
+              await saveIncomingMediaMessage(
+                session.id,
+                'audio',
+                mediaResult?.mediaUrl || '',
+                audioMimeType,
+                { size: mediaResult?.fileSize }
+              );
               const notEnabledReply = "Oops! I'm not able to understand voice messages yet. 🙈\n\nCould you please type your message instead? I'd love to help you! 💬";
               await sendWhatsAppMessage(phone, notEnabledReply);
               await saveOutgoingMessage(session.id, notEnabledReply);
@@ -1627,7 +1776,13 @@ export async function handleWhatsAppWebhook(
             // Check if speech service is available
             if (!isSpeechServiceAvailable()) {
               logger.warn('Speech service not configured - voice messages disabled');
-              await saveIncomingMessage(session.id, '[Voice message - transcription unavailable]');
+              await saveIncomingMediaMessage(
+                session.id,
+                'audio',
+                mediaResult?.mediaUrl || '',
+                audioMimeType,
+                { size: mediaResult?.fileSize }
+              );
               const noSpeechReply = "I received your voice message! 🎤\n\nVoice transcription is not available right now. Could you please type your message instead? 😊";
               await sendWhatsAppMessage(phone, noSpeechReply);
               await saveOutgoingMessage(session.id, noSpeechReply);
@@ -1639,8 +1794,17 @@ export async function handleWhatsAppWebhook(
               const transcription = await processVoiceMessage(audioId!);
               logger.info(`Voice transcribed: "${transcription.substring(0, 50)}..."`);
 
-              // Save the transcription as incoming message
-              await saveIncomingMessage(session.id, `[Voice: ${transcription}]`);
+              // Save the audio with transcription as caption
+              await saveIncomingMediaMessage(
+                session.id,
+                'audio',
+                mediaResult?.mediaUrl || '',
+                audioMimeType,
+                {
+                  caption: transcription,
+                  size: mediaResult?.fileSize,
+                }
+              );
 
               // Process transcription as a normal text message
               const reply = await processMessage(phone, transcription, business.id);
@@ -1653,7 +1817,14 @@ export async function handleWhatsAppWebhook(
               }
             } catch (error) {
               logger.error('Voice processing failed', error);
-              await saveIncomingMessage(session.id, '[Voice message - transcription failed]');
+              // Still save the audio even if transcription failed
+              await saveIncomingMediaMessage(
+                session.id,
+                'audio',
+                mediaResult?.mediaUrl || '',
+                audioMimeType,
+                { size: mediaResult?.fileSize }
+              );
 
               const supportPhone = business.customer_support_phone;
               let errorReply = "Sorry, I couldn't understand your voice message. 🎤\n\nCould you please type your message instead?";
@@ -2106,8 +2277,6 @@ export function handleWebhookVerification(req: Request, res: Response): void {
   logger.debug(`Mode: ${mode}, Token: ${token}, Challenge: ${challenge}`);
 
   const result = verifyWebhookChallenge(mode, token, challenge);
-
-  console.log('#### result', result)
 
   if (result) {
     logger.info('Webhook verified successfully!');

@@ -167,7 +167,7 @@ export interface SessionItem {
 }
 
 // Message types
-export type MessageDirection = 'incoming' | 'outgoing';
+export type MessageDirection = 'inbound' | 'outbound' | 'outgoing';
 
 export interface Message {
   id: string;
@@ -301,6 +301,8 @@ export interface Notification {
 
 // WhatsApp webhook types
 export interface WhatsAppWebhookMessage {
+  video: any;
+  document: any;
   from: string;
   id: string;
   timestamp: string;

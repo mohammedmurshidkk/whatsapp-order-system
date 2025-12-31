@@ -27,8 +27,8 @@ CREATE TABLE businesses (
   name VARCHAR(100) NOT NULL,
   phone VARCHAR(20) UNIQUE NOT NULL,
   address TEXT,
-  welcome_message TEXT DEFAULT 'Welcome! How can I help you today?',
-  closing_message TEXT DEFAULT 'Thank you for your order!',
+  welcome_message TEXT DEFAULT NULL,
+  closing_message TEXT DEFAULT NULL,
   currency VARCHAR(10) DEFAULT '₹',
   is_active BOOLEAN DEFAULT true,
   supports_delivery BOOLEAN DEFAULT true,
@@ -44,6 +44,12 @@ CREATE TABLE businesses (
   minimum_wait_minutes INTEGER DEFAULT 30,
   order_number_prefix VARCHAR(10) DEFAULT 'ORD',
   customer_support_phone VARCHAR(20),
+  -- WhatsApp Business API fields (for Tech Provider)
+  whatsapp_phone_number VARCHAR(20),
+  whatsapp_phone_number_id VARCHAR(50),
+  whatsapp_business_account_id VARCHAR(50),
+  whatsapp_access_token TEXT,
+  whatsapp_webhook_verified BOOLEAN DEFAULT false,
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
 );
@@ -302,16 +308,50 @@ CREATE INDEX idx_session_item_addons_session_item ON session_item_addons(session
 
 -- ============================================
 -- MESSAGES TABLE
+-- direction values:
+--   'inbound'  - Customer messages (from WhatsApp)
+--   'outbound' - Admin replies (from dashboard)
+--   'outgoing' - AI automated responses
 -- ============================================
 CREATE TABLE messages (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,
   direction VARCHAR(10) NOT NULL,
   content TEXT NOT NULL,
+  message_type VARCHAR(20) DEFAULT 'text',
+  media_url TEXT,
+  media_mime_type VARCHAR(100),
+  media_caption TEXT,
+  media_filename TEXT,
+  media_duration INTEGER,
+  media_size INTEGER,
+  whatsapp_message_id VARCHAR(100),
+  status VARCHAR(20) DEFAULT 'sent',
+  is_read BOOLEAN DEFAULT false,
   created_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE INDEX idx_messages_session ON messages(session_id, created_at);
+CREATE INDEX idx_messages_whatsapp_id ON messages(whatsapp_message_id);
+
+-- ============================================
+-- MEDIA UPLOADS TABLE (for admin uploads before sending)
+-- ============================================
+CREATE TABLE media_uploads (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID REFERENCES businesses(id) ON DELETE CASCADE,
+  file_path TEXT NOT NULL,
+  file_url TEXT NOT NULL,
+  mime_type VARCHAR(100) NOT NULL,
+  file_size INTEGER NOT NULL,
+  duration INTEGER,
+  original_filename TEXT,
+  whatsapp_media_id VARCHAR(100),
+  created_at TIMESTAMP DEFAULT NOW(),
+  expires_at TIMESTAMP DEFAULT NOW() + INTERVAL '24 hours'
+);
+
+CREATE INDEX idx_media_uploads_business ON media_uploads(business_id);
 
 -- ============================================
 -- ORDERS TABLE
@@ -344,6 +384,25 @@ CREATE INDEX idx_orders_customer ON orders(customer_id, created_at);
 CREATE INDEX idx_orders_status ON orders(status, created_at);
 CREATE INDEX idx_orders_business ON orders(business_id);
 CREATE INDEX idx_orders_order_number ON orders(business_id, order_number);
+
+-- ============================================
+-- NOTIFICATIONS TABLE
+-- ============================================
+CREATE TABLE notifications (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  type VARCHAR(50) NOT NULL,
+  customer_id UUID REFERENCES customers(id) ON DELETE SET NULL,
+  customer_phone VARCHAR(20),
+  image_id VARCHAR(255),
+  message TEXT,
+  read BOOLEAN DEFAULT false,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX idx_notifications_business_id ON notifications(business_id);
+CREATE INDEX idx_notifications_read ON notifications(business_id, read);
+CREATE INDEX idx_notifications_created_at ON notifications(created_at DESC);
 
 -- ============================================
 -- DONE

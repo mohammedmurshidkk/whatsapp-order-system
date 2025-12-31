@@ -7,7 +7,7 @@ import {
   getUnreadCount,
   markAllNotificationsRead,
 } from '../services/notificationService';
-import { emitUnreadCount } from '../services/socketService';
+import { emitUnreadCount, emitNotificationRead, emitNotificationsReadAll } from '../services/socketService';
 import { logger } from '../utils/logger';
 
 /**
@@ -28,15 +28,14 @@ export async function getNotificationsList(
     const limit = parseInt(req.query.limit as string) || 20;
     const offset = (page - 1) * limit;
 
-    const notifications = await getNotifications(businessId, limit, offset);
+    const { notifications, total } = await getNotifications(businessId, limit, offset);
 
     res.status(200).json({
-      success: true,
       data: notifications,
       pagination: {
         page,
         limit,
-        hasMore: notifications.length === limit,
+        total,
       },
     });
   } catch (error) {
@@ -62,7 +61,7 @@ export async function getUnread(
     const notifications = await getUnreadNotifications(businessId);
 
     res.status(200).json({
-      success: true,
+      count: notifications.length,
       data: notifications,
     });
   } catch (error) {
@@ -123,6 +122,9 @@ export async function markAsRead(
       return;
     }
 
+    // Emit notification_read event for frontend sync
+    emitNotificationRead(businessId, id);
+
     // Emit updated count to all connected admins
     const newCount = await getUnreadCount(businessId);
     emitUnreadCount(businessId, newCount);
@@ -156,6 +158,9 @@ export async function markAllAsRead(
       res.status(500).json({ error: 'Failed to mark all as read' });
       return;
     }
+
+    // Emit notifications_read_all event for frontend sync
+    emitNotificationsReadAll(businessId);
 
     // Emit zero count to all connected admins
     emitUnreadCount(businessId, 0);
