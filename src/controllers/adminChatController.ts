@@ -1,6 +1,7 @@
-import { Request, Response } from 'express';
+import { Response } from 'express';
 import { supabase } from '../config/database';
 import { logger } from '../utils/logger';
+import { getBusinessId, AuthRequest } from '../middleware/auth';
 import {
   sendWhatsAppText,
   sendWhatsAppImage,
@@ -15,22 +16,13 @@ import {
   MediaType,
 } from '../services/mediaService';
 
-// Extended request with business context
-interface AuthenticatedRequest extends Request {
-  user?: {
-    id: string;
-    business_id: string;
-    email: string;
-    role: string;
-  };
-}
 
 // ============================================
 // GET /sessions - List all sessions
 // ============================================
-export async function getSessions(req: AuthenticatedRequest, res: Response): Promise<void> {
+export async function getSessions(req: AuthRequest, res: Response): Promise<void> {
   try {
-    const businessId = req.user?.business_id;
+    const businessId = getBusinessId(req);
     if (!businessId) {
       res.status(401).json({ success: false, error: 'Unauthorized' });
       return;
@@ -131,9 +123,9 @@ export async function getSessions(req: AuthenticatedRequest, res: Response): Pro
 // ============================================
 // GET /sessions/:sessionId - Get session messages
 // ============================================
-export async function getSessionMessages(req: AuthenticatedRequest, res: Response): Promise<void> {
+export async function getSessionMessages(req: AuthRequest, res: Response): Promise<void> {
   try {
-    const businessId = req.user?.business_id;
+    const businessId = getBusinessId(req);
     const { sessionId } = req.params;
     const { page = '1', limit = '50' } = req.query;
     const pageNum = parseInt(page as string, 10);
@@ -223,9 +215,9 @@ export async function getSessionMessages(req: AuthenticatedRequest, res: Respons
 // ============================================
 // POST /sessions/:sessionId/reply - Send message
 // ============================================
-export async function sendReply(req: AuthenticatedRequest, res: Response): Promise<void> {
+export async function sendReply(req: AuthRequest, res: Response): Promise<void> {
   try {
-    const businessId = req.user?.business_id;
+    const businessId = getBusinessId(req);
     const { sessionId } = req.params;
     const { type, content, media_id, caption, filename } = req.body;
 
@@ -378,9 +370,9 @@ export async function sendReply(req: AuthenticatedRequest, res: Response): Promi
 // ============================================
 // POST /upload/media - Upload media file
 // ============================================
-export async function uploadMedia(req: AuthenticatedRequest, res: Response): Promise<void> {
+export async function uploadMedia(req: AuthRequest, res: Response): Promise<void> {
   try {
-    const businessId = req.user?.business_id;
+    const businessId = getBusinessId(req);
 
     if (!businessId) {
       res.status(401).json({ success: false, error: 'Unauthorized' });
@@ -445,9 +437,9 @@ export async function uploadMedia(req: AuthenticatedRequest, res: Response): Pro
 // ============================================
 // PATCH /sessions/:sessionId/ai-pause - Toggle AI pause
 // ============================================
-export async function toggleAiPause(req: AuthenticatedRequest, res: Response): Promise<void> {
+export async function toggleAiPause(req: AuthRequest, res: Response): Promise<void> {
   try {
-    const businessId = req.user?.business_id;
+    const businessId = getBusinessId(req);
     const { sessionId } = req.params;
     const { paused } = req.body;
 
@@ -505,9 +497,9 @@ export async function toggleAiPause(req: AuthenticatedRequest, res: Response): P
 // ============================================
 // POST /sessions/:sessionId/mark-read - Mark messages as read
 // ============================================
-export async function markMessagesRead(req: AuthenticatedRequest, res: Response): Promise<void> {
+export async function markMessagesRead(req: AuthRequest, res: Response): Promise<void> {
   try {
-    const businessId = req.user?.business_id;
+    const businessId = getBusinessId(req);
     const { sessionId } = req.params;
 
     if (!businessId) {

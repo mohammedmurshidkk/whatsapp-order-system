@@ -49,7 +49,15 @@ export function authMiddleware(req: AuthRequest, res: Response, next: NextFuncti
 }
 
 // Helper to get business_id from authenticated request
+// Superadmins can override via X-Business-Id header
 export function getBusinessId(req: AuthRequest): string | null {
+  if (req.user?.role === 'superadmin') {
+    const viewingBusinessId = req.headers['x-business-id'] as string;
+    if (viewingBusinessId) {
+      return viewingBusinessId;
+    }
+  }
+
   return req.user?.business_id || null;
 }
 

@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { AuthRequest } from '../middleware/auth';
+import { AuthRequest, getBusinessId } from '../middleware/auth';
 import {
   getNotifications,
   getUnreadNotifications,
@@ -18,7 +18,7 @@ export async function getNotificationsList(
   res: Response
 ): Promise<void> {
   try {
-    const businessId = req.user?.business_id;
+    const businessId = getBusinessId(req);
     if (!businessId) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
@@ -52,7 +52,7 @@ export async function getUnread(
   res: Response
 ): Promise<void> {
   try {
-    const businessId = req.user?.business_id;
+    const businessId = getBusinessId(req);
     if (!businessId) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
@@ -78,7 +78,7 @@ export async function getUnreadNotificationCount(
   res: Response
 ): Promise<void> {
   try {
-    const businessId = req.user?.business_id;
+    const businessId = getBusinessId(req);
     if (!businessId) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
@@ -104,7 +104,7 @@ export async function markAsRead(
   res: Response
 ): Promise<void> {
   try {
-    const businessId = req.user?.business_id;
+    const businessId = getBusinessId(req);
     if (!businessId) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
@@ -147,7 +147,7 @@ export async function markAllAsRead(
   res: Response
 ): Promise<void> {
   try {
-    const businessId = req.user?.business_id;
+    const businessId = getBusinessId(req);
     if (!businessId) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
