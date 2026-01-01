@@ -1933,15 +1933,8 @@ export async function handleWhatsAppWebhook(
               if (!displayAddress) {
                 logger.info(`[DEBUG-LOC] Step 5a: Reverse geocoding ${location.latitude}, ${location.longitude}`);
                 try {
-                  const geocodedAddress = await getAddressFromCoordinates(location.latitude, location.longitude);
-                  // Check if it's just coordinates (geocoding failed internally)
-                  if (geocodedAddress && geocodedAddress.match(/^-?\d+\.\d+,\s*-?\d+\.\d+$/)) {
-                    logger.info(`[DEBUG-LOC] Step 5a: Geocoding returned coordinates, treating as null address`);
-                    displayAddress = null;
-                  } else {
-                    displayAddress = geocodedAddress;
-                    logger.info(`[DEBUG-LOC] Step 5a done: geocoded address=${displayAddress}`);
-                  }
+                  displayAddress = await getAddressFromCoordinates(location.latitude, location.longitude);
+                  logger.info(`[DEBUG-LOC] Step 5a done: geocoded address=${displayAddress || 'NULL (will use lat/long)'}`);
                 } catch (geoError) {
                   // Geocoding failed - address stays null, lat/long will still be saved
                   logger.warn(`[DEBUG-LOC] Geocoding failed, will save lat/long only:`, geoError);

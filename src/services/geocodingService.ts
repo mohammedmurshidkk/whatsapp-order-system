@@ -132,12 +132,12 @@ export async function reverseGeocode(
  *
  * @param latitude - Latitude coordinate
  * @param longitude - Longitude coordinate
- * @returns Address string (never null)
+ * @returns Address string or null if geocoding fails
  */
 export async function getAddressFromCoordinates(
   latitude: number,
   longitude: number
-): Promise<string> {
+): Promise<string | null> {
   try {
     const result = await reverseGeocode(latitude, longitude);
 
@@ -145,11 +145,11 @@ export async function getAddressFromCoordinates(
       return result.address;
     }
 
-    // Fallback to coordinates if geocoding fails
-    return `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
+    // Return null if geocoding fails - lat/long saved separately
+    return null;
   } catch (error) {
     // Extra safety net - should not reach here but just in case
     logger.error(`getAddressFromCoordinates unexpected error:`, error);
-    return `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
+    return null;
   }
 }
