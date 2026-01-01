@@ -2,7 +2,7 @@ import { supabase } from '../config/database';
 import { Customer } from '../types';
 import { logger } from '../utils/logger';
 
-export async function findOrCreateCustomer(phone: string, businessId: string): Promise<Customer> {
+export async function findOrCreateCustomer(phone: string, businessId: string, customerName?: string): Promise<Customer> {
   // Try to find existing customer for this business
   const { data: existingCustomer, error: findError } = await supabase
     .from('customers')
@@ -13,6 +13,20 @@ export async function findOrCreateCustomer(phone: string, businessId: string): P
 
   if (existingCustomer && !findError) {
     logger.debug(`Customer found: ${existingCustomer.id} for business ${businessId}`);
+
+    // Update name if provided and customer doesn't have one yet
+    if (customerName && !existingCustomer.name) {
+      const { error: updateError } = await supabase
+        .from('customers')
+        .update({ name: customerName })
+        .eq('id', existingCustomer.id);
+
+      if (!updateError) {
+        existingCustomer.name = customerName;
+        logger.info(`Customer ${existingCustomer.id} name updated to: ${customerName}`);
+      }
+    }
+
     return existingCustomer as Customer;
   }
 
@@ -22,6 +36,7 @@ export async function findOrCreateCustomer(phone: string, businessId: string): P
     .insert({
       phone,
       business_id: businessId,
+      name: customerName || null,
       created_at: new Date().toISOString(),
     })
     .select()

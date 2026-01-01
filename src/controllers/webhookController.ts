@@ -151,7 +151,8 @@ function isItemDuplicate(
 export async function processMessage(
   phone: string,
   messageText: string,
-  businessId: string
+  businessId: string,
+  customerName?: string
 ): Promise<string | null> {
   logger.info(`Processing message from ${phone}: ${messageText.substring(0, 50)}...`);
 
@@ -183,7 +184,7 @@ export async function processMessage(
   }
 
   // Find or create customer for this business
-  const customer = await findOrCreateCustomer(phone, businessId);
+  const customer = await findOrCreateCustomer(phone, businessId, customerName);
 
   // Find or create active session for this business
   const session = await findOrCreateSession(customer.id, businessId);
@@ -1576,6 +1577,12 @@ export async function handleWhatsAppWebhook(
         // Get business timezone for date/time handling
         const businessTimezone = business.timezone || 'Asia/Kolkata';
 
+        // Extract customer name from WhatsApp contacts
+        const customerName = value.contacts?.[0]?.profile?.name || undefined;
+        if (customerName) {
+          logger.info(`WhatsApp customer name: ${customerName}`);
+        }
+
         for (const message of value.messages) {
           const phone = sanitizePhoneNumber(message.from);
 
@@ -1584,7 +1591,7 @@ export async function handleWhatsAppWebhook(
             logger.info(`Image received from ${phone}: ${message.image.id}`);
 
             // Find or create customer for notification
-            const customer = await findOrCreateCustomer(phone, business.id);
+            const customer = await findOrCreateCustomer(phone, business.id, customerName);
             const session = await findOrCreateSession(customer.id, business.id);
 
             // Download and store the image
@@ -1633,7 +1640,7 @@ export async function handleWhatsAppWebhook(
           if (message.type === 'video' && message.video) {
             logger.info(`Video received from ${phone}: ${message.video.id}`);
 
-            const customer = await findOrCreateCustomer(phone, business.id);
+            const customer = await findOrCreateCustomer(phone, business.id, customerName);
             const session = await findOrCreateSession(customer.id, business.id);
 
             // Download and store the video
@@ -1682,7 +1689,7 @@ export async function handleWhatsAppWebhook(
           if (message.type === 'document' && message.document) {
             logger.info(`Document received from ${phone}: ${message.document.id}`);
 
-            const customer = await findOrCreateCustomer(phone, business.id);
+            const customer = await findOrCreateCustomer(phone, business.id, customerName);
             const session = await findOrCreateSession(customer.id, business.id);
 
             // Download and store the document
@@ -1734,7 +1741,7 @@ export async function handleWhatsAppWebhook(
             const audioMimeType = audioData?.mime_type || 'audio/ogg';
             logger.info(`Voice message received from ${phone}: ${audioId}`);
 
-            const customer = await findOrCreateCustomer(phone, business.id);
+            const customer = await findOrCreateCustomer(phone, business.id, customerName);
             const session = await findOrCreateSession(customer.id, business.id);
 
             // Download and store the audio (so admin can listen to it)
@@ -1807,7 +1814,7 @@ export async function handleWhatsAppWebhook(
               );
 
               // Process transcription as a normal text message
-              const reply = await processMessage(phone, transcription, business.id);
+              const reply = await processMessage(phone, transcription, business.id, customerName);
 
               if (reply !== null) {
                 // Prepend transcription confirmation to the reply
@@ -1844,7 +1851,7 @@ export async function handleWhatsAppWebhook(
 
             try {
               logger.info(`[DEBUG-LOC] Step 2: Finding/creating customer...`);
-              const customer = await findOrCreateCustomer(phone, business.id);
+              const customer = await findOrCreateCustomer(phone, business.id, customerName);
               logger.info(`[DEBUG-LOC] Step 2 done: customer.id=${customer.id}`);
 
               logger.info(`[DEBUG-LOC] Step 3: Finding/creating session...`);
@@ -1930,7 +1937,7 @@ export async function handleWhatsAppWebhook(
 
               // Handle takeaway button - show interactive outlet list
               if (buttonId === 'takeaway') {
-                const customer = await findOrCreateCustomer(phone, business.id);
+                const customer = await findOrCreateCustomer(phone, business.id, customerName);
                 const session = await findOrCreateSession(customer.id, business.id);
                 const businessOutlets = await getBusinessOutlets(business.id);
 
@@ -1961,7 +1968,7 @@ export async function handleWhatsAppWebhook(
 
               // Handle delivery button - set fulfillment type and CLEAR any previous takeaway info
               if (buttonId === 'delivery') {
-                const customer = await findOrCreateCustomer(phone, business.id);
+                const customer = await findOrCreateCustomer(phone, business.id, customerName);
                 const session = await findOrCreateSession(customer.id, business.id);
 
                 // Set fulfillment type to delivery (this will clear takeaway info in the handler)
@@ -1983,7 +1990,7 @@ export async function handleWhatsAppWebhook(
 
                   const menuItem = await getMenuItemById(itemId);
                   if (menuItem) {
-                    const customer = await findOrCreateCustomer(phone, business.id);
+                    const customer = await findOrCreateCustomer(phone, business.id, customerName);
                     const session = await findOrCreateSession(customer.id, business.id);
 
                     await saveIncomingMessage(session.id, `[Selected size: ${sizeName}]`);
@@ -2003,7 +2010,7 @@ export async function handleWhatsAppWebhook(
 
               // Handle DATE selection buttons (Today/Tomorrow/Other)
               if (buttonId.startsWith('date_')) {
-                const customer = await findOrCreateCustomer(phone, business.id);
+                const customer = await findOrCreateCustomer(phone, business.id, customerName);
                 const session = await findOrCreateSession(customer.id, business.id);
                 const isDelivery = buttonId.includes('_delivery');
                 const fulfillmentType = isDelivery ? 'delivery' : 'takeaway';
@@ -2066,7 +2073,7 @@ export async function handleWhatsAppWebhook(
 
               // Handle TIME selection buttons
               if (buttonId.startsWith('time_')) {
-                const customer = await findOrCreateCustomer(phone, business.id);
+                const customer = await findOrCreateCustomer(phone, business.id, customerName);
                 const session = await findOrCreateSession(customer.id, business.id);
                 const sessionWithItems = await getSessionWithItems(session.id);
                 const pendingDate = pendingDateSelectionMap.get(session.id);
@@ -2139,7 +2146,7 @@ export async function handleWhatsAppWebhook(
               logger.info(`List reply from ${phone}: ${selectedId}`);
 
               // Handle outlet selection
-              const customer = await findOrCreateCustomer(phone, business.id);
+              const customer = await findOrCreateCustomer(phone, business.id, customerName);
               const session = await findOrCreateSession(customer.id, business.id);
               const businessOutlets = await getBusinessOutlets(business.id);
 
@@ -2269,7 +2276,7 @@ export async function handleWhatsAppWebhook(
 
           try {
             // Use business ID from phone lookup
-            const reply = await processMessage(phone, messageText, business.id);
+            const reply = await processMessage(phone, messageText, business.id, customerName);
             // Only send message if AI is not paused (reply will be null if paused)
             if (reply !== null) {
               await sendWhatsAppMessage(phone, reply);
