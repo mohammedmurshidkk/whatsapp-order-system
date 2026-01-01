@@ -1052,38 +1052,54 @@ export async function processMessage(
 
         // Save delivery address if provided
         if (aiResponse.fulfillment.delivery_address) {
-          // Try to extract time from AI response first
-          let deliveryTime = aiResponse.fulfillment.delivery_time
-            ? parseDeliveryTime(aiResponse.fulfillment.delivery_time, businessTimezone)
-            : null;
+          const addressFromAI = aiResponse.fulfillment.delivery_address;
 
-          // Fallback: Try to extract time from the original message if AI didn't get it
-          if (!deliveryTime) {
-            const extracted = extractAddressAndTime(messageText, businessTimezone);
-            if (extracted.time) {
-              deliveryTime = extracted.time;
-              logger.info(`Extracted time from message: ${extracted.time}`);
-            }
-          }
+          // Skip if AI extracted coordinate format (not a real address)
+          const isCoordinateFormat = /^(Lat|Location|Latitude)[\s:]*-?\d+\.\d+/i.test(addressFromAI);
 
-          await updateSessionDeliveryInfo(session.id, {
-            address: aiResponse.fulfillment.delivery_address,
-            time: deliveryTime || undefined,
-            notes: aiResponse.fulfillment.fulfillment_notes,
-          });
-          logger.info(`Delivery info saved: ${aiResponse.fulfillment.delivery_address}, time: ${deliveryTime || 'not provided'}`);
+          // Skip if session already has lat/long (location was shared via WhatsApp)
+          const sessionData = await getSessionWithItems(session.id);
+          const hasLocationAlready = sessionData?.delivery_latitude && sessionData?.delivery_longitude;
 
-          // Check if time was provided - if not, ask for it
-          if (!deliveryTime) {
-            replyMessage = `Got it, delivery to ${aiResponse.fulfillment.delivery_address}.\n\n⏰ What time would you like delivery?\n_Examples: 'today 5pm', 'tomorrow 3pm', 'nale 4pm', 'innu evening'_`;
+          if (isCoordinateFormat) {
+            logger.info(`Skipping coordinate format address from AI: ${addressFromAI}`);
+          } else if (hasLocationAlready && !sessionData?.delivery_address) {
+            // Has lat/long but no address - don't overwrite with AI extracted text
+            logger.info(`Skipping AI address - session already has location coordinates`);
           } else {
-            // Show final invoice with delivery details and ask for confirmation
-            const deliverySummary = await generateOrderSummary(session.id, {
-              includeCta: true,
-              ctaMessage: '\nPlease review your order. Reply *YES* to confirm or you can add more items.',
-              timezone: businessTimezone
+            // Try to extract time from AI response first
+            let deliveryTime = aiResponse.fulfillment.delivery_time
+              ? parseDeliveryTime(aiResponse.fulfillment.delivery_time, businessTimezone)
+              : null;
+
+            // Fallback: Try to extract time from the original message if AI didn't get it
+            if (!deliveryTime) {
+              const extracted = extractAddressAndTime(messageText, businessTimezone);
+              if (extracted.time) {
+                deliveryTime = extracted.time;
+                logger.info(`Extracted time from message: ${extracted.time}`);
+              }
+            }
+
+            await updateSessionDeliveryInfo(session.id, {
+              address: addressFromAI,
+              time: deliveryTime || undefined,
+              notes: aiResponse.fulfillment.fulfillment_notes,
             });
-            replyMessage = deliverySummary;
+            logger.info(`Delivery info saved: ${addressFromAI}, time: ${deliveryTime || 'not provided'}`);
+
+            // Check if time was provided - if not, ask for it
+            if (!deliveryTime) {
+              replyMessage = `Got it, delivery to ${addressFromAI}.\n\n⏰ What time would you like delivery?\n_Examples: 'today 5pm', 'tomorrow 3pm', 'nale 4pm', 'innu evening'_`;
+            } else {
+              // Show final invoice with delivery details and ask for confirmation
+              const deliverySummary = await generateOrderSummary(session.id, {
+                includeCta: true,
+                ctaMessage: '\nPlease review your order. Reply *YES* to confirm or you can add more items.',
+                timezone: businessTimezone
+              });
+              replyMessage = deliverySummary;
+            }
           }
         }
       }
