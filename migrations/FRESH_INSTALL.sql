@@ -405,5 +405,85 @@ CREATE INDEX idx_notifications_read ON notifications(business_id, read);
 CREATE INDEX idx_notifications_created_at ON notifications(created_at DESC);
 
 -- ============================================
+-- CUSTOM CAKE PRICING TABLES
+-- ============================================
+
+-- Add custom cake pricing columns to businesses
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS custom_cake_enabled BOOLEAN DEFAULT false;
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS custom_cake_auto_send BOOLEAN DEFAULT false;
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS custom_cake_quote_expiry_hours INTEGER DEFAULT 24;
+
+-- Weight-based pricing per business
+CREATE TABLE cake_weight_pricing (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  weight_grams INTEGER NOT NULL,
+  base_price DECIMAL(10, 2) NOT NULL,
+  is_active BOOLEAN DEFAULT true,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE(business_id, weight_grams)
+);
+
+CREATE INDEX idx_cake_weight_pricing_business ON cake_weight_pricing(business_id) WHERE is_active = true;
+
+-- Flavor pricing per business
+CREATE TABLE cake_flavor_pricing (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  flavor_name VARCHAR(100) NOT NULL,
+  additional_price DECIMAL(10, 2) DEFAULT 0,
+  is_active BOOLEAN DEFAULT true,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE(business_id, flavor_name)
+);
+
+CREATE INDEX idx_cake_flavor_pricing_business ON cake_flavor_pricing(business_id) WHERE is_active = true;
+
+-- Design elements pricing per business
+CREATE TABLE cake_design_elements (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  element_key VARCHAR(50) NOT NULL,
+  element_label VARCHAR(100) NOT NULL,
+  price DECIMAL(10, 2) NOT NULL,
+  price_type VARCHAR(20) DEFAULT 'fixed', -- 'fixed' or 'per_unit'
+  is_active BOOLEAN DEFAULT true,
+  sort_order INTEGER DEFAULT 0,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE(business_id, element_key)
+);
+
+CREATE INDEX idx_cake_design_elements_business ON cake_design_elements(business_id) WHERE is_active = true;
+
+-- Price quotes for custom cakes
+CREATE TABLE cake_price_quotes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  session_id UUID REFERENCES sessions(id) ON DELETE SET NULL,
+  customer_id UUID REFERENCES customers(id) ON DELETE SET NULL,
+  image_url TEXT,
+  customer_weight VARCHAR(50),
+  customer_flavor VARCHAR(100),
+  ai_analysis JSONB,
+  suggested_price DECIMAL(10, 2),
+  suggested_message TEXT,
+  status VARCHAR(20) DEFAULT 'pending', -- pending, sent, cancelled, expired
+  admin_final_message TEXT,
+  admin_final_price DECIMAL(10, 2),
+  reviewed_by UUID REFERENCES admin_users(id),
+  reviewed_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT NOW(),
+  expires_at TIMESTAMP DEFAULT NOW() + INTERVAL '24 hours'
+);
+
+CREATE INDEX idx_cake_price_quotes_business ON cake_price_quotes(business_id);
+CREATE INDEX idx_cake_price_quotes_session ON cake_price_quotes(session_id);
+CREATE INDEX idx_cake_price_quotes_status ON cake_price_quotes(business_id, status);
+CREATE INDEX idx_cake_price_quotes_pending ON cake_price_quotes(business_id) WHERE status = 'pending';
+
+-- ============================================
 -- DONE
 -- ============================================

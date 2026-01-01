@@ -85,6 +85,7 @@ import {
   isVoiceEnabled,
 } from '../services/speechService';
 import { notifyBusinessAdmin } from '../services/notificationService';
+import { processCakeImage } from '../services/cakeQuoteService';
 import {
   isValidPhoneNumber,
   sanitizePhoneNumber,
@@ -1594,44 +1595,91 @@ export async function handleWhatsAppWebhook(
             const customer = await findOrCreateCustomer(phone, business.id, customerName);
             const session = await findOrCreateSession(customer.id, business.id);
 
-            // Download and store the image
-            const mediaResult = await processIncomingMedia(
-              message.image.id,
-              message.image.mime_type || 'image/jpeg',
-              business.id
-            );
+            // Check if custom cake pricing is enabled for this business
+            const customCakeEnabled = (business as any).custom_cake_enabled === true;
 
-            // Save message with media info
-            await saveIncomingMediaMessage(
-              session.id,
-              'image',
-              mediaResult?.mediaUrl || '',
-              message.image.mime_type || 'image/jpeg',
-              {
-                caption: message.image.caption,
-                size: mediaResult?.fileSize,
+            if (customCakeEnabled) {
+              // Process as cake image for pricing
+              logger.info(`Processing cake image for business ${business.id}`);
+
+              // Extract weight/flavor from caption if provided
+              const caption = message.image.caption || '';
+              const weightMatch = caption.match(/(\d+(?:\.\d+)?)\s*(?:kg|g)/i);
+              const customerWeight = weightMatch ? weightMatch[0] : undefined;
+
+              // Try to extract flavor from caption
+              const flavorKeywords = ['chocolate', 'vanilla', 'strawberry', 'red velvet', 'butterscotch', 'pineapple', 'mango', 'black forest'];
+              const customerFlavor = flavorKeywords.find(f => caption.toLowerCase().includes(f));
+
+              const result = await processCakeImage(
+                business.id,
+                session.id,
+                customer.id,
+                phone,
+                message.image.id,
+                message.image.mime_type || 'image/jpeg',
+                undefined, // Let mediaService use env token
+                customerWeight,
+                customerFlavor
+              );
+
+              // Save message with media info
+              await saveIncomingMediaMessage(
+                session.id,
+                'image',
+                result.quote?.image_url || '',
+                message.image.mime_type || 'image/jpeg',
+                {
+                  caption: message.image.caption,
+                }
+              );
+
+              // Send response to customer
+              if (!session.ai_paused) {
+                await sendWhatsAppMessage(phone, result.holdingMessage);
+                await saveOutgoingMessage(session.id, result.holdingMessage);
               }
-            );
+            } else {
+              // Standard image handling (no cake pricing)
+              // Download and store the image
+              const mediaResult = await processIncomingMedia(
+                message.image.id,
+                message.image.mime_type || 'image/jpeg',
+                business.id
+              );
 
-            // Notify business admin
-            await notifyBusinessAdmin(business.id, {
-              type: 'customer_image',
-              customerId: customer.id,
-              phone,
-              imageId: message.image.id,
-              message: `Customer sent image${message.image.caption ? ': ' + message.image.caption : ''}`,
-            });
+              // Save message with media info
+              await saveIncomingMediaMessage(
+                session.id,
+                'image',
+                mediaResult?.mediaUrl || '',
+                message.image.mime_type || 'image/jpeg',
+                {
+                  caption: message.image.caption,
+                  size: mediaResult?.fileSize,
+                }
+              );
 
-            // Don't send automated response if AI is paused (human takeover)
-            if (!session.ai_paused) {
-              const supportPhone = business.customer_support_phone;
-              let imageResponse = `I see you've sent an image! 📸\n\nSince I can't view images yet, I've notified our team to check it. They'll respond shortly!`;
-              if (supportPhone) {
-                imageResponse += `\n\n📞 Need immediate help? Contact: ${supportPhone}`;
+              // Notify business admin
+              await notifyBusinessAdmin(business.id, {
+                type: 'customer_image',
+                customerId: customer.id,
+                phone,
+                imageId: message.image.id,
+                message: `Customer sent image${message.image.caption ? ': ' + message.image.caption : ''}`,
+              });
+
+              // Don't send automated response if AI is paused (human takeover)
+              if (!session.ai_paused) {
+                const supportPhone = business.customer_support_phone;
+                let imageResponse = `I see you've sent an image! 📸\n\nSince I can't view images yet, I've notified our team to check it. They'll respond shortly!`;
+                if (supportPhone) {
+                  imageResponse += `\n\n📞 Need immediate help? Contact: ${supportPhone}`;
+                }
+                imageResponse += `\n\nIn the meantime, you can describe what you'd like to order? 😊`;
+                await sendWhatsAppMessage(phone, imageResponse);
+                await saveOutgoingMessage(session.id, imageResponse);
               }
-              imageResponse += `\n\nIn the meantime, you can describe what you'd like to order? 😊`;
-              await sendWhatsAppMessage(phone, imageResponse);
-              await saveOutgoingMessage(session.id, imageResponse);
             }
             continue;
           }

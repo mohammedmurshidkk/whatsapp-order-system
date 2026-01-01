@@ -375,3 +375,134 @@ export interface TestMessageRequest {
   phone: string;
   message: string;
 }
+
+// ============================================
+// CUSTOM CAKE PRICING TYPES
+// ============================================
+
+export interface CakeWeightPricing {
+  id: string;
+  business_id: string;
+  weight_grams: number;
+  base_price: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CakeFlavorPricing {
+  id: string;
+  business_id: string;
+  flavor_name: string;
+  additional_price: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export type CakeDesignPriceType = 'fixed' | 'per_unit';
+
+export interface CakeDesignElement {
+  id: string;
+  business_id: string;
+  element_key: string;
+  element_label: string;
+  price: number;
+  price_type: CakeDesignPriceType;
+  is_active: boolean;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export type CakePriceQuoteStatus = 'pending' | 'sent' | 'cancelled' | 'expired';
+
+export interface CakeAIDetectedElement {
+  element_key: string;
+  element_label: string;
+  quantity: number;
+  confidence: number;
+  unit_price: number;
+  total_price: number;
+  notes?: string;
+}
+
+export interface CakeAIAnalysis {
+  detected_elements: CakeAIDetectedElement[];
+  tier_count: number;
+  complexity_level: 'simple' | 'moderate' | 'elaborate' | 'premium';
+  complexity_reasoning: string;
+  price_breakdown: {
+    base_price: number;
+    flavor_addition: number;
+    design_elements_total: number;
+    grand_total: number;
+  };
+  confidence_score: number;
+  suggested_message: string;
+  warnings: string[];
+}
+
+export interface CakePriceQuote {
+  id: string;
+  business_id: string;
+  session_id: string | null;
+  customer_id: string | null;
+  image_url: string | null;
+  customer_weight: string | null;
+  customer_flavor: string | null;
+  ai_analysis: CakeAIAnalysis | null;
+  suggested_price: number | null;
+  suggested_message: string | null;
+  status: CakePriceQuoteStatus;
+  admin_final_message: string | null;
+  admin_final_price: number | null;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+  expires_at: string;
+}
+
+export interface CakePriceQuoteWithCustomer extends CakePriceQuote {
+  customer?: {
+    id: string;
+    name: string | null;
+    phone: string;
+  };
+}
+
+// Business extension for cake pricing
+export interface BusinessWithCakePricing extends Business {
+  custom_cake_enabled?: boolean;
+  custom_cake_auto_send?: boolean;
+  custom_cake_quote_expiry_hours?: number;
+}
+
+// Standard design element keys (for seeding)
+export const STANDARD_CAKE_DESIGN_ELEMENTS: Array<{
+  element_key: string;
+  element_label: string;
+  default_price: number;
+  price_type: CakeDesignPriceType;
+}> = [
+  { element_key: 'extra_tier', element_label: 'Extra Tier', default_price: 500, price_type: 'fixed' },
+  { element_key: 'fondant_covering', element_label: 'Fondant Covering', default_price: 300, price_type: 'fixed' },
+  { element_key: 'buttercream_finish', element_label: 'Buttercream Finish', default_price: 0, price_type: 'fixed' },
+  { element_key: 'fondant_bow', element_label: 'Fondant Bow', default_price: 100, price_type: 'fixed' },
+  { element_key: 'crown_topper', element_label: 'Crown/Tiara Topper', default_price: 150, price_type: 'fixed' },
+  { element_key: 'doll_topper', element_label: 'Doll/Figurine Topper', default_price: 250, price_type: 'fixed' },
+  { element_key: 'number_topper', element_label: 'Number Topper', default_price: 80, price_type: 'fixed' },
+  { element_key: 'name_letters', element_label: 'Name Letters', default_price: 30, price_type: 'per_unit' },
+  { element_key: 'decorative_spheres', element_label: 'Decorative Spheres/Balls', default_price: 100, price_type: 'fixed' },
+  { element_key: 'edible_print', element_label: 'Edible Print', default_price: 200, price_type: 'fixed' },
+  { element_key: 'hand_painted', element_label: 'Hand-Painted Details', default_price: 400, price_type: 'fixed' },
+  { element_key: 'quilted_pattern', element_label: 'Quilted/Textured Pattern', default_price: 200, price_type: 'fixed' },
+  { element_key: 'gold_accents', element_label: 'Gold Accents', default_price: 150, price_type: 'fixed' },
+  { element_key: 'silver_accents', element_label: 'Silver Accents', default_price: 150, price_type: 'fixed' },
+  { element_key: 'fresh_flowers', element_label: 'Fresh Flowers', default_price: 300, price_type: 'fixed' },
+  { element_key: 'chocolate_drizzle', element_label: 'Chocolate Drizzle', default_price: 100, price_type: 'fixed' },
+  { element_key: 'macarons', element_label: 'Macarons', default_price: 50, price_type: 'per_unit' },
+  { element_key: 'meringue_kisses', element_label: 'Meringue Kisses', default_price: 30, price_type: 'per_unit' },
+  { element_key: 'butterfly_decor', element_label: 'Butterfly Decorations', default_price: 80, price_type: 'fixed' },
+  { element_key: 'theme_decorations', element_label: 'Theme Decorations', default_price: 200, price_type: 'fixed' },
+];
