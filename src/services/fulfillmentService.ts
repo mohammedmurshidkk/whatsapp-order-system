@@ -50,7 +50,7 @@ export async function updateSessionFulfillmentType(
 export async function updateSessionDeliveryInfo(
   sessionId: string,
   deliveryInfo: {
-    address: string;
+    address: string | null; // Can be null if geocoding failed (lat/long still saved)
     time?: string;
     latitude?: number;
     longitude?: number;
@@ -60,7 +60,7 @@ export async function updateSessionDeliveryInfo(
   const { error } = await supabase
     .from('sessions')
     .update({
-      delivery_address: deliveryInfo.address,
+      delivery_address: deliveryInfo.address || null,
       delivery_time: deliveryInfo.time || null,
       delivery_latitude: deliveryInfo.latitude || null,
       delivery_longitude: deliveryInfo.longitude || null,

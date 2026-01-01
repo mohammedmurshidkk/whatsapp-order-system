@@ -118,7 +118,7 @@ export async function saveOutgoingMessage(
 
 export async function saveIncomingMediaMessage(
   sessionId: string,
-  messageType: 'image' | 'video' | 'audio' | 'document',
+  messageType: 'image' | 'video' | 'audio' | 'document' | 'sticker',
   mediaUrl: string,
   mimeType: string,
   options?: {

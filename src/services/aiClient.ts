@@ -33,7 +33,7 @@ class GeminiClient implements AIClient {
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
             temperature: 0.3,
-            maxOutputTokens: 1024,
+            maxOutputTokens: 2048,
           },
         },
         {
@@ -87,7 +87,10 @@ class OpenRouterClient implements AIClient {
     if (!process.env.OPENROUTER_API_KEY) {
       throw new Error('OPENROUTER_API_KEY not configured');
     }
-    this.openrouter = new OpenRouter({ apiKey: process.env.OPENROUTER_API_KEY });
+    this.openrouter = new OpenRouter({
+      apiKey: process.env.OPENROUTER_API_KEY,
+      timeoutMs: 30000,
+    });
   }
 
   async processMessage(prompt: string, retryCount = 0): Promise<string | null> {
@@ -98,7 +101,7 @@ class OpenRouterClient implements AIClient {
         model: OPENROUTER_MODEL_NAME,
         messages: [{ role: "user", content: prompt }],
         stream: true,
-        maxTokens: 1024
+        maxTokens: 2048
       });
 
       let responseText = "";
@@ -114,14 +117,23 @@ class OpenRouterClient implements AIClient {
       }
 
       return responseText || null;
-    } catch (error) {
-      // Retry on network/timeout errors
-      if (retryCount < MAX_RETRIES) {
-        logger.warn(`OpenRouter API error. Retry ${retryCount + 1}/${MAX_RETRIES}...`, error);
-        await new Promise(r => setTimeout(r, 500));
+    } catch (error: any) {
+      const isRetryable =
+        error.code === 'ECONNABORTED' ||
+        error.code === 'ETIMEDOUT' ||
+        error.status === 503 ||
+        error.status === 429 ||
+        error.status === 500;
+
+      // Retry with exponential backoff
+      if (retryCount < MAX_RETRIES && isRetryable) {
+        const delay = Math.pow(2, retryCount) * 1000;
+        logger.warn(`OpenRouter API error (${error.status || error.code || 'unknown'}). Retry ${retryCount + 1}/${MAX_RETRIES} after ${delay}ms...`);
+        await new Promise(r => setTimeout(r, delay));
         return this.processMessage(prompt, retryCount + 1);
       }
-      logger.error('OpenRouter API error', error);
+
+      logger.error('OpenRouter API error', { status: error.status, message: error.message });
       throw error;
     }
   }
@@ -135,15 +147,51 @@ class GroqClient implements AIClient {
     if (!process.env.GROQ_API_KEY) {
       throw new Error('GROQ_API_KEY not configured');
     }
-    this.groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    this.groq = new Groq({
+      apiKey: process.env.GROQ_API_KEY,
+      timeout: 30000,
+    });
   }
 
-  async processMessage(prompt: string): Promise<string | null> {
-    const completion = await this.groq.chat.completions.create({
-      messages: [{ role: "user", content: prompt }],
-      model: GROQ_MODEL_NAME,
-    });
-    return completion.choices[0]?.message?.content || null;
+  async processMessage(prompt: string, retryCount = 0): Promise<string | null> {
+    const MAX_RETRIES = 2;
+
+    try {
+      const completion = await this.groq.chat.completions.create({
+        messages: [{ role: "user", content: prompt }],
+        model: GROQ_MODEL_NAME,
+        max_tokens: 2048,
+      });
+
+      const responseText = completion.choices[0]?.message?.content || null;
+
+      // Retry on empty response
+      if (!responseText && retryCount < MAX_RETRIES) {
+        logger.warn(`Groq returned empty response. Retry ${retryCount + 1}/${MAX_RETRIES}...`);
+        await new Promise(r => setTimeout(r, 500));
+        return this.processMessage(prompt, retryCount + 1);
+      }
+
+      return responseText;
+    } catch (error: any) {
+      const isRetryable =
+        error.code === 'ECONNABORTED' ||
+        error.code === 'ETIMEDOUT' ||
+        error.status === 503 ||
+        error.status === 429 ||
+        error.status === 500;
+
+      // Retry with exponential backoff
+      if (retryCount < MAX_RETRIES && isRetryable) {
+        const delay = Math.pow(2, retryCount) * 1000;
+        logger.warn(`Groq API error (${error.status || error.code || 'unknown'}). Retry ${retryCount + 1}/${MAX_RETRIES} after ${delay}ms...`);
+        await new Promise(r => setTimeout(r, delay));
+        return this.processMessage(prompt, retryCount + 1);
+      }
+
+      logger.error('Groq API error', { status: error.status, message: error.message });
+      throw error;
+    }
   }
 }
 

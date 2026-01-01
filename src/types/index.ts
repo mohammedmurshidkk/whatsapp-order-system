@@ -175,6 +175,14 @@ export interface Message {
   direction: MessageDirection;
   content: string;
   created_at: string;
+  // Media fields (for images, videos, audio, stickers, documents)
+  message_type?: 'text' | 'image' | 'video' | 'audio' | 'document' | 'sticker';
+  media_url?: string | null;
+  media_mime_type?: string | null;
+  media_caption?: string | null;
+  media_filename?: string | null;
+  media_duration?: number | null;
+  media_size?: number | null;
 }
 
 // Order types
@@ -339,6 +347,10 @@ export interface WhatsAppWebhookMessage {
     mime_type: string;
   };
   voice?: {
+    id: string;
+    mime_type: string;
+  };
+  sticker?: {
     id: string;
     mime_type: string;
   };

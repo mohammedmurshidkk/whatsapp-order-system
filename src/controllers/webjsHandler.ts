@@ -93,6 +93,12 @@ export async function handleWebjsMessage(message: Message): Promise<void> {
       return;
     }
 
+    // Handle sticker messages - save for admin visibility, no AI processing
+    if (message.hasMedia && messageType === 'sticker') {
+      await handleStickerMessage(message, fromPhone, business);
+      return;
+    }
+
     // Handle text messages
     if (messageType === 'chat' && message.body) {
       await handleTextMessage(message, fromPhone, business);
@@ -272,6 +278,26 @@ async function handleImageMessage(
 
   await sendHumanLikeReply(message, imageResponse, sanitizedPhone);
   await saveOutgoingMessage(session.id, imageResponse);
+}
+
+/**
+ * Handle sticker message - save for admin visibility, no AI processing
+ */
+async function handleStickerMessage(
+  message: Message,
+  fromPhone: string,
+  business: { id: string; name: string; customer_support_phone?: string | null }
+): Promise<void> {
+  logger.info(`[WebJS] Sticker from ${fromPhone}`);
+
+  const customer = await findOrCreateCustomer(fromPhone, business.id);
+  const session = await findOrCreateSession(customer.id, business.id);
+
+  // Save sticker as a message for admin to see
+  await saveIncomingMessage(session.id, '[Sticker]');
+
+  // No automated response for stickers - just save for admin visibility
+  logger.debug(`[WebJS] Sticker saved for session ${session.id}`);
 }
 
 /**

@@ -1507,20 +1507,6 @@ export async function processMessage(
     replyMessage = `${business.welcome_message}\n\n${replyMessage}`;
   }
 
-  // Add Malayalam/Manglish acknowledgment if detected (friendly touch)
-  if (hasMalayalamScript) {
-    // Customer used Malayalam script - acknowledge in Malayalam
-    replyMessage = "മലയാളം മനസ്സിലായി! 😊 " + replyMessage;
-  } else if (isManglish && wasManglishNormalized) {
-    // Customer used Manglish - subtle acknowledgment (only occasionally)
-    // Don't add prefix for every message, just for first interaction or significant ones
-    const shouldAcknowledge = Math.random() < 0.3; // 30% chance to acknowledge
-    if (shouldAcknowledge && !replyMessage.includes('കേരള') && !replyMessage.includes('😊')) {
-      // Add subtle Kerala touch occasionally
-      replyMessage = replyMessage + " 😊";
-    }
-  }
-
   // Save outgoing message
   await saveOutgoingMessage(session.id, replyMessage);
 
@@ -1892,6 +1878,34 @@ export async function handleWhatsAppWebhook(
             continue;
           }
 
+          // Handle sticker messages - save for admin to see, no AI processing
+          if (message.type === 'sticker' && message.sticker) {
+            logger.info(`Sticker received from ${phone}: ${message.sticker.id}`);
+
+            const customer = await findOrCreateCustomer(phone, business.id, customerName);
+            const session = await findOrCreateSession(customer.id, business.id);
+
+            // Download and store the sticker
+            const mediaResult = await processIncomingMedia(
+              message.sticker.id,
+              message.sticker.mime_type || 'image/webp',
+              business.id
+            );
+
+            // Save message with sticker info (admin can see it in chat)
+            await saveIncomingMediaMessage(
+              session.id,
+              'sticker',
+              mediaResult?.mediaUrl || '',
+              message.sticker.mime_type || 'image/webp',
+              { size: mediaResult?.fileSize }
+            );
+
+            // No automated response for stickers - just save for admin visibility
+            logger.debug(`Sticker saved for session ${session.id}`);
+            continue;
+          }
+
           // Handle location messages (Feature 3)
           if (message.type === 'location' && message.location) {
             const location = message.location;
@@ -1912,26 +1926,40 @@ export async function handleWhatsAppWebhook(
 
               // Use address/name from location if available, otherwise reverse geocode
               // The lat/long will be stored in separate columns for map display
-              let displayAddress = location.address || location.name;
+              let displayAddress: string | null = location.address || location.name || null;
               logger.info(`[DEBUG-LOC] Step 5: WhatsApp address=${displayAddress || 'NONE'}`);
 
-              // If no address provided by WhatsApp, reverse geocode the coordinates
+              // If no address provided by WhatsApp, try reverse geocoding
               if (!displayAddress) {
                 logger.info(`[DEBUG-LOC] Step 5a: Reverse geocoding ${location.latitude}, ${location.longitude}`);
-                displayAddress = await getAddressFromCoordinates(location.latitude, location.longitude);
-                logger.info(`[DEBUG-LOC] Step 5a done: geocoded address=${displayAddress}`);
+                try {
+                  const geocodedAddress = await getAddressFromCoordinates(location.latitude, location.longitude);
+                  // Check if it's just coordinates (geocoding failed internally)
+                  if (geocodedAddress && geocodedAddress.match(/^-?\d+\.\d+,\s*-?\d+\.\d+$/)) {
+                    logger.info(`[DEBUG-LOC] Step 5a: Geocoding returned coordinates, treating as null address`);
+                    displayAddress = null;
+                  } else {
+                    displayAddress = geocodedAddress;
+                    logger.info(`[DEBUG-LOC] Step 5a done: geocoded address=${displayAddress}`);
+                  }
+                } catch (geoError) {
+                  // Geocoding failed - address stays null, lat/long will still be saved
+                  logger.warn(`[DEBUG-LOC] Geocoding failed, will save lat/long only:`, geoError);
+                  displayAddress = null;
+                }
               }
 
-              const logAddress = displayAddress || `${location.latitude}, ${location.longitude}`;
+              const logAddress = displayAddress || `Lat: ${location.latitude}, Long: ${location.longitude}`;
               logger.info(`[DEBUG-LOC] Step 6: Saving incoming message...`);
               await saveIncomingMessage(session.id, `[Location: ${logAddress}]`);
               logger.info(`[DEBUG-LOC] Step 6 done`);
 
               // If customer is in delivery flow and hasn't provided address yet
-              if (sessionWithItems?.fulfillment_type === 'delivery' && !sessionWithItems.delivery_address) {
-                logger.info(`[DEBUG-LOC] Step 7: Updating delivery info...`);
+              // Always save lat/long, address can be null (frontend will reverse geocode)
+              if (sessionWithItems?.fulfillment_type === 'delivery' && !sessionWithItems.delivery_address && !sessionWithItems.delivery_latitude) {
+                logger.info(`[DEBUG-LOC] Step 7: Updating delivery info (address=${displayAddress || 'NULL'})...`);
                 await updateSessionDeliveryInfo(session.id, {
-                  address: displayAddress,
+                  address: displayAddress, // Can be null if geocoding failed
                   latitude: location.latitude,
                   longitude: location.longitude,
                 });

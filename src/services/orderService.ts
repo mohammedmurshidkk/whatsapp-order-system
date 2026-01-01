@@ -309,8 +309,13 @@ export async function generateOrderSummary(
   // Add fulfillment info if available
   if (session.fulfillment_type) {
     summary += '\n';
-    if (session.fulfillment_type === 'delivery' && session.delivery_address) {
-      summary += `🚚 Delivery to: ${session.delivery_address}\n`;
+    if (session.fulfillment_type === 'delivery' && (session.delivery_address || session.delivery_latitude)) {
+      // Show address if available, otherwise show coordinates (frontend can reverse geocode)
+      if (session.delivery_address) {
+        summary += `🚚 Delivery to: ${session.delivery_address}\n`;
+      } else if (session.delivery_latitude && session.delivery_longitude) {
+        summary += `🚚 Delivery Location (Lat: ${session.delivery_latitude}, Long: ${session.delivery_longitude})\n`;
+      }
       if (session.delivery_time) {
         // Format time using timezone-aware formatter
         summary += `⏰ Time: ${formatDeliveryTime(session.delivery_time, timezone)}\n`;
@@ -475,7 +480,7 @@ Customer ID: ${order.customer_id.substring(0, 8)}
 Status: ${order.status}
 
 ${order.fulfillment_type === 'delivery' ? '🚚 DELIVERY' : order.fulfillment_type === 'takeaway' ? '📍 TAKEAWAY' : ''}
-${order.delivery_address ? `Address: ${order.delivery_address}` : ''}
+${order.delivery_address ? `Address: ${order.delivery_address}` : (order.delivery_latitude && order.delivery_longitude ? `Location: (Lat: ${order.delivery_latitude}, Long: ${order.delivery_longitude})` : '')}
 ${order.pickup_outlet_id ? `Pickup${outletInfo}` : ''}
 ${order.delivery_time ? `Time: ${formatDeliveryTime(order.delivery_time, timezone)}` : ''}
 ${order.pickup_time ? `Pickup Time: ${formatDeliveryTime(order.pickup_time, timezone)}` : ''}

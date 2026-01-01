@@ -1,5 +1,17 @@
 import axios from 'axios';
+import https from 'https';
+import dns from 'dns';
 import { logger } from '../utils/logger';
+
+// Force IPv4 to avoid AWS IPv6 issues with some external services
+dns.setDefaultResultOrder('ipv4first');
+
+// Create HTTPS agent that forces IPv4
+const httpsAgent = new https.Agent({
+  family: 4, // Force IPv4
+  timeout: 10000,
+  keepAlive: true,
+});
 
 interface ReverseGeocodeResult {
   address: string;
@@ -14,6 +26,7 @@ interface ReverseGeocodeResult {
 /**
  * Reverse geocode coordinates to address using Nominatim (OpenStreetMap)
  * Free service, no API key required, but has rate limits (1 request/second)
+ * Configured with IPv4 preference for AWS compatibility
  *
  * @param latitude - Latitude coordinate
  * @param longitude - Longitude coordinate
@@ -36,10 +49,12 @@ export async function reverseGeocode(
       },
       headers: {
         // Nominatim requires a User-Agent header
-        'User-Agent': 'WhatsAppOrderingSystem/1.0',
+        'User-Agent': 'WhatsAppOrderingSystem/1.0 (contact@example.com)',
         'Accept-Language': 'en',
+        'Accept': 'application/json',
       },
-      timeout: 5000, // 5 second timeout
+      timeout: 10000, // 10 second timeout (AWS can be slow)
+      httpsAgent, // Force IPv4
     });
 
     if (response.data && response.data.display_name) {
@@ -99,8 +114,14 @@ export async function reverseGeocode(
 
     logger.warn(`No address found for coordinates: ${latitude}, ${longitude}`);
     return null;
-  } catch (error) {
-    logger.error(`Reverse geocoding failed for ${latitude}, ${longitude}:`, error);
+  } catch (error: any) {
+    // Log more details for debugging AWS-specific issues
+    const errorDetails = {
+      message: error?.message || 'Unknown error',
+      code: error?.code || 'N/A',
+      status: error?.response?.status || 'N/A',
+    };
+    logger.error(`Reverse geocoding failed for ${latitude}, ${longitude}:`, errorDetails);
     return null;
   }
 }
@@ -117,12 +138,18 @@ export async function getAddressFromCoordinates(
   latitude: number,
   longitude: number
 ): Promise<string> {
-  const result = await reverseGeocode(latitude, longitude);
+  try {
+    const result = await reverseGeocode(latitude, longitude);
 
-  if (result && result.address) {
-    return result.address;
+    if (result && result.address) {
+      return result.address;
+    }
+
+    // Fallback to coordinates if geocoding fails
+    return `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
+  } catch (error) {
+    // Extra safety net - should not reach here but just in case
+    logger.error(`getAddressFromCoordinates unexpected error:`, error);
+    return `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
   }
-
-  // Fallback to coordinates if geocoding fails
-  return `Location: ${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
 }

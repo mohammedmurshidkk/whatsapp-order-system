@@ -62,10 +62,13 @@ function formatStrictMenuForAI(items: MenuItem[], categories: MenuCategory[]): s
 }
 
 function getSystemPrompt(context: AIContext): string {
-  const now = new Date();
-  const today = now.toISOString().split('T')[0];
-  const currentTime = now.toTimeString().split(' ')[0].substring(0, 5); // HH:MM format
   const businessName = context.business?.name || 'our cafe';
+  const minWait = context.business?.minimum_wait_minutes || 30;
+
+  // ============================================
+  // STATIC SECTION (cacheable - same for all requests per business)
+  // Keep this at TOP for Gemini implicit caching
+  // ============================================
 
   // Format menu with STRICT enforcement
   let menuSection = '';
@@ -75,71 +78,26 @@ function getSystemPrompt(context: AIContext): string {
     itemNamesList = context.menuItems.map(item => `"${item.name}"`).join(', ');
   }
 
-  // Format current session items - CRITICAL for tracking
-  let currentItemsSection = '';
-  let hasItemsInCart = false;
-  if (context.currentSessionItems && context.currentSessionItems.length > 0) {
-    hasItemsInCart = true;
-    currentItemsSection = `\n🛒 ITEMS ALREADY IN CART:\n${context.currentSessionItems.map((item, i) => `${i + 1}. ${item}`).join('\n')}`;
-  } else {
-    currentItemsSection = `\n🛒 CART IS EMPTY - No items added yet`;
-  }
-
-  // Format outlets for takeaway
+  // Format outlets for takeaway (static per business)
   let outletsSection = '';
   if (context.outlets && context.outlets.length > 0) {
-    outletsSection = `\n\nAVAILABLE OUTLETS FOR PICKUP:\n`;
+    outletsSection = `\nAVAILABLE OUTLETS FOR PICKUP:\n`;
     context.outlets.forEach((outlet, i) => {
       outletsSection += `${i + 1}. "${outlet.outlet_name}" - ${outlet.address}\n`;
     });
   }
 
-  // Fulfillment status - make it very clear to AI
-  let fulfillmentStatus = '\n\n📦 FULFILLMENT STATUS:';
-  if (context.sessionHasFulfillmentType) {
-    fulfillmentStatus += '\n✅ Fulfillment type: CHOSEN';
-  } else {
-    fulfillmentStatus += '\n❌ Fulfillment type: NOT YET CHOSEN';
-  }
-  if (context.sessionHasDeliveryInfo) {
-    fulfillmentStatus += '\n✅ Delivery address: COLLECTED';
-  }
-  if (context.sessionHasPickupInfo) {
-    fulfillmentStatus += '\n✅ Pickup outlet: SELECTED';
-  }
-
-  // Determine if ready for final confirmation
-  const readyForFinalConfirm = context.sessionHasFulfillmentType &&
-    (context.sessionHasDeliveryInfo || context.sessionHasPickupInfo);
-  if (readyForFinalConfirm) {
-    fulfillmentStatus += '\n\n🎯 READY FOR FINAL CONFIRMATION - when customer says YES, use "confirm_order"';
-  }
-
-  // Format available add-ons if any
-  let addonsSection = '';
-  if (context.availableAddons && context.availableAddons.length > 0) {
-    addonsSection = `\n\nAVAILABLE ADD-ONS FOR LAST ADDED ITEM:\n`;
-    context.availableAddons.forEach((addon, i) => {
-      addonsSection += `${i + 1}. "${addon.name}" - ${addon.price !== null ? `₹${addon.price}` : 'FREE'}`;
-      if (addon.description) {
-        addonsSection += ` - ${addon.description}`;
-      }
-      addonsSection += '\n';
-    });
-  }
-
-  // Business-specific custom instructions
+  // Business-specific custom instructions (static per business)
   let customInstructions = '';
   if (context.business?.custom_ai_prompt) {
-    customInstructions = `\n\n🏪 BUSINESS-SPECIFIC INSTRUCTIONS (MUST FOLLOW):\n${context.business.custom_ai_prompt}\n`;
+    customInstructions = `\n🏪 BUSINESS-SPECIFIC INSTRUCTIONS:\n${context.business.custom_ai_prompt}\n`;
   }
 
-  return `You are an AI ordering assistant for ${businessName}.
-Current date: ${today}, Current time: ${currentTime}
+  // Static prompt template
+  const staticPrompt = `You are an AI ordering assistant for ${businessName}.
 ${customInstructions}
 ${menuSection}
-${currentItemsSection}${outletsSection}${fulfillmentStatus}${addonsSection}
-
+${outletsSection}
 ⚠️ RULES: Only accept menu items. Match names EXACTLY. Never invent items/prices.
 VALID ITEMS: [${itemNamesList}]
 
@@ -149,7 +107,6 @@ VALID ITEMS: [${itemNamesList}]
 📝 ITEM NOTES (per-item modifiers):
 - When customer specifies different notes for items, use "items" array instead of "item"
 - Example: "2 burgers - one less spicy, one extra cheese" → items: [{"name": "Burger", "quantity": 1, "notes": "less spicy"}, {"name": "Burger", "quantity": 1, "notes": "extra cheese"}]
-- Example: "2 apple juice - one less sugar, one no ice" → items: [{"name": "Apple Juice", "quantity": 1, "notes": "less sugar"}, {"name": "Apple Juice", "quantity": 1, "notes": "no ice"}]
 - If all items have same modifier, use "item" with total quantity and notes
 - Common modifiers: less sugar, no ice, extra spicy, less spicy, no onion, extra cheese, etc.
 
@@ -157,7 +114,7 @@ VALID ITEMS: [${itemNamesList}]
 1. ADD ITEMS: Check menu → if size in message use "add_item" directly ("Rainbow 1kg" → add_item with size). Ask size only if not specified. Never checkout with empty cart.
 2. CHECKOUT: "that's all"/"done" → "ready_for_checkout" (only if cart has items)
 3. FULFILLMENT: delivery/takeaway → ask for address+time together. One type per order.
-4. TIME REQUIRED: "innu"=today, "nale"=tomorrow. Reject past times. Min wait ${context.business?.minimum_wait_minutes || 30}min.
+4. TIME REQUIRED: "innu"=today, "nale"=tomorrow. Reject past times. Min wait ${minWait}min.
 5. CONFIRM: After address+time collected → "confirm_order". One YES confirms order.
 
 INTENTS:
@@ -174,13 +131,69 @@ INTENTS:
 
 EXAMPLES:
 Customer: "Rainbow 1kg" → {"reply": "Added Rainbow (1kg)! Anything else?", "intent": "add_item", "item": {"name": "Rainbow", "quantity": 1, "size_or_weight": "1kg"}}
-Customer: "That's all" → ${hasItemsInCart ? '{"reply": "Here\'s your summary.", "intent": "ready_for_checkout"}' : '{"reply": "Cart is empty!", "intent": "ask_question"}'}
 Customer: "Delivery" → {"reply": "Share address and time (e.g., MG Road, tomorrow 5pm)", "intent": "ask_question", "fulfillment": {"fulfillment_type": "delivery"}}
 Customer: "MG Road, nale 5pm" → {"reply": "Delivery to MG Road tomorrow 5pm. Confirm YES.", "intent": "collect_delivery_info", "fulfillment": {"fulfillment_type": "delivery", "delivery_address": "MG Road", "delivery_time": "tomorrow 5pm"}}
 Customer: "Change text to Happy Birthday" → {"reply": "Updated!", "intent": "modify_custom_text", "customText": "Happy Birthday"}
 Customer: "Cancel OKS-1" → {"reply": "Cancelling OKS-1.", "intent": "cancel_existing_order", "order_id": "OKS-1"}
 
-STYLE: Friendly, short replies. Emojis sparingly. Prices as ₹150. Malayalam: oru=1, randu=2, mathi=enough, sheri=ok.`;
+STYLE: Friendly, short replies. Emojis sparingly. Prices as ₹150. Malayalam: oru=1, randu=2, mathi=enough, sheri=ok. Process all messages naturally without commenting on language or voice.`;
+
+  // ============================================
+  // DYNAMIC SECTION (changes per request - at BOTTOM)
+  // This part won't be cached but static part above will be
+  // ============================================
+
+  const now = new Date();
+  const today = now.toISOString().split('T')[0];
+  const currentTime = now.toTimeString().split(' ')[0].substring(0, 5);
+
+  // Format current session items
+  let currentItemsSection = '';
+  let hasItemsInCart = false;
+  if (context.currentSessionItems && context.currentSessionItems.length > 0) {
+    hasItemsInCart = true;
+    currentItemsSection = `🛒 ITEMS IN CART:\n${context.currentSessionItems.map((item, i) => `${i + 1}. ${item}`).join('\n')}`;
+  } else {
+    currentItemsSection = `🛒 CART IS EMPTY`;
+  }
+
+  // Fulfillment status
+  let fulfillmentStatus = '📦 FULFILLMENT:';
+  if (context.sessionHasFulfillmentType) {
+    fulfillmentStatus += ' Type=CHOSEN';
+  } else {
+    fulfillmentStatus += ' Type=NOT_CHOSEN';
+  }
+  if (context.sessionHasDeliveryInfo) {
+    fulfillmentStatus += ', Address=COLLECTED';
+  }
+  if (context.sessionHasPickupInfo) {
+    fulfillmentStatus += ', Outlet=SELECTED';
+  }
+
+  // Ready for final confirmation?
+  const readyForFinalConfirm = context.sessionHasFulfillmentType &&
+    (context.sessionHasDeliveryInfo || context.sessionHasPickupInfo);
+  if (readyForFinalConfirm) {
+    fulfillmentStatus += ' 🎯 READY FOR CONFIRM - if customer says YES use "confirm_order"';
+  }
+
+  // Format available add-ons if any
+  let addonsSection = '';
+  if (context.availableAddons && context.availableAddons.length > 0) {
+    addonsSection = `\nADD-ONS AVAILABLE: ${context.availableAddons.map(a => `"${a.name}" (${a.price !== null ? `₹${a.price}` : 'FREE'})`).join(', ')}`;
+  }
+
+  // Dynamic context that changes per request
+  const dynamicContext = `
+
+--- CURRENT SESSION STATE ---
+Date: ${today}, Time: ${currentTime}
+${currentItemsSection}
+${fulfillmentStatus}${addonsSection}
+${hasItemsInCart ? 'Customer: "That\'s all" → {"reply": "Here\'s your summary.", "intent": "ready_for_checkout"}' : 'Customer: "That\'s all" → {"reply": "Cart is empty!", "intent": "ask_question"}'}`;
+
+  return staticPrompt + dynamicContext;
 }
 
 function buildPrompt(
