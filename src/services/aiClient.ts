@@ -33,7 +33,7 @@ class GeminiClient implements AIClient {
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
             temperature: 0.3,
-            maxOutputTokens: 500,
+            maxOutputTokens: 1024,
           },
         },
         {
@@ -98,7 +98,7 @@ class OpenRouterClient implements AIClient {
         model: OPENROUTER_MODEL_NAME,
         messages: [{ role: "user", content: prompt }],
         stream: true,
-        maxTokens: 500
+        maxTokens: 1024
       });
 
       let responseText = "";
