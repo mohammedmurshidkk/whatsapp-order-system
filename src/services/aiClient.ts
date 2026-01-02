@@ -17,6 +17,7 @@ class GeminiClient implements AIClient {
 
   constructor() {
     this.apiKey = process.env.GEMINI_API_KEY!;
+    logger.info('GEM KEY: ', process.env.GEMINI_API_KEY)
     if (!this.apiKey) {
       throw new Error('GEMINI_API_KEY not configured');
     }

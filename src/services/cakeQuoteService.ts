@@ -28,6 +28,7 @@ async function analyzeImageWithGemini(
   customerFlavor?: string
 ): Promise<CakeAIAnalysis | null> {
   const apiKey = process.env.GEMINI_API_KEY;
+  logger.info('GEM KEY: ', apiKey)
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY not configured');
   }

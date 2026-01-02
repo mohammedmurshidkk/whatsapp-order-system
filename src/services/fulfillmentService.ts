@@ -46,26 +46,54 @@ export async function updateSessionFulfillmentType(
 
 /**
  * Update session with delivery information
+ * IMPORTANT: Only updates fields that are explicitly provided.
+ * If latitude/longitude are not provided, existing values are preserved.
  */
 export async function updateSessionDeliveryInfo(
   sessionId: string,
   deliveryInfo: {
-    address: string | null; // Can be null if geocoding failed (lat/long still saved)
+    address?: string | null; // Can be null if geocoding failed (lat/long still saved)
     time?: string;
     latitude?: number;
     longitude?: number;
     notes?: string;
   }
 ): Promise<void> {
+  // Build update object with only provided fields
+  // This prevents overwriting lat/long with NULL when AI extracts address text
+  const updateData: Record<string, unknown> = {};
+
+  // Only update address if explicitly provided (including null for clearing)
+  if ('address' in deliveryInfo) {
+    updateData.delivery_address = deliveryInfo.address || null;
+  }
+
+  if (deliveryInfo.time !== undefined) {
+    updateData.delivery_time = deliveryInfo.time || null;
+  }
+
+  // Only update lat/long if explicitly provided (not undefined)
+  if (deliveryInfo.latitude !== undefined) {
+    updateData.delivery_latitude = deliveryInfo.latitude;
+  }
+
+  if (deliveryInfo.longitude !== undefined) {
+    updateData.delivery_longitude = deliveryInfo.longitude;
+  }
+
+  if (deliveryInfo.notes !== undefined) {
+    updateData.fulfillment_notes = deliveryInfo.notes || null;
+  }
+
+  // Skip update if nothing to update
+  if (Object.keys(updateData).length === 0) {
+    logger.info(`No delivery info to update for session ${sessionId}`);
+    return;
+  }
+
   const { error } = await supabase
     .from('sessions')
-    .update({
-      delivery_address: deliveryInfo.address || null,
-      delivery_time: deliveryInfo.time || null,
-      delivery_latitude: deliveryInfo.latitude || null,
-      delivery_longitude: deliveryInfo.longitude || null,
-      fulfillment_notes: deliveryInfo.notes || null,
-    })
+    .update(updateData)
     .eq('id', sessionId);
 
   if (error) {
@@ -73,7 +101,7 @@ export async function updateSessionDeliveryInfo(
     throw new Error('Failed to update delivery information');
   }
 
-  logger.info(`Delivery info updated for session ${sessionId}`);
+  logger.info(`Delivery info updated for session ${sessionId}: ${JSON.stringify(updateData)}`);
 }
 
 /**

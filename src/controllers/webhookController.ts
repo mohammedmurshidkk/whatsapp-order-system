@@ -1055,7 +1055,10 @@ export async function processMessage(
           const addressFromAI = aiResponse.fulfillment.delivery_address;
 
           // Skip if AI extracted coordinate format (not a real address)
-          const isCoordinateFormat = /^(Lat|Location|Latitude)[\s:]*-?\d+\.\d+/i.test(addressFromAI);
+          // Patterns: "Lat: X, Long: Y", "Provided Location (Lat: X", "Location: X, Y", etc.
+          const isCoordinateFormat = /^(Lat|Location|Latitude|Provided Location)[\s:(]*-?\d+\.?\d*/i.test(addressFromAI) ||
+            /\(Lat[\s:]*-?\d+\.?\d*.*Long[\s:]*-?\d+\.?\d*\)/i.test(addressFromAI) ||
+            /Lat[\s:]*-?\d+\.?\d*.*Long[\s:]*-?\d+\.?\d*/i.test(addressFromAI);
 
           // Skip if session already has lat/long (location was shared via WhatsApp)
           const sessionData = await getSessionWithItems(session.id);
@@ -1063,11 +1066,45 @@ export async function processMessage(
 
           if (isCoordinateFormat) {
             logger.info(`Skipping coordinate format address from AI: ${addressFromAI}`);
-          } else if (hasLocationAlready && !sessionData?.delivery_address) {
-            // Has lat/long but no address - don't overwrite with AI extracted text
-            logger.info(`Skipping AI address - session already has location coordinates`);
+            // Still try to save time if provided
+            let deliveryTime = aiResponse.fulfillment.delivery_time
+              ? parseDeliveryTime(aiResponse.fulfillment.delivery_time, businessTimezone)
+              : null;
+            if (deliveryTime) {
+              await updateSessionDeliveryInfo(session.id, { time: deliveryTime });
+              logger.info(`Delivery time saved (skipped coord address): ${deliveryTime}`);
+            }
+          } else if (hasLocationAlready) {
+            // Has lat/long from WhatsApp location - preserve it, only update time
+            logger.info(`Session already has location coordinates - preserving existing data`);
+            let deliveryTime = aiResponse.fulfillment.delivery_time
+              ? parseDeliveryTime(aiResponse.fulfillment.delivery_time, businessTimezone)
+              : null;
+
+            if (!deliveryTime) {
+              const extracted = extractAddressAndTime(messageText, businessTimezone);
+              if (extracted.time) {
+                deliveryTime = extracted.time;
+              }
+            }
+
+            if (deliveryTime && !sessionData?.delivery_time) {
+              await updateSessionDeliveryInfo(session.id, { time: deliveryTime });
+              logger.info(`Delivery time saved (preserving location): ${deliveryTime}`);
+
+              // Show final invoice
+              const deliverySummary = await generateOrderSummary(session.id, {
+                includeCta: true,
+                ctaMessage: '\nPlease review your order. Reply *YES* to confirm or you can add more items.',
+                timezone: businessTimezone
+              });
+              replyMessage = deliverySummary;
+            } else if (!sessionData?.delivery_time) {
+              // Need to ask for time
+              replyMessage = `📍 Location saved!\n\n⏰ What time would you like delivery?\n_Examples: 'today 5pm', 'tomorrow 3pm', 'nale 4pm', 'innu evening'_`;
+            }
           } else {
-            // Try to extract time from AI response first
+            // No existing location - save the AI-extracted address
             let deliveryTime = aiResponse.fulfillment.delivery_time
               ? parseDeliveryTime(aiResponse.fulfillment.delivery_time, businessTimezone)
               : null;
@@ -1207,10 +1244,15 @@ export async function processMessage(
       break;
 
     case 'confirm_order':
+      // Check if session has delivery location (address OR lat/long)
+      const hasDeliveryLocation = latestSessionData.delivery_address ||
+        (latestSessionData.delivery_latitude && latestSessionData.delivery_longitude);
+
       // Track if fulfillment was just collected in THIS message (not a real confirmation)
       // True if: address/outlet was just provided, OR time was just provided (not a "yes" to confirm)
+      // IMPORTANT: Treat lat/long as equivalent to address for location check
       const fulfillmentJustCollected = aiResponse.fulfillment && (
-        (aiResponse.fulfillment.delivery_address && !latestSessionData.delivery_address) ||
+        (aiResponse.fulfillment.delivery_address && !hasDeliveryLocation) ||
         (aiResponse.fulfillment.pickup_outlet_id && !latestSessionData.pickup_outlet_id) ||
         (aiResponse.fulfillment.delivery_time && !latestSessionData.delivery_time) ||
         (aiResponse.fulfillment.pickup_time && !latestSessionData.pickup_time)
@@ -1218,8 +1260,9 @@ export async function processMessage(
 
       // Check if fulfillment is ALREADY COMPLETE - don't overwrite with AI's re-sent data
       // This prevents AI hallucinations (e.g., "10PM" becoming "11:00 AM") from breaking orders
+      // IMPORTANT: Treat lat/long as equivalent to address for delivery complete check
       const fulfillmentAlreadyComplete = latestSessionData.fulfillment_type && (
-        (latestSessionData.fulfillment_type === 'delivery' && latestSessionData.delivery_address && latestSessionData.delivery_time) ||
+        (latestSessionData.fulfillment_type === 'delivery' && hasDeliveryLocation && latestSessionData.delivery_time) ||
         (latestSessionData.fulfillment_type === 'takeaway' && latestSessionData.pickup_outlet_id && latestSessionData.pickup_time)
       );
 
@@ -1238,6 +1281,16 @@ export async function processMessage(
 
         // Save delivery info
         if (aiResponse.fulfillment.fulfillment_type === 'delivery' && aiResponse.fulfillment.delivery_address) {
+          const addressFromAI = aiResponse.fulfillment.delivery_address;
+
+          // Skip if AI extracted coordinate format (not a real address)
+          const isCoordinateFormat = /^(Lat|Location|Latitude|Provided Location)[\s:(]*-?\d+\.?\d*/i.test(addressFromAI) ||
+            /\(Lat[\s:]*-?\d+\.?\d*.*Long[\s:]*-?\d+\.?\d*\)/i.test(addressFromAI) ||
+            /Lat[\s:]*-?\d+\.?\d*.*Long[\s:]*-?\d+\.?\d*/i.test(addressFromAI);
+
+          // Check if session already has lat/long (location was shared via WhatsApp)
+          const hasLocationAlready = latestSessionData.delivery_latitude && latestSessionData.delivery_longitude;
+
           let deliveryTime = aiResponse.fulfillment.delivery_time
             ? parseDeliveryTime(aiResponse.fulfillment.delivery_time, businessTimezone)
             : null;
@@ -1251,10 +1304,18 @@ export async function processMessage(
             }
           }
 
-          await updateSessionDeliveryInfo(session.id, {
-            address: aiResponse.fulfillment.delivery_address,
-            time: deliveryTime || undefined,
-          });
+          if (isCoordinateFormat || hasLocationAlready) {
+            // Skip saving AI address - preserve existing lat/long, only save time if provided
+            logger.info(`Skipping AI address in confirm_order (coord format: ${isCoordinateFormat}, has location: ${hasLocationAlready})`);
+            if (deliveryTime) {
+              await updateSessionDeliveryInfo(session.id, { time: deliveryTime });
+            }
+          } else {
+            await updateSessionDeliveryInfo(session.id, {
+              address: addressFromAI,
+              time: deliveryTime || undefined,
+            });
+          }
         }
 
         // Save pickup info
@@ -1329,9 +1390,11 @@ export async function processMessage(
         break;
       }
 
-      // For delivery, check if address is provided
-      if (latestSession.fulfillment_type === 'delivery' && !latestSession.delivery_address) {
-        logger.warn(`⚠️ CONFIRM_ORDER attempted but no delivery address! Session: ${session.id}`);
+      // For delivery, check if address OR location is provided
+      const hasDeliveryLocationForValidation = latestSession.delivery_address ||
+        (latestSession.delivery_latitude && latestSession.delivery_longitude);
+      if (latestSession.fulfillment_type === 'delivery' && !hasDeliveryLocationForValidation) {
+        logger.warn(`⚠️ CONFIRM_ORDER attempted but no delivery address/location! Session: ${session.id}`);
         replyMessage = "Please share your delivery address to complete the order.";
         break;
       }
@@ -1453,6 +1516,17 @@ export async function processMessage(
         // Handle delivery info
         if (aiResponse.fulfillment.fulfillment_type === 'delivery') {
           if (aiResponse.fulfillment.delivery_address) {
+            const addressFromAI = aiResponse.fulfillment.delivery_address;
+
+            // Skip if AI extracted coordinate format (not a real address)
+            const isCoordinateFormat = /^(Lat|Location|Latitude|Provided Location)[\s:(]*-?\d+\.?\d*/i.test(addressFromAI) ||
+              /\(Lat[\s:]*-?\d+\.?\d*.*Long[\s:]*-?\d+\.?\d*\)/i.test(addressFromAI) ||
+              /Lat[\s:]*-?\d+\.?\d*.*Long[\s:]*-?\d+\.?\d*/i.test(addressFromAI);
+
+            // Check if session already has lat/long
+            const sessionData = await getSessionWithItems(session.id);
+            const hasLocationAlready = sessionData?.delivery_latitude && sessionData?.delivery_longitude;
+
             let deliveryTime = aiResponse.fulfillment.delivery_time
               ? parseDeliveryTime(aiResponse.fulfillment.delivery_time, businessTimezone)
               : null;
@@ -1466,16 +1540,24 @@ export async function processMessage(
               }
             }
 
-            await updateSessionDeliveryInfo(session.id, {
-              address: aiResponse.fulfillment.delivery_address,
-              time: deliveryTime || undefined,
-              notes: aiResponse.fulfillment.fulfillment_notes,
-            });
-            logger.info(`Delivery info saved: ${aiResponse.fulfillment.delivery_address}, time: ${deliveryTime || 'not provided'}`);
+            if (isCoordinateFormat || hasLocationAlready) {
+              // Skip saving AI address - preserve existing lat/long, only save time if provided
+              logger.info(`Skipping AI address in ask_question (coord format: ${isCoordinateFormat}, has location: ${hasLocationAlready})`);
+              if (deliveryTime) {
+                await updateSessionDeliveryInfo(session.id, { time: deliveryTime });
+              }
+            } else {
+              await updateSessionDeliveryInfo(session.id, {
+                address: addressFromAI,
+                time: deliveryTime || undefined,
+                notes: aiResponse.fulfillment.fulfillment_notes,
+              });
+              logger.info(`Delivery info saved: ${addressFromAI}, time: ${deliveryTime || 'not provided'}`);
 
-            // If no time provided, prompt for it
-            if (!deliveryTime) {
-              replyMessage = `Got it, delivery to ${aiResponse.fulfillment.delivery_address}.\n\n⏰ What time would you like delivery?\n_Examples: 'today 5pm', 'tomorrow 3pm', 'nale 4pm', 'innu evening'_`;
+              // If no time provided, prompt for it
+              if (!deliveryTime) {
+                replyMessage = `Got it, delivery to ${addressFromAI}.\n\n⏰ What time would you like delivery?\n_Examples: 'today 5pm', 'tomorrow 3pm', 'nale 4pm', 'innu evening'_`;
+              }
             }
           }
         }
@@ -1958,7 +2040,7 @@ export async function handleWhatsAppWebhook(
                 }
               }
 
-              const logAddress = displayAddress || `Lat: ${location.latitude}, Long: ${location.longitude}`;
+              const logAddress = displayAddress;
               logger.info(`[DEBUG-LOC] Step 6: Saving incoming message...`);
               await saveIncomingMessage(session.id, `[Location: ${logAddress}]`);
               logger.info(`[DEBUG-LOC] Step 6 done`);
@@ -1997,7 +2079,17 @@ export async function handleWhatsAppWebhook(
                   logger.info(`[DEBUG-LOC] Step 8b done`);
                 }
               } else {
-                logger.info(`[DEBUG-LOC] Step 9: Not in delivery flow, sending generic reply...`);
+                // Not in delivery flow yet OR already has location - still save it for later use
+                logger.info(`[DEBUG-LOC] Step 9: Saving location for future use...`);
+
+                // Save location to session (will be used when user chooses delivery later)
+                await updateSessionDeliveryInfo(session.id, {
+                  address: displayAddress, // Can be null if geocoding failed
+                  latitude: location.latitude,
+                  longitude: location.longitude,
+                });
+                logger.info(`[DEBUG-LOC] Step 9: Location saved (lat=${location.latitude}, long=${location.longitude}, addr=${displayAddress || 'NULL'})`);
+
                 const locationReply = "Thanks for sharing your location! 📍 We've saved it for your delivery.";
                 await sendWhatsAppMessage(phone, locationReply);
                 await saveOutgoingMessage(session.id, locationReply);
