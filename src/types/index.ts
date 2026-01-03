@@ -91,6 +91,10 @@ export interface MenuCategory {
   created_at: string;
   custom_text_prompt?: string | null; // e.g., "What should we write on the cake?" (expects input)
   category_note?: string | null; // Display-only message (no input expected)
+  // Custom weight pricing (e.g., cakes can be ordered in any weight)
+  allows_custom_weight?: boolean;
+  custom_weight_base_size?: string | null; // e.g., "1kg" - size to use for per-kg rate
+  custom_weight_min_grams?: number | null; // e.g., 500 - minimum weight allowed
 }
 
 export interface MenuItemSize {

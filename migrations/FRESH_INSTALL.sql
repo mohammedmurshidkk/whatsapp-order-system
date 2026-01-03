@@ -183,6 +183,9 @@ CREATE TABLE menu_categories (
   is_active BOOLEAN DEFAULT true,
   custom_text_prompt TEXT,
   category_note TEXT,
+  allows_custom_weight BOOLEAN DEFAULT false,
+  custom_weight_base_size VARCHAR(50),
+  custom_weight_min_grams INTEGER DEFAULT 500,
   created_at TIMESTAMP DEFAULT NOW()
 );
 

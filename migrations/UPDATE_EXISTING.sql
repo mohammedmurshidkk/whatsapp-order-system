@@ -36,6 +36,11 @@ ALTER TABLE menu_categories ADD COLUMN IF NOT EXISTS custom_text_prompt TEXT;
 -- Add category_note for display-only messages (no input expected)
 ALTER TABLE menu_categories ADD COLUMN IF NOT EXISTS category_note TEXT;
 
+-- Custom weight pricing for categories (e.g., Cakes can be ordered in any weight)
+ALTER TABLE menu_categories ADD COLUMN IF NOT EXISTS allows_custom_weight BOOLEAN DEFAULT false;
+ALTER TABLE menu_categories ADD COLUMN IF NOT EXISTS custom_weight_base_size VARCHAR(50);
+ALTER TABLE menu_categories ADD COLUMN IF NOT EXISTS custom_weight_min_grams INTEGER;
+
 -- Create business_outlets if not exists
 CREATE TABLE IF NOT EXISTS business_outlets (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

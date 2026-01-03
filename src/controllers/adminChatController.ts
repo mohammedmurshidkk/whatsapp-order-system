@@ -168,7 +168,7 @@ export async function getSessionMessages(req: AuthRequest, res: Response): Promi
       .from('messages')
       .select('*', { count: 'exact' })
       .eq('session_id', sessionId)
-      .order('created_at', { ascending: true })
+      .order('created_at', { ascending: false })
       .range(offset, offset + limitNum - 1);
 
     if (messagesError) {

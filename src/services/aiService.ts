@@ -3,6 +3,7 @@ import { Message, AIResponse, Session, Business, MenuItem, MenuCategory, Busines
 import { formatMessagesForAI } from './messageService';
 import { logger } from '../utils/logger';
 import { getAIClient } from './aiClient';
+import { formatWeight } from '../utils/weightUtils';
 
 export interface AIContext {
   business?: Business;
@@ -17,24 +18,29 @@ export interface AIContext {
   lastAddedItemId?: string; // NEW: Last added session item ID (for add-on flow)
 }
 
-// Format menu for AI - includes item names AND sizes (to prevent hallucination)
+// Format menu for AI - includes item names, sizes, AND PRICES
 function formatStrictMenuForAI(items: MenuItem[], categories: MenuCategory[]): string {
   if (items.length === 0) {
     return 'MENU: No items available.';
   }
 
-  // Group items by category with size info
+  // Build category lookup for custom weight info
+  const categoryById = new Map(categories.map(c => [c.id, c]));
+
+  // Group items by category with size and price info
   const categoryMap = new Map<string, string[]>();
 
   for (const item of items) {
     if (item.category_id) {
       const existing = categoryMap.get(item.category_id) || [];
 
-      // Format item with sizes if available
+      // Format item with sizes AND PRICES
       let itemText = item.name;
       if (item.sizes && item.sizes.length > 0) {
-        const sizeNames = item.sizes.map(s => s.name).join(', ');
-        itemText += ` [sizes: ${sizeNames}]`;
+        const sizePrices = item.sizes.map(s => `${s.name}: ₹${s.price}`).join(', ');
+        itemText += ` [${sizePrices}]`;
+      } else if (item.price) {
+        itemText += ` [₹${item.price}]`;
       }
 
       existing.push(itemText);
@@ -42,9 +48,10 @@ function formatStrictMenuForAI(items: MenuItem[], categories: MenuCategory[]): s
     }
   }
 
-  let menuText = `AVAILABLE MENU (with available sizes):\n\n`;
+  let menuText = `AVAILABLE MENU (with prices):\n\n`;
+  const customWeightCategories: string[] = [];
 
-  // Format each category with items and sizes
+  // Format each category with items, sizes, and prices
   for (const category of categories) {
     const categoryItems = categoryMap.get(category.id);
     if (categoryItems && categoryItems.length > 0) {
@@ -52,10 +59,29 @@ function formatStrictMenuForAI(items: MenuItem[], categories: MenuCategory[]): s
       categoryItems.forEach(item => {
         menuText += `  - ${item}\n`;
       });
+
+      // Add custom weight info for enabled categories
+      if (category.allows_custom_weight) {
+        const minGrams = category.custom_weight_min_grams || 500;
+        const baseSize = category.custom_weight_base_size || '1kg';
+        menuText += `  📐 CUSTOM WEIGHTS: Any weight from ${formatWeight(minGrams)} (e.g., 750g, 1.5kg, 2kg)\n`;
+        menuText += `  💰 PRICE: ${baseSize} price × weight (e.g., 2kg = 1kg price × 2)\n`;
+        customWeightCategories.push(category.name);
+      }
     }
   }
 
-  menuText += `\n⚠️ ONLY use sizes listed above. NEVER invent sizes like "Regular", "Large", "Extra Large" unless they are in the list.`;
+  menuText += `\n⚠️ ONLY use sizes listed above OR custom weights for categories that allow it.`;
+
+  // Add custom weight pricing instructions if any category supports it
+  if (customWeightCategories.length > 0) {
+    menuText += `\n\n📐 CUSTOM WEIGHT CATEGORIES: ${customWeightCategories.join(', ')}`;
+    menuText += `\nFor these categories, customers can order ANY weight (e.g., 750g, 1.25kg, 1.5kg, 2kg).`;
+    menuText += `\nTo calculate price: use 1kg price × weight. Example: If 1kg=₹800, then 1.5kg=₹1200, 2kg=₹1600.`;
+    menuText += `\nWhen customer asks "what's the price of 2kg [item]?", CALCULATE and respond with exact price.`;
+    menuText += `\nFor standard sizes (500g, 1kg), use the menu price directly.`;
+  }
+
   menuText += `\nWhen customer asks "show menu", use intent "show_menu" (system will send full details to customer).`;
 
   return menuText;
@@ -244,6 +270,7 @@ function parseAIResponse(responseText: string): AIResponse {
       order_id: parsed.order_id,
       fulfillment: parsed.fulfillment,  // CRITICAL: Include fulfillment data!
       addon: parsed.addon,  // For remove_addon/add_addon intents
+      customText: parsed.customText,  // For modify_custom_text intent
     };
   } catch (error) {
     logger.warn('Failed to parse AI response as JSON', { error, responseText });
@@ -345,19 +372,44 @@ export function validateItemAgainstMenu(
   return bestMatch;
 }
 
-// Validate size exists for item
+// Validate size exists for item OR is valid custom weight
 export function validateSizeForItem(
   size: string,
-  menuItem: MenuItem
+  menuItem: MenuItem,
+  category?: MenuCategory | null
 ): boolean {
-  if (!size || !menuItem.sizes || menuItem.sizes.length === 0) {
-    return true; // No size validation needed
+  if (!size) {
+    return true; // No size to validate
   }
 
-  const normalizedSize = size.toLowerCase().trim();
-  return menuItem.sizes.some(
-    s => s.name.toLowerCase() === normalizedSize
-  );
+  // Check for exact size match first (works for all categories)
+  if (menuItem.sizes && menuItem.sizes.length > 0) {
+    const normalizedSize = size.toLowerCase().trim();
+    const exactMatch = menuItem.sizes.some(
+      s => s.name.toLowerCase() === normalizedSize
+    );
+    if (exactMatch) {
+      return true;
+    }
+  }
+
+  // Check if custom weight is allowed for this category
+  if (category?.allows_custom_weight) {
+    const { parseWeight, validateMinWeight } = require('../utils/weightUtils');
+    const parsed = parseWeight(size);
+    if (parsed.isValid) {
+      const minGrams = category.custom_weight_min_grams || 500;
+      const validation = validateMinWeight(parsed.grams, minGrams);
+      return validation.isValid;
+    }
+  }
+
+  // If no sizes array and no custom weight, allow any size
+  if (!menuItem.sizes || menuItem.sizes.length === 0) {
+    return true;
+  }
+
+  return false;
 }
 
 // Extract size from message if present (e.g., "Rainbow 1kg" -> { item: "Rainbow", size: "1kg" })
@@ -392,6 +444,82 @@ export function extractSizeFromMessage(
   }
 
   return { size: null, cleanedMessage: message };
+}
+
+/**
+ * Classify if a user's response to a custom text prompt is valid text or a question
+ * Uses AI to handle any language (English, Malayalam, Manglish) and phrasing
+ */
+export interface CustomTextClassification {
+  isValidText: boolean;      // True if user provided actual text to write
+  cleanedText: string | null; // Extracted text (stripped of "yes", "ok" prefixes)
+  isQuestion: boolean;       // True if user is asking a question
+}
+
+export async function classifyCustomTextResponse(
+  userResponse: string,
+  customTextPrompt: string
+): Promise<CustomTextClassification> {
+  const classificationPrompt = `You are classifying a customer's response to a prompt asking for text to write on a cake/item.
+
+PROMPT ASKED TO CUSTOMER: "${customTextPrompt}"
+CUSTOMER'S RESPONSE: "${userResponse}"
+
+Classify the response:
+1. VALID_TEXT: Customer provided text to write (even with "yes"/"ok" prefix, or in Malayalam/other languages)
+2. QUESTION: Customer is asking a question (price, availability, "how much", "rate ethra", etc.)
+3. SKIP: Customer wants to skip (no, nothing, skip, none, venda, etc.)
+
+If VALID_TEXT: Extract ONLY the text to write on cake (remove conversational prefixes like "yes", "ok", "sure", "athe", "sheri")
+If QUESTION or SKIP: cleanedText should be null
+
+Respond with JSON only:
+{"isValidText": boolean, "cleanedText": "string or null", "isQuestion": boolean}
+
+Examples:
+- "Yes, Happy Birthday" → {"isValidText": true, "cleanedText": "Happy Birthday", "isQuestion": false}
+- "How much" → {"isValidText": false, "cleanedText": null, "isQuestion": true}
+- "Janmadhinashamsakal" → {"isValidText": true, "cleanedText": "Janmadhinashamsakal", "isQuestion": false}
+- "What's the rate?" → {"isValidText": false, "cleanedText": null, "isQuestion": true}
+- "rate ethra" → {"isValidText": false, "cleanedText": null, "isQuestion": true}
+- "no thanks" → {"isValidText": false, "cleanedText": null, "isQuestion": false}
+- "ok write Happy Anniversary" → {"isValidText": true, "cleanedText": "Happy Anniversary", "isQuestion": false}
+- "Best Wishes to Mom" → {"isValidText": true, "cleanedText": "Best Wishes to Mom", "isQuestion": false}
+- "athe, Congrats" → {"isValidText": true, "cleanedText": "Congrats", "isQuestion": false}`;
+
+  try {
+    const aiClient = getAIClient();
+    const responseText = await aiClient.processMessage(classificationPrompt);
+
+    if (!responseText) {
+      logger.warn('Empty response from AI for custom text classification');
+      // Default: assume it's valid text, save as-is
+      return { isValidText: true, cleanedText: userResponse, isQuestion: false };
+    }
+
+    // Parse JSON response
+    let jsonStr = responseText.trim();
+    if (jsonStr.startsWith('```json')) jsonStr = jsonStr.slice(7);
+    if (jsonStr.startsWith('```')) jsonStr = jsonStr.slice(3);
+    if (jsonStr.endsWith('```')) jsonStr = jsonStr.slice(0, -3);
+    jsonStr = jsonStr.trim();
+
+    const parsed = JSON.parse(jsonStr);
+
+    logger.info(`Custom text classification: "${userResponse}" → valid=${parsed.isValidText}, question=${parsed.isQuestion}, cleaned="${parsed.cleanedText}"`);
+
+    return {
+      isValidText: parsed.isValidText === true,
+      cleanedText: parsed.cleanedText || null,
+      isQuestion: parsed.isQuestion === true,
+    };
+  } catch (error) {
+    logger.error('Failed to classify custom text response', { error, userResponse });
+    // Fallback: assume it's valid text, do basic cleanup
+    let cleaned = userResponse;
+    cleaned = cleaned.replace(/^(yes|yeah|yep|yup|ok|okay|sure|athe|ath|sheri)[,.\s]+/i, '').trim();
+    return { isValidText: true, cleanedText: cleaned, isQuestion: false };
+  }
 }
 
 export async function processMessageWithAI(
@@ -440,11 +568,17 @@ export async function processMessageWithAI(
           }
         }
 
-        // Validate size if provided
-        if (aiResponse.item.size_or_weight && !validateSizeForItem(aiResponse.item.size_or_weight, validItem)) {
-          const availableSizes = validItem.sizes?.map(s => s.name).join(', ') || 'standard';
+        // Validate size if provided (pass category for custom weight check)
+        const itemCategory = context.menuCategories?.find(c => c.id === validItem.category_id);
+        if (aiResponse.item.size_or_weight && !validateSizeForItem(aiResponse.item.size_or_weight, validItem, itemCategory)) {
+          let availableSizes = validItem.sizes?.map(s => s.name).join(', ') || 'standard';
+          // Add custom weight info if applicable
+          if (itemCategory?.allows_custom_weight) {
+            const minGrams = itemCategory.custom_weight_min_grams || 500;
+            availableSizes += ` (or custom weight from ${formatWeight(minGrams)})`;
+          }
           aiResponse = {
-            reply: `Sorry, we don't have that size for ${validItem.name}. Available sizes: ${availableSizes}. Which would you like?`,
+            reply: `Sorry, we don't have that size for ${validItem.name}. Available: ${availableSizes}. Which would you like?`,
             intent: 'ask_question',
             item: { ...aiResponse.item, size_or_weight: undefined },
           };

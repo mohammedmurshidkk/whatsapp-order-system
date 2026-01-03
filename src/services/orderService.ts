@@ -1,5 +1,5 @@
 import { supabase } from '../config/database';
-import { SessionItem, Order, AIItemResponse, OrderItemData, MenuItem, Business } from '../types';
+import { SessionItem, Order, AIItemResponse, OrderItemData, MenuItem, MenuCategory, Business } from '../types';
 import {
   getSessionWithItems,
   completeSession,
@@ -8,6 +8,7 @@ import {
 import { searchMenuItem, getBusinessById } from './menuService';
 import { formatDeliveryTime, formatDateForDisplay } from './fulfillmentService';
 import { logger } from '../utils/logger';
+import { parseWeight, isWeightString } from '../utils/weightUtils';
 
 /**
  * Generate the next order number for a business
@@ -46,18 +47,55 @@ async function generateOrderNumber(businessId: string): Promise<string> {
   return orderNumber;
 }
 
-// Helper to get price for an item based on size
-function getItemPrice(menuItem: MenuItem, sizeOrWeight?: string | null): number | null {
-  // If item has sizes, find matching size price
+// Helper to get price for an item based on size (supports custom weight pricing)
+function getItemPrice(
+  menuItem: MenuItem,
+  sizeOrWeight?: string | null,
+  category?: MenuCategory | null
+): number | null {
+  // If item has sizes, try to find matching size price first
   if (menuItem.sizes && menuItem.sizes.length > 0) {
     if (sizeOrWeight) {
       const normalizedSize = sizeOrWeight.toLowerCase().trim();
-      const matchedSize = menuItem.sizes.find(
+
+      // First check for exact size match (e.g., "500g", "1kg")
+      const exactMatch = menuItem.sizes.find(
+        s => s.name.toLowerCase() === normalizedSize
+      );
+      if (exactMatch) {
+        return exactMatch.price;
+      }
+
+      // Fuzzy match for slight variations
+      const fuzzyMatch = menuItem.sizes.find(
         s => s.name.toLowerCase().includes(normalizedSize) ||
              normalizedSize.includes(s.name.toLowerCase())
       );
-      if (matchedSize) {
-        return matchedSize.price;
+      if (fuzzyMatch) {
+        return fuzzyMatch.price;
+      }
+
+      // If no exact match and custom weight is enabled, calculate custom weight price
+      if (category?.allows_custom_weight && isWeightString(sizeOrWeight)) {
+        const parsed = parseWeight(sizeOrWeight);
+        if (parsed.isValid) {
+          // Find the base size price (e.g., 1kg price)
+          const baseSize = category.custom_weight_base_size || '1kg';
+          const baseSizeItem = menuItem.sizes.find(
+            s => s.name.toLowerCase() === baseSize.toLowerCase()
+          );
+
+          if (baseSizeItem) {
+            // Calculate: base_price_per_gram × requested_grams
+            const baseParsed = parseWeight(baseSize);
+            if (baseParsed.isValid && baseParsed.grams > 0) {
+              const pricePerGram = baseSizeItem.price / baseParsed.grams;
+              const calculatedPrice = Math.round(pricePerGram * parsed.grams);
+              logger.info(`Custom weight price: ${sizeOrWeight} = ₹${calculatedPrice} (based on ${baseSize} @ ₹${baseSizeItem.price})`);
+              return calculatedPrice;
+            }
+          }
+        }
       }
     }
     // Default to first size if no match
@@ -77,7 +115,17 @@ export async function saveOrderItem(
   let unitPrice: number | null = null;
   const menuItem = await searchMenuItem(businessId, item.name);
   if (menuItem) {
-    unitPrice = getItemPrice(menuItem, item.size_or_weight);
+    // Fetch category for custom weight pricing
+    let category: MenuCategory | null = null;
+    if (menuItem.category_id) {
+      const { data: categoryData } = await supabase
+        .from('menu_categories')
+        .select('*')
+        .eq('id', menuItem.category_id)
+        .single();
+      category = categoryData as MenuCategory | null;
+    }
+    unitPrice = getItemPrice(menuItem, item.size_or_weight, category);
     logger.info(`Price lookup: ${item.name} (${item.size_or_weight || 'default'}) = ₹${unitPrice}`);
   }
 

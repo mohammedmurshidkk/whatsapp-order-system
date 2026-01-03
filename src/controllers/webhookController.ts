@@ -15,7 +15,7 @@ import {
   saveIncomingMediaMessage,
 } from '../services/messageService';
 import { processIncomingMedia } from '../services/mediaService';
-import { processMessageWithAI } from '../services/aiService';
+import { processMessageWithAI, classifyCustomTextResponse } from '../services/aiService';
 import {
   normalizeManglish,
   containsMalayalamScript,
@@ -171,6 +171,9 @@ export async function processMessage(
   // Use normalized message for processing
   messageText = normalizedMessage;
 
+  // Flag to track if user asked a question during custom text prompt (skip addon check)
+  let isCustomTextQuestion = false;
+
   // Get business context
   const business = await getBusinessById(businessId);
   logger.info(`Business: ${business?.name || 'NOT FOUND'} (ID: ${businessId})`);
@@ -232,40 +235,69 @@ export async function processMessage(
       pendingCustomTextMap.delete(session.id);
       // Fall through to AI processing
     } else {
-      // Customer is responding to a custom text question
-      // Use originalMessage to preserve case (messageText is lowercased by normalizeManglish)
-      let cleanedText = originalMessage;
-      cleanedText = cleanedText.replace(/^(write|message|text|cake message|on cake|write on cake)[:\s]*/i, '').trim();
-      // Remove surrounding quotes if present
-      cleanedText = cleanedText.replace(/^["'](.*)["']$/, '$1').trim();
+      // Use AI to classify if this is valid custom text or a question
+      // This handles any language (English, Malayalam, Manglish) and phrasing
+      const classification = await classifyCustomTextResponse(originalMessage, pendingCustomText.prompt);
 
-      logger.info(`Saving custom text response for item ${pendingCustomText.itemId}: "${cleanedText}"`);
-      await updateSessionItemCustomText(pendingCustomText.itemId, cleanedText);
-      pendingCustomTextMap.delete(session.id);
+      if (classification.isQuestion) {
+        // User is asking a question (e.g., "How much", "rate ethra")
+        // Don't save as custom text, don't clear pending - pass to main AI to answer
+        // Pending will remain so after AI answers, user can still provide the text
+        logger.info(`Custom text response is a question: "${originalMessage}" - passing to AI`);
+        isCustomTextQuestion = true; // Flag to skip pendingAddon check
+        await saveIncomingMessage(session.id, messageText);
+        // Fall through to AI processing (don't return here)
+      } else if (!classification.isValidText) {
+        // AI detected a skip (e.g., "no", "nothing", "venda")
+        logger.info(`AI detected skip for custom text: "${originalMessage}"`);
+        pendingCustomTextMap.delete(session.id);
+        await saveIncomingMessage(session.id, messageText);
 
-      // Save incoming message
-      await saveIncomingMessage(session.id, messageText);
+        // Check for pending addons
+        const pendingAddonsAfterSkip = pendingAddonSelectionMap.get(session.id);
+        if (pendingAddonsAfterSkip && pendingAddonsAfterSkip.itemId === pendingCustomText.itemId) {
+          const addonsMessage = formatAddonsForCustomer(pendingAddonsAfterSkip.addons);
+          const skipWithAddons = `No problem!\n\n${addonsMessage}`;
+          await saveOutgoingMessage(session.id, skipWithAddons);
+          return skipWithAddons;
+        }
 
-      // Check if there are pending addons to ask about (stored when custom text was first asked)
-      const pendingAddonsAfterText = pendingAddonSelectionMap.get(session.id);
-      if (pendingAddonsAfterText && pendingAddonsAfterText.itemId === pendingCustomText.itemId) {
-        // Ask about addons now
-        const addonsMessage = formatAddonsForCustomer(pendingAddonsAfterText.addons);
-        const confirmWithAddons = `Got it! "${cleanedText}" will be written on your cake.\n\n${addonsMessage}`;
-        await saveOutgoingMessage(session.id, confirmWithAddons);
-        return confirmWithAddons;
+        const skipReply = "No problem! Anything else you'd like to order?";
+        await saveOutgoingMessage(session.id, skipReply);
+        return skipReply;
+      } else {
+        // Valid custom text - save the AI-cleaned version
+        const cleanedText = classification.cleanedText || originalMessage;
+
+        logger.info(`Saving custom text response for item ${pendingCustomText.itemId}: "${cleanedText}"`);
+        await updateSessionItemCustomText(pendingCustomText.itemId, cleanedText);
+        pendingCustomTextMap.delete(session.id);
+
+        // Save incoming message
+        await saveIncomingMessage(session.id, messageText);
+
+        // Check if there are pending addons to ask about (stored when custom text was first asked)
+        const pendingAddonsAfterText = pendingAddonSelectionMap.get(session.id);
+        if (pendingAddonsAfterText && pendingAddonsAfterText.itemId === pendingCustomText.itemId) {
+          // Ask about addons now
+          const addonsMessage = formatAddonsForCustomer(pendingAddonsAfterText.addons);
+          const confirmWithAddons = `Got it! "${cleanedText}" will be written on your cake.\n\n${addonsMessage}`;
+          await saveOutgoingMessage(session.id, confirmWithAddons);
+          return confirmWithAddons;
+        }
+
+        // No addons to ask about
+        const confirmReply = `Got it! "${cleanedText}" will be added to your cake. Anything else you'd like to order?`;
+        await saveOutgoingMessage(session.id, confirmReply);
+        return confirmReply;
       }
-
-      // No addons to ask about
-      const confirmReply = `Got it! "${cleanedText}" will be added to your cake. Anything else you'd like to order?`;
-      await saveOutgoingMessage(session.id, confirmReply);
-      return confirmReply;
     }
   }
 
   // Check for pending addon selection (e.g., user replied "1" or "candle" after addon suggestion)
+  // Skip if user asked a question during custom text prompt (let AI answer instead)
   const pendingAddon = pendingAddonSelectionMap.get(session.id);
-  if (pendingAddon) {
+  if (pendingAddon && !isCustomTextQuestion) {
     const normalizedInput = messageText.toLowerCase().trim();
 
     // Check if user wants to skip addons

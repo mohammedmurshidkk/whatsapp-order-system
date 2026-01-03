@@ -471,7 +471,10 @@ export function extractAddressAndTime(message: string, timezone: string = 'Asia/
  * @param timezone - IANA timezone (e.g., 'Asia/Kolkata'), defaults to 'Asia/Kolkata'
  */
 export function formatDeliveryTime(isoTime: string, timezone: string = 'Asia/Kolkata'): string {
-  const date = new Date(isoTime);
+  // Ensure timestamp is treated as UTC - PostgreSQL TIMESTAMP without timezone
+  // may return without 'Z' suffix, causing JS to interpret as local time
+  const normalizedTime = isoTime.endsWith('Z') || isoTime.includes('+') ? isoTime : isoTime + 'Z';
+  const date = new Date(normalizedTime);
   // Handle undefined/null timezone explicitly
   const tz = timezone || 'Asia/Kolkata';
 
