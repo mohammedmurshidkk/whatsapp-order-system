@@ -150,6 +150,11 @@ CREATE TABLE business_outlets (
   longitude DECIMAL(11, 8),
   is_active BOOLEAN DEFAULT true,
   display_order INT DEFAULT 0,
+  opening_time TEXT,
+  closing_time TEXT,
+  opening_buffer_minutes INTEGER DEFAULT 0,
+  closing_buffer_minutes INTEGER DEFAULT 0,
+  opening_days TEXT[],
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
 );

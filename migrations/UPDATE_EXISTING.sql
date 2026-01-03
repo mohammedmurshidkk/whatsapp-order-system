@@ -56,6 +56,12 @@ CREATE TABLE IF NOT EXISTS business_outlets (
   updated_at TIMESTAMP DEFAULT NOW()
 );
 
+ALTER TABLE business_outlets ADD COLUMN IF NOT EXISTS opening_time TEXT;
+ALTER TABLE business_outlets ADD COLUMN IF NOT EXISTS closing_time TEXT;
+ALTER TABLE business_outlets ADD COLUMN IF NOT EXISTS opening_buffer_minutes INTEGER DEFAULT 0;
+ALTER TABLE business_outlets ADD COLUMN IF NOT EXISTS closing_buffer_minutes INTEGER DEFAULT 0;
+ALTER TABLE business_outlets ADD COLUMN IF NOT EXISTS opening_days TEXT[];
+
 CREATE INDEX IF NOT EXISTS idx_outlets_business ON business_outlets(business_id) WHERE is_active = true;
 
 -- Add fulfillment columns to sessions

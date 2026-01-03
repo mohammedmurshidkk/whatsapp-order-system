@@ -59,6 +59,7 @@ import {
   extractAddressAndTime,
   formatDeliveryTime,
   calculateDateTimeFromButtons,
+  validateOperatingHours,
 } from '../services/fulfillmentService';
 import {
   getAutoSuggestedAddons,
@@ -387,6 +388,10 @@ export async function processMessage(
     }
   }
 
+  // Get outlets for fulfillment
+  const outlets = businessId ? await getBusinessOutlets(businessId) : [];
+  logger.info(`Outlets loaded: ${outlets.length}`);
+
   // Check if session needs time (has fulfillment type but no time) and user typed a time-like message
   const sessionForTimeCheck = await getSessionWithItems(session.id);
   if (sessionForTimeCheck) {
@@ -405,6 +410,30 @@ export async function processMessage(
 
         if (parsedTime) {
           await saveIncomingMessage(session.id, messageText);
+
+          // Validate against operating hours
+          if (needsPickupTime && sessionForTimeCheck.pickup_outlet_id) {
+            const selectedOutlet = outlets.find(o => o.id === sessionForTimeCheck.pickup_outlet_id);
+            if (selectedOutlet) {
+              const validation = validateOperatingHours(parsedTime, selectedOutlet, businessTimezone);
+              if (!validation.valid) {
+                logger.warn(`Pickup time ${parsedTime} rejected: ${validation.reason}`);
+                const errorMsg = `⏰ ${validation.reason}\n\nPlease choose a different time.`;
+                await saveOutgoingMessage(session.id, errorMsg);
+                return errorMsg;
+              }
+            }
+          } else if (needsDeliveryTime && outlets.length > 0) {
+            // For delivery, validate against the first/primary outlet's hours
+            const primaryOutlet = outlets[0];
+            const validation = validateOperatingHours(parsedTime, primaryOutlet, businessTimezone);
+            if (!validation.valid) {
+              logger.warn(`Delivery time ${parsedTime} rejected: ${validation.reason}`);
+              const errorMsg = `⏰ ${validation.reason}\n\nPlease choose a different time.`;
+              await saveOutgoingMessage(session.id, errorMsg);
+              return errorMsg;
+            }
+          }
 
           if (needsDeliveryTime) {
             await updateSessionDeliveryInfo(session.id, {
@@ -462,10 +491,6 @@ export async function processMessage(
   } else {
     logger.warn('No business found - AI will have no menu context!');
   }
-
-  // Get outlets for fulfillment
-  const outlets = businessId ? await getBusinessOutlets(businessId) : [];
-  logger.info(`Outlets loaded: ${outlets.length}`);
 
   // Build AI context - use sessionWithItems for LATEST fulfillment data
   const latestSessionData = sessionWithItems || session;
@@ -1202,6 +1227,16 @@ export async function processMessage(
               ? parseDeliveryTime(aiResponse.fulfillment.pickup_time, businessTimezone)
               : null;
 
+            // Validate pickup time against outlet operating hours
+            if (pickupTime) {
+              const validation = validateOperatingHours(pickupTime, selectedOutlet, businessTimezone);
+              if (!validation.valid) {
+                logger.warn(`Pickup time ${pickupTime} rejected: ${validation.reason}`);
+                replyMessage = `⏰ ${validation.reason}\n\nPlease choose a different time for pickup from ${selectedOutlet.outlet_name}.`;
+                break;
+              }
+            }
+
             await updateSessionPickupInfo(session.id, {
               outlet_id: selectedOutlet.id,
               time: pickupTime || undefined,
@@ -1233,14 +1268,24 @@ export async function processMessage(
             : parseDeliveryTime(messageText, businessTimezone); // Try to parse time from message directly
 
           if (pickupTime) {
+            // Validate against outlet operating hours
+            const selectedOutlet = outlets.find(o => o.id === latestSessionData.pickup_outlet_id);
+            if (selectedOutlet) {
+              const validation = validateOperatingHours(pickupTime, selectedOutlet, businessTimezone);
+              if (!validation.valid) {
+                logger.warn(`Pickup time ${pickupTime} rejected: ${validation.reason}`);
+                replyMessage = `⏰ ${validation.reason}\n\nPlease choose a different time.`;
+                break;
+              }
+            }
+
             await updateSessionPickupInfo(session.id, {
               outlet_id: latestSessionData.pickup_outlet_id,
               time: pickupTime,
             });
             logger.info(`Pickup time saved: ${pickupTime}`);
 
-            // Find outlet for display
-            const selectedOutlet = outlets.find(o => o.id === latestSessionData.pickup_outlet_id);
+            // Find outlet for display (already found above for validation)
             const outletName = selectedOutlet?.outlet_name || 'selected outlet';
 
             // Show final invoice with pickup details and ask for confirmation
@@ -1336,6 +1381,17 @@ export async function processMessage(
             }
           }
 
+          // Validate delivery time against operating hours
+          if (deliveryTime && outlets.length > 0) {
+            const primaryOutlet = outlets[0];
+            const validation = validateOperatingHours(deliveryTime, primaryOutlet, businessTimezone);
+            if (!validation.valid) {
+              logger.warn(`Delivery time ${deliveryTime} rejected in confirm_order: ${validation.reason}`);
+              replyMessage = `⏰ ${validation.reason}\n\nPlease choose a different delivery time.`;
+              break;
+            }
+          }
+
           if (isCoordinateFormat || hasLocationAlready) {
             // Skip saving AI address - preserve existing lat/long, only save time if provided
             logger.info(`Skipping AI address in confirm_order (coord format: ${isCoordinateFormat}, has location: ${hasLocationAlready})`);
@@ -1374,6 +1430,20 @@ export async function processMessage(
             const pickupTime = aiResponse.fulfillment.pickup_time
               ? parseDeliveryTime(aiResponse.fulfillment.pickup_time, businessTimezone)
               : null;
+
+            // Validate pickup time against outlet operating hours
+            if (pickupTime) {
+              const selectedOutlet = outlets.find(o => o.id === outletId);
+              if (selectedOutlet) {
+                const validation = validateOperatingHours(pickupTime, selectedOutlet, businessTimezone);
+                if (!validation.valid) {
+                  logger.warn(`Pickup time ${pickupTime} rejected in confirm_order: ${validation.reason}`);
+                  replyMessage = `⏰ ${validation.reason}\n\nPlease choose a different pickup time.`;
+                  break;
+                }
+              }
+            }
+
             await updateSessionPickupInfo(session.id, {
               outlet_id: outletId,
               time: pickupTime || undefined,

@@ -189,7 +189,16 @@ export async function createOutlet(req: AuthRequest, res: Response): Promise<voi
       return;
     }
 
-    const { outlet_name, address, phone } = req.body;
+    const {
+      outlet_name,
+      address,
+      phone,
+      opening_time,
+      closing_time,
+      opening_buffer_minutes,
+      closing_buffer_minutes,
+      opening_days
+    } = req.body;
 
     if (!outlet_name || !address) {
       res.status(400).json({ error: 'outlet_name and address are required' });
@@ -216,6 +225,12 @@ export async function createOutlet(req: AuthRequest, res: Response): Promise<voi
         phone: phone || null,
         is_active: true,
         display_order: displayOrder,
+        // Operating hours
+        opening_time: opening_time || null,
+        closing_time: closing_time || null,
+        opening_buffer_minutes: opening_buffer_minutes || 0,
+        closing_buffer_minutes: closing_buffer_minutes || 0,
+        opening_days: opening_days || null,
         created_at: new Date().toISOString(),
       })
       .select()
@@ -244,7 +259,17 @@ export async function updateOutlet(req: AuthRequest, res: Response): Promise<voi
     }
 
     const { outletId } = req.params;
-    const { outlet_name, address, phone, is_active } = req.body;
+    const {
+      outlet_name,
+      address,
+      phone,
+      is_active,
+      opening_time,
+      closing_time,
+      opening_buffer_minutes,
+      closing_buffer_minutes,
+      opening_days
+    } = req.body;
 
     // Verify outlet belongs to this business
     const { data: existing } = await supabase
@@ -265,6 +290,12 @@ export async function updateOutlet(req: AuthRequest, res: Response): Promise<voi
     if (address !== undefined) updateData.address = address;
     if (phone !== undefined) updateData.phone = phone;
     if (is_active !== undefined) updateData.is_active = is_active;
+    // Operating hours
+    if (opening_time !== undefined) updateData.opening_time = opening_time;
+    if (closing_time !== undefined) updateData.closing_time = closing_time;
+    if (opening_buffer_minutes !== undefined) updateData.opening_buffer_minutes = opening_buffer_minutes;
+    if (closing_buffer_minutes !== undefined) updateData.closing_buffer_minutes = closing_buffer_minutes;
+    if (opening_days !== undefined) updateData.opening_days = opening_days;
 
     const { data: outlet, error } = await supabase
       .from('business_outlets')

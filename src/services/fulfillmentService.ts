@@ -635,3 +635,110 @@ export function calculateDateTimeFromButtons(
     tz
   );
 }
+
+/**
+ * Validate if a requested time falls within outlet operating hours
+ * @param requestedTimeUTC - ISO timestamp in UTC (from parseDeliveryTime)
+ * @param outlet - BusinessOutlet with operating hours
+ * @param timezone - Business timezone (e.g., 'Asia/Kolkata')
+ * @returns { valid: true } or { valid: false, reason: string }
+ */
+export function validateOperatingHours(
+  requestedTimeUTC: string,
+  outlet: {
+    opening_time?: string | null;
+    closing_time?: string | null;
+    opening_buffer_minutes?: number;
+    closing_buffer_minutes?: number;
+    opening_days?: string[] | null;
+  },
+  timezone: string = 'Asia/Kolkata'
+): { valid: true } | { valid: false; reason: string } {
+  const tz = timezone || 'Asia/Kolkata';
+
+  // If no operating hours set, allow any time
+  if (!outlet.opening_time || !outlet.closing_time) {
+    return { valid: true };
+  }
+
+  // Convert UTC to local time for comparison
+  const normalizedTime = requestedTimeUTC.endsWith('Z') || requestedTimeUTC.includes('+')
+    ? requestedTimeUTC
+    : requestedTimeUTC + 'Z';
+  const requestedDate = new Date(normalizedTime);
+
+  // Get the day of week in the business timezone
+  const dayFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    weekday: 'long',
+  });
+  const requestedDayOfWeek = dayFormatter.format(requestedDate).toLowerCase();
+
+  // Check if the day is in opening_days (if specified)
+  if (outlet.opening_days && outlet.opening_days.length > 0) {
+    const normalizedOpeningDays = outlet.opening_days.map(d => d.toLowerCase());
+    if (!normalizedOpeningDays.includes(requestedDayOfWeek)) {
+      return {
+        valid: false,
+        reason: `We're closed on ${requestedDayOfWeek.charAt(0).toUpperCase() + requestedDayOfWeek.slice(1)}. We're open on: ${outlet.opening_days.map(d => d.charAt(0).toUpperCase() + d.slice(1)).join(', ')}.`,
+      };
+    }
+  }
+
+  // Get hour and minute in local timezone
+  const hourFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    hour: '2-digit',
+    hour12: false,
+  });
+  const minuteFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    minute: '2-digit',
+  });
+
+  let localHour = parseInt(hourFormatter.format(requestedDate).replace(/\D/g, ''), 10);
+  const localMinute = parseInt(minuteFormatter.format(requestedDate).replace(/\D/g, ''), 10);
+
+  // Handle hour24 edge case
+  if (localHour === 24) localHour = 0;
+
+  // Convert to minutes from midnight for easier comparison
+  const requestedMinutes = localHour * 60 + localMinute;
+
+  // Parse opening and closing times (format: "HH:MM" in 24h)
+  const [openHour, openMin] = outlet.opening_time.split(':').map(Number);
+  const [closeHour, closeMin] = outlet.closing_time.split(':').map(Number);
+
+  const openingBuffer = outlet.opening_buffer_minutes || 0;
+  const closingBuffer = outlet.closing_buffer_minutes || 0;
+
+  // Earliest allowed time = opening_time + opening_buffer
+  const earliestAllowed = openHour * 60 + openMin + openingBuffer;
+  // Latest allowed time = closing_time - closing_buffer
+  const latestAllowed = closeHour * 60 + closeMin - closingBuffer;
+
+  // Format time for error messages
+  const formatTimeForDisplay = (minutes: number): string => {
+    const h = Math.floor(minutes / 60);
+    const m = minutes % 60;
+    const period = h >= 12 ? 'PM' : 'AM';
+    const displayHour = h > 12 ? h - 12 : h === 0 ? 12 : h;
+    return m > 0 ? `${displayHour}:${m.toString().padStart(2, '0')} ${period}` : `${displayHour} ${period}`;
+  };
+
+  if (requestedMinutes < earliestAllowed) {
+    return {
+      valid: false,
+      reason: `That time is too early. We can accept orders from ${formatTimeForDisplay(earliestAllowed)} onwards.`,
+    };
+  }
+
+  if (requestedMinutes > latestAllowed) {
+    return {
+      valid: false,
+      reason: `That time is too late. We close at ${formatTimeForDisplay(closeHour * 60 + closeMin)}, so the latest we can accept orders is ${formatTimeForDisplay(latestAllowed)}.`,
+    };
+  }
+
+  return { valid: true };
+}

@@ -5,6 +5,25 @@ import { logger } from '../utils/logger';
 import { getAIClient } from './aiClient';
 import { formatWeight } from '../utils/weightUtils';
 
+// Helper: Add minutes to a time string (e.g., "10:00" + 30 = "10:30")
+function addMinutesToTime(time: string, minutes: number): string {
+  const [hours, mins] = time.split(':').map(Number);
+  const totalMins = hours * 60 + mins + minutes;
+  const newHours = Math.floor(totalMins / 60) % 24;
+  const newMins = totalMins % 60;
+  return `${String(newHours).padStart(2, '0')}:${String(newMins).padStart(2, '0')}`;
+}
+
+// Helper: Subtract minutes from a time string (e.g., "22:00" - 30 = "21:30")
+function subtractMinutesFromTime(time: string, minutes: number): string {
+  const [hours, mins] = time.split(':').map(Number);
+  let totalMins = hours * 60 + mins - minutes;
+  if (totalMins < 0) totalMins += 24 * 60; // Wrap around midnight
+  const newHours = Math.floor(totalMins / 60) % 24;
+  const newMins = totalMins % 60;
+  return `${String(newHours).padStart(2, '0')}:${String(newMins).padStart(2, '0')}`;
+}
+
 export interface AIContext {
   business?: Business;
   menuItems?: MenuItem[];
@@ -41,6 +60,10 @@ function formatStrictMenuForAI(items: MenuItem[], categories: MenuCategory[]): s
         itemText += ` [${sizePrices}]`;
       } else if (item.price) {
         itemText += ` [₹${item.price}]`;
+      }
+      // Add description if available (helps AI match items by description)
+      if (item.description) {
+        itemText += ` - ${item.description}`;
       }
 
       existing.push(itemText);
@@ -104,13 +127,42 @@ function getSystemPrompt(context: AIContext): string {
     itemNamesList = context.menuItems.map(item => `"${item.name}"`).join(', ');
   }
 
-  // Format outlets for takeaway (static per business)
+  // Format outlets for takeaway (static per business) with operating hours
   let outletsSection = '';
   if (context.outlets && context.outlets.length > 0) {
     outletsSection = `\nAVAILABLE OUTLETS FOR PICKUP:\n`;
     context.outlets.forEach((outlet, i) => {
-      outletsSection += `${i + 1}. "${outlet.outlet_name}" - ${outlet.address}\n`;
+      let outletLine = `${i + 1}. "${outlet.outlet_name}" - ${outlet.address}`;
+
+      // Add operating hours if available
+      if (outlet.opening_time && outlet.closing_time) {
+        const openBuffer = outlet.opening_buffer_minutes || 0;
+        const closeBuffer = outlet.closing_buffer_minutes || 0;
+
+        // Calculate effective times with buffer
+        const effectiveOpen = addMinutesToTime(outlet.opening_time, openBuffer);
+        const effectiveClose = subtractMinutesFromTime(outlet.closing_time, closeBuffer);
+
+        outletLine += ` | Hours: ${outlet.opening_time}-${outlet.closing_time}`;
+        outletLine += ` (Delivery/Takeaway: ${effectiveOpen}-${effectiveClose})`;
+
+        // Add open days if specified
+        if (outlet.opening_days && outlet.opening_days.length > 0 && outlet.opening_days.length < 7) {
+          const days = outlet.opening_days.map(d => d.charAt(0).toUpperCase() + d.slice(1, 3)).join(', ');
+          outletLine += ` | Open: ${days}`;
+        }
+      }
+      outletsSection += outletLine + '\n';
     });
+
+    // Add time validation instructions
+    if (context.outlets.some(o => o.opening_time && o.closing_time)) {
+      outletsSection += `\n⏰ TIME VALIDATION: Delivery/takeaway times must be within outlet operating hours (adjusted for buffer).`;
+      outletsSection += `\nIf customer chooses a time outside operating hours, politely suggest another time within hours.`;
+      if (context.business?.customer_support_phone) {
+        outletsSection += `\nFor special requests outside hours, contact: ${context.business.customer_support_phone}`;
+      }
+    }
   }
 
   // Business-specific custom instructions (static per business)
@@ -119,9 +171,15 @@ function getSystemPrompt(context: AIContext): string {
     customInstructions = `\n🏪 BUSINESS-SPECIFIC INSTRUCTIONS:\n${context.business.custom_ai_prompt}\n`;
   }
 
+  // Customer support number (for when customers ask for help or issues arise)
+  let customerSupportSection = '';
+  if (context.business?.customer_support_phone) {
+    customerSupportSection = `\n📞 CUSTOMER SUPPORT: ${context.business.customer_support_phone}\nIf customer asks for help, support, contact number, or has issues outside your capabilities, provide this number.\n`;
+  }
+
   // Static prompt template
   const staticPrompt = `You are an AI ordering assistant for ${businessName}.
-${customInstructions}
+${customInstructions}${customerSupportSection}
 ${menuSection}
 ${outletsSection}
 ⚠️ RULES: Only accept menu items. Match names EXACTLY. Never invent items/prices.

@@ -39,6 +39,12 @@ export interface BusinessOutlet {
   longitude?: number | null;
   is_active: boolean;
   display_order: number;
+  // Operating hours
+  opening_time?: string | null; // e.g., "10:00" (24-hour format)
+  closing_time?: string | null; // e.g., "22:00" (24-hour format)
+  opening_buffer_minutes?: number; // Buffer after opening (default 0)
+  closing_buffer_minutes?: number; // Buffer before closing (default 0)
+  opening_days?: string[]; // e.g., ["monday", "tuesday", "wednesday", ...]
   created_at: string;
   updated_at?: string;
 }
