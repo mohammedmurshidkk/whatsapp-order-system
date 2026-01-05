@@ -1,6 +1,7 @@
 import { supabase } from '../config/database';
-import { FulfillmentType } from '../types';
+import { FulfillmentType, DeliveryFeeResult } from '../types';
 import { logger } from '../utils/logger';
+import { calculateDistanceMeters } from '../utils/distanceUtils';
 
 /**
  * Update session with fulfillment type
@@ -516,7 +517,132 @@ export function formatDateForDisplay(isoDate: string, timezone: string = 'Asia/K
 }
 
 /**
- * Calculate delivery fee based on business rules
+ * Calculate delivery fee based on distance from outlet to customer
+ * Uses configurable tiered pricing:
+ * - Within free_radius: FREE
+ * - Beyond free but within minimum_charge_distance: minimum_delivery_charge
+ * - Beyond that: minimum_charge + (extra_km * increment_per_km)
+ */
+export async function calculateDistanceBasedDeliveryFee(
+  businessId: string,
+  orderAmount: number,
+  customerLat: number,
+  customerLon: number
+): Promise<DeliveryFeeResult> {
+  // Fetch business pricing config
+  const { data: business } = await supabase
+    .from('businesses')
+    .select(`
+      delivery_fee,
+      free_delivery_above,
+      free_radius_meters,
+      minimum_delivery_charge,
+      minimum_charge_distance_meters,
+      increment_per_km,
+      max_delivery_radius_meters
+    `)
+    .eq('id', businessId)
+    .single();
+
+  if (!business) {
+    return { fee: 0, distance_meters: 0, is_beyond_max_radius: false };
+  }
+
+  // Fetch primary outlet coordinates (first active outlet by display_order)
+  const { data: outlets } = await supabase
+    .from('business_outlets')
+    .select('latitude, longitude')
+    .eq('business_id', businessId)
+    .eq('is_active', true)
+    .order('display_order', { ascending: true })
+    .limit(1);
+
+  if (!outlets || outlets.length === 0 || !outlets[0].latitude || !outlets[0].longitude) {
+    // No outlet with coordinates - fallback to flat fee
+    logger.warn(`No outlet coordinates for business ${businessId}, using flat fee`);
+    return {
+      fee: business.delivery_fee || 0,
+      distance_meters: 0,
+      is_beyond_max_radius: false,
+    };
+  }
+
+  const outlet = outlets[0];
+  const distanceMeters = calculateDistanceMeters(
+    outlet.latitude,
+    outlet.longitude,
+    customerLat,
+    customerLon
+  );
+
+  logger.info(`Distance calculated: ${(distanceMeters / 1000).toFixed(2)}km from outlet to customer`);
+
+  // Check if beyond max radius
+  const maxRadius = business.max_delivery_radius_meters || 15000;
+  if (distanceMeters > maxRadius) {
+    return {
+      fee: 0, // Will be determined manually by operations team
+      distance_meters: distanceMeters,
+      is_beyond_max_radius: true,
+    };
+  }
+
+  // Check free delivery threshold based on order amount
+  if (business.free_delivery_above && orderAmount >= business.free_delivery_above) {
+    return {
+      fee: 0,
+      distance_meters: distanceMeters,
+      is_beyond_max_radius: false,
+    };
+  }
+
+  // Get pricing config with defaults
+  const freeRadius = business.free_radius_meters || 3000; // 3km default
+  const minimumCharge = business.minimum_delivery_charge || 30;
+  const minimumChargeDistance = business.minimum_charge_distance_meters || 6000; // 6km default
+  const incrementPerKm = business.increment_per_km || 10;
+
+  // Calculate billable distance (distance beyond free radius)
+  const billableDistance = Math.max(0, distanceMeters - freeRadius);
+
+  // If within free radius
+  if (billableDistance <= 0) {
+    logger.info(`Delivery within free radius (${freeRadius}m), no charge`);
+    return {
+      fee: 0,
+      distance_meters: distanceMeters,
+      is_beyond_max_radius: false,
+    };
+  }
+
+  // If billable distance is within minimum charge distance
+  if (billableDistance <= minimumChargeDistance) {
+    logger.info(`Delivery within minimum charge distance, fee: ${minimumCharge}`);
+    return {
+      fee: minimumCharge,
+      distance_meters: distanceMeters,
+      is_beyond_max_radius: false,
+    };
+  }
+
+  // Calculate additional charge beyond minimum distance
+  const additionalDistanceMeters = billableDistance - minimumChargeDistance;
+  const additionalDistanceKm = additionalDistanceMeters / 1000;
+  const additionalCharge = Math.ceil(additionalDistanceKm) * incrementPerKm;
+  const totalFee = minimumCharge + additionalCharge;
+
+  logger.info(`Delivery fee calculated: ${totalFee} (base: ${minimumCharge}, extra: ${additionalCharge} for ${additionalDistanceKm.toFixed(1)}km)`);
+
+  return {
+    fee: totalFee,
+    distance_meters: distanceMeters,
+    is_beyond_max_radius: false,
+  };
+}
+
+/**
+ * Legacy function for backwards compatibility - uses flat fee
+ * @deprecated Use calculateDistanceBasedDeliveryFee instead
  */
 export async function calculateDeliveryFee(
   businessId: string,

@@ -26,6 +26,13 @@ ALTER TABLE businesses ADD COLUMN IF NOT EXISTS whatsapp_business_account_id VAR
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS whatsapp_access_token TEXT;
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS whatsapp_webhook_verified BOOLEAN DEFAULT false;
 
+-- Distance-based delivery pricing columns for businesses
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS free_radius_meters INTEGER DEFAULT 3000;
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS minimum_delivery_charge DECIMAL(10,2) DEFAULT 30;
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS minimum_charge_distance_meters INTEGER DEFAULT 6000;
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS increment_per_km DECIMAL(10,2) DEFAULT 10;
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS max_delivery_radius_meters INTEGER DEFAULT 15000;
+
 -- Add image URLs to menu tables
 ALTER TABLE menu_categories ADD COLUMN IF NOT EXISTS image_url TEXT;
 ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS image_url TEXT;
@@ -87,6 +94,9 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS pickup_outlet_id UUID REFERENCES bus
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS pickup_time TIMESTAMP;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfillment_notes TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
+
+  -- Store calculated delivery fee on orders
+  ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_fee DECIMAL(10,2) DEFAULT 0;
 
 -- Add business_id and order_number to orders (CRITICAL for multi-tenancy)
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS business_id UUID REFERENCES businesses(id) ON DELETE CASCADE;

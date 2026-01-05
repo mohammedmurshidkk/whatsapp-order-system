@@ -14,6 +14,12 @@ export interface Business {
   delivery_fee?: number;
   free_delivery_above?: number;
   delivery_radius_km?: number;
+  // Distance-based delivery pricing
+  free_radius_meters?: number;
+  minimum_delivery_charge?: number;
+  minimum_charge_distance_meters?: number;
+  increment_per_km?: number;
+  max_delivery_radius_meters?: number;
   minimum_wait_minutes?: number; // Minimum wait time for orders (no ASAP)
   // Custom AI behavior
   custom_ai_prompt?: string | null; // Business-specific AI instructions
@@ -153,6 +159,9 @@ export interface Session {
   pickup_outlet_id?: string | null;
   pickup_time?: string | null;
   fulfillment_notes?: string | null;
+  // Beyond radius approval
+  delivery_pending_approval?: boolean;
+  delivery_approval_status?: 'pending' | 'approved' | 'rejected' | null;
 }
 
 export interface SessionWithItems extends Session {
@@ -219,7 +228,15 @@ export interface Order {
   pickup_outlet_id?: string | null;
   pickup_time?: string | null;
   fulfillment_notes?: string | null;
+  delivery_fee?: number;
   updated_at?: string;
+}
+
+// Delivery fee calculation result
+export interface DeliveryFeeResult {
+  fee: number;
+  distance_meters: number;
+  is_beyond_max_radius: boolean;
 }
 
 export interface OrderItemData {

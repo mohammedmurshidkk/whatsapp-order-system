@@ -55,6 +55,12 @@ export async function getProfile(req: AuthRequest, res: Response): Promise<void>
         delivery_fee: business.delivery_fee,
         free_delivery_above: business.free_delivery_above,
         delivery_radius_km: business.delivery_radius_km,
+        // Distance-based delivery pricing
+        free_radius_meters: business.free_radius_meters,
+        minimum_delivery_charge: business.minimum_delivery_charge,
+        minimum_charge_distance_meters: business.minimum_charge_distance_meters,
+        increment_per_km: business.increment_per_km,
+        max_delivery_radius_meters: business.max_delivery_radius_meters,
         created_at: business.created_at,
         outlets: outlets || [],
       },
@@ -87,6 +93,12 @@ export async function updateProfile(req: AuthRequest, res: Response): Promise<vo
       delivery_fee,
       free_delivery_above,
       delivery_radius_km,
+      // Distance-based delivery pricing
+      free_radius_meters,
+      minimum_delivery_charge,
+      minimum_charge_distance_meters,
+      increment_per_km,
+      max_delivery_radius_meters,
       customer_support_phone,
       order_number_prefix
     } = req.body;
@@ -106,6 +118,12 @@ export async function updateProfile(req: AuthRequest, res: Response): Promise<vo
     if (delivery_fee !== undefined) updateData.delivery_fee = delivery_fee;
     if (free_delivery_above !== undefined) updateData.free_delivery_above = free_delivery_above;
     if (delivery_radius_km !== undefined) updateData.delivery_radius_km = delivery_radius_km;
+    // Distance-based delivery pricing
+    if (free_radius_meters !== undefined) updateData.free_radius_meters = free_radius_meters;
+    if (minimum_delivery_charge !== undefined) updateData.minimum_delivery_charge = minimum_delivery_charge;
+    if (minimum_charge_distance_meters !== undefined) updateData.minimum_charge_distance_meters = minimum_charge_distance_meters;
+    if (increment_per_km !== undefined) updateData.increment_per_km = increment_per_km;
+    if (max_delivery_radius_meters !== undefined) updateData.max_delivery_radius_meters = max_delivery_radius_meters;
     if (customer_support_phone !== undefined) updateData.customer_support_phone = customer_support_phone;
     if (order_number_prefix !== undefined) updateData.order_number_prefix = order_number_prefix;
 
@@ -193,6 +211,8 @@ export async function createOutlet(req: AuthRequest, res: Response): Promise<voi
       outlet_name,
       address,
       phone,
+      latitude,
+      longitude,
       opening_time,
       closing_time,
       opening_buffer_minutes,
@@ -223,6 +243,8 @@ export async function createOutlet(req: AuthRequest, res: Response): Promise<voi
         outlet_name,
         address,
         phone: phone || null,
+        latitude: latitude || null,
+        longitude: longitude || null,
         is_active: true,
         display_order: displayOrder,
         // Operating hours
@@ -263,6 +285,8 @@ export async function updateOutlet(req: AuthRequest, res: Response): Promise<voi
       outlet_name,
       address,
       phone,
+      latitude,
+      longitude,
       is_active,
       opening_time,
       closing_time,
@@ -289,6 +313,8 @@ export async function updateOutlet(req: AuthRequest, res: Response): Promise<voi
     if (outlet_name !== undefined) updateData.outlet_name = outlet_name;
     if (address !== undefined) updateData.address = address;
     if (phone !== undefined) updateData.phone = phone;
+    if (latitude !== undefined) updateData.latitude = latitude;
+    if (longitude !== undefined) updateData.longitude = longitude;
     if (is_active !== undefined) updateData.is_active = is_active;
     // Operating hours
     if (opening_time !== undefined) updateData.opening_time = opening_time;

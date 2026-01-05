@@ -2,6 +2,9 @@ import { Response } from 'express';
 import { supabase } from '../config/database';
 import { AuthRequest, getBusinessId } from '../middleware/auth';
 import { logger } from '../utils/logger';
+import { sendWhatsAppMessage } from '../services/whatsapp';
+import { generateOrderSummary } from '../services/orderService';
+import { getBusinessById } from '../services/menuService';
 
 // List sessions with filters
 export async function listSessions(req: AuthRequest, res: Response): Promise<void> {
@@ -322,5 +325,200 @@ export async function sendManualMessage(req: AuthRequest, res: Response): Promis
   } catch (error) {
     logger.error('Failed to send manual message', error);
     res.status(500).json({ error: 'Failed to send message' });
+  }
+}
+
+// Approve delivery for beyond-radius session
+export async function approveDelivery(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const { sessionId } = req.params;
+    const { customDeliveryFee } = req.body; // Optional: admin can set custom fee
+
+    // Verify session belongs to this business and is pending approval
+    const { data: session } = await supabase
+      .from('sessions')
+      .select('id, business_id, delivery_pending_approval, delivery_approval_status, customers(phone)')
+      .eq('id', sessionId)
+      .eq('business_id', businessId)
+      .single();
+
+    if (!session) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+
+    if (!session.delivery_pending_approval || session.delivery_approval_status !== 'pending') {
+      res.status(400).json({ error: 'Session is not pending delivery approval' });
+      return;
+    }
+
+    // Update session - mark as approved
+    await supabase
+      .from('sessions')
+      .update({
+        delivery_pending_approval: false,
+        delivery_approval_status: 'approved',
+      })
+      .eq('id', sessionId);
+
+    // Get business for timezone
+    const business = await getBusinessById(businessId);
+    const businessTimezone = business?.timezone || 'Asia/Kolkata';
+
+    // Generate order summary with delivery fee
+    const summary = await generateOrderSummary(sessionId, {
+      includeCta: true,
+      ctaMessage: '\n✅ *Delivery Approved!* Your location has been approved for delivery.\n\nReply *YES* to confirm your order.',
+      timezone: businessTimezone,
+    });
+
+    // Send message to customer
+    const customerPhone = (session.customers as any)?.phone;
+    if (customerPhone) {
+      await sendWhatsAppMessage(customerPhone, summary);
+
+      // Save outgoing message
+      await supabase.from('messages').insert({
+        session_id: sessionId,
+        direction: 'outgoing',
+        content: summary,
+        created_at: new Date().toISOString(),
+      });
+    }
+
+    logger.info(`Delivery approved for session ${sessionId} by admin`);
+
+    res.status(200).json({ success: true, message: 'Delivery approved, customer notified' });
+  } catch (error) {
+    logger.error('Failed to approve delivery', error);
+    res.status(500).json({ error: 'Failed to approve delivery' });
+  }
+}
+
+// Reject delivery for beyond-radius session
+export async function rejectDelivery(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const { sessionId } = req.params;
+    const { reason } = req.body; // Optional rejection reason
+
+    // Verify session belongs to this business and is pending approval
+    const { data: session } = await supabase
+      .from('sessions')
+      .select('id, business_id, delivery_pending_approval, delivery_approval_status, customers(phone)')
+      .eq('id', sessionId)
+      .eq('business_id', businessId)
+      .single();
+
+    if (!session) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+
+    if (!session.delivery_pending_approval || session.delivery_approval_status !== 'pending') {
+      res.status(400).json({ error: 'Session is not pending delivery approval' });
+      return;
+    }
+
+    // Update session - mark as rejected and clear delivery info
+    await supabase
+      .from('sessions')
+      .update({
+        delivery_pending_approval: false,
+        delivery_approval_status: 'rejected',
+        delivery_address: null,
+        delivery_latitude: null,
+        delivery_longitude: null,
+        fulfillment_type: null,
+      })
+      .eq('id', sessionId);
+
+    // Send message to customer
+    const customerPhone = (session.customers as any)?.phone;
+    if (customerPhone) {
+      const rejectMsg = `❌ *Delivery Not Available*\n\nWe're sorry, but we are unable to deliver to your location at this time.${reason ? `\n\nReason: ${reason}` : ''}\n\nYou can:\n• Choose a different delivery location\n• Select takeaway instead\n\nPlease reply to continue with your order.`;
+
+      await sendWhatsAppMessage(customerPhone, rejectMsg);
+
+      // Save outgoing message
+      await supabase.from('messages').insert({
+        session_id: sessionId,
+        direction: 'outgoing',
+        content: rejectMsg,
+        created_at: new Date().toISOString(),
+      });
+    }
+
+    logger.info(`Delivery rejected for session ${sessionId} by admin`);
+
+    res.status(200).json({ success: true, message: 'Delivery rejected, customer notified' });
+  } catch (error) {
+    logger.error('Failed to reject delivery', error);
+    res.status(500).json({ error: 'Failed to reject delivery' });
+  }
+}
+
+// Get sessions pending delivery approval
+export async function getPendingDeliveryApprovals(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const { data: sessions, error } = await supabase
+      .from('sessions')
+      .select(`
+        id,
+        status,
+        delivery_address,
+        delivery_latitude,
+        delivery_longitude,
+        delivery_pending_approval,
+        delivery_approval_status,
+        created_at,
+        last_message_at,
+        customers (
+          phone,
+          name
+        )
+      `)
+      .eq('business_id', businessId)
+      .eq('delivery_pending_approval', true)
+      .eq('delivery_approval_status', 'pending')
+      .order('last_message_at', { ascending: false });
+
+    if (error) {
+      throw error;
+    }
+
+    const enrichedSessions = (sessions || []).map(session => ({
+      id: session.id,
+      customer_phone: (session.customers as any)?.phone || 'Unknown',
+      customer_name: (session.customers as any)?.name || null,
+      delivery_address: session.delivery_address,
+      delivery_latitude: session.delivery_latitude,
+      delivery_longitude: session.delivery_longitude,
+      status: session.status,
+      created_at: session.created_at,
+      last_message_at: session.last_message_at,
+    }));
+
+    res.status(200).json({ pending_approvals: enrichedSessions });
+  } catch (error) {
+    logger.error('Failed to get pending approvals', error);
+    res.status(500).json({ error: 'Failed to fetch pending approvals' });
   }
 }

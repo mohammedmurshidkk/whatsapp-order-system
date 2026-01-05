@@ -6,7 +6,7 @@ import {
   updateSessionItemCount,
 } from './sessionService';
 import { searchMenuItem, getBusinessById } from './menuService';
-import { formatDeliveryTime, formatDateForDisplay } from './fulfillmentService';
+import { formatDeliveryTime, formatDateForDisplay, calculateDistanceBasedDeliveryFee } from './fulfillmentService';
 import { logger } from '../utils/logger';
 import { parseWeight, isWeightString } from '../utils/weightUtils';
 
@@ -263,10 +263,10 @@ export async function removeSessionItem(
   return true;
 }
 
-// Generate order summary - can optionally include CTA message
+// Generate order summary - automatically includes delivery fee when applicable
 export async function generateOrderSummary(
   sessionId: string,
-  options: { includeCta?: boolean; ctaMessage?: string; timezone?: string } = {}
+  options: { includeCta?: boolean; ctaMessage?: string; timezone?: string; includeDeliveryFee?: boolean } = {}
 ): Promise<string> {
   const { includeCta = false, ctaMessage = 'Reply *YES* to confirm your order' } = options;
   // Handle undefined timezone explicitly (destructuring default doesn't work for explicit undefined)
@@ -352,7 +352,40 @@ export async function generateOrderSummary(
 
   summary += '━━━━━━━━━━━━━━━━━━\n';
   summary += `📦 Total Items: ${session.items.length}\n`;
-  summary += `💰 *Grand Total: ₹${grandTotal}*\n`;
+  summary += `🛒 Subtotal: ₹${grandTotal}\n`;
+
+  // Automatically calculate and display delivery fee for delivery orders with coordinates
+  let deliveryFee = 0;
+  let showDeliveryFee = false;
+
+  if (
+    session.fulfillment_type === 'delivery' &&
+    session.delivery_latitude &&
+    session.delivery_longitude &&
+    session.business_id
+  ) {
+    showDeliveryFee = true;
+    const feeResult = await calculateDistanceBasedDeliveryFee(
+      session.business_id,
+      grandTotal,
+      session.delivery_latitude,
+      session.delivery_longitude
+    );
+    // Only show fee if not beyond max radius (beyond radius is handled separately)
+    if (!feeResult.is_beyond_max_radius) {
+      deliveryFee = feeResult.fee;
+    }
+  }
+
+  if (showDeliveryFee) {
+    if (deliveryFee > 0) {
+      summary += `🚚 Delivery Fee: ₹${deliveryFee}\n`;
+    } else {
+      summary += `🚚 Delivery Fee: FREE\n`;
+    }
+  }
+
+  summary += `💰 *Grand Total: ₹${grandTotal + deliveryFee}*\n`;
 
   // Add fulfillment info if available
   if (session.fulfillment_type) {
@@ -446,8 +479,33 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
     };
   });
 
-  // Generate summary text
-  const orderSummary = await generateOrderSummary(sessionId);
+  // Calculate delivery fee if delivery order with coordinates
+  let deliveryFee = 0;
+  logger.info(`[DELIVERY-FEE] Checking: fulfillment=${session.fulfillment_type}, lat=${session.delivery_latitude}, lng=${session.delivery_longitude}`);
+
+  if (
+    session.fulfillment_type === 'delivery' &&
+    session.delivery_latitude &&
+    session.delivery_longitude &&
+    session.business_id
+  ) {
+    const feeResult = await calculateDistanceBasedDeliveryFee(
+      session.business_id,
+      totalAmount,
+      session.delivery_latitude,
+      session.delivery_longitude
+    );
+    deliveryFee = feeResult.fee;
+    logger.info(`[DELIVERY-FEE] Calculated: ₹${deliveryFee} (distance: ${(feeResult.distance_meters / 1000).toFixed(2)}km, beyond_max: ${feeResult.is_beyond_max_radius})`);
+  } else {
+    logger.info(`[DELIVERY-FEE] Skipped: Missing required fields for delivery fee calculation`);
+  }
+
+  // Grand total includes delivery fee
+  const grandTotal = totalAmount + deliveryFee;
+
+  // Generate summary text (includes delivery fee)
+  const orderSummary = await generateOrderSummary(sessionId, { includeDeliveryFee: true });
 
   // Find earliest delivery date from items
   const deliveryDates = session.items
@@ -470,7 +528,8 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
       customer_id: session.customer_id,
       items: orderItems,
       total_items: session.items.length,
-      total_amount: totalAmount,
+      total_amount: grandTotal,
+      delivery_fee: deliveryFee,
       order_summary: orderSummary,
       status: 'confirmed',
       created_at: new Date().toISOString(),
@@ -495,7 +554,7 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
   // Mark session as completed
   await completeSession(sessionId);
 
-  logger.info(`Order created: ${order.order_number} (ID: ${order.id}) - Total: ₹${totalAmount}`);
+  logger.info(`Order created: ${order.order_number} (ID: ${order.id}) - Total: ₹${grandTotal} (items: ₹${totalAmount}, delivery: ₹${deliveryFee})`);
 
   // Send notification to business
   await sendOrderNotification(order as Order);

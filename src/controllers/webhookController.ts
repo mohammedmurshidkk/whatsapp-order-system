@@ -60,6 +60,7 @@ import {
   formatDeliveryTime,
   calculateDateTimeFromButtons,
   validateOperatingHours,
+  calculateDistanceBasedDeliveryFee,
 } from '../services/fulfillmentService';
 import {
   getAutoSuggestedAddons,
@@ -2664,6 +2665,44 @@ export async function handleWhatsAppWebhook(
                 });
                 logger.info(`[DEBUG-LOC] Step 7 done`);
 
+                // Check if location is beyond max delivery radius
+                const deliveryFeeResult = await calculateDistanceBasedDeliveryFee(
+                  business.id,
+                  0, // Order amount not needed for distance check
+                  location.latitude,
+                  location.longitude
+                );
+
+                if (deliveryFeeResult.is_beyond_max_radius) {
+                  logger.info(`[DEBUG-LOC] Location beyond max radius: ${(deliveryFeeResult.distance_meters / 1000).toFixed(2)}km`);
+
+                  // Set session as pending approval
+                  const { supabase } = await
+                   import('../config/database');
+                  await supabase
+                    .from('sessions')
+                    .update({
+                      delivery_pending_approval: true,
+                      delivery_approval_status: 'pending',
+                    })
+                    .eq('id', session.id);
+
+                  // Notify admin/operations team with session ID for approval
+                  await notifyBusinessAdmin(business.id, {
+                    type: 'delivery_beyond_radius',
+                    customerId: customer.id,
+                    phone: phone,
+                    message: `Customer location is ${(deliveryFeeResult.distance_meters / 1000).toFixed(1)}km away - beyond max delivery radius. Session: ${session.id}. Address: ${displayAddress || 'Location shared'}`,
+                  });
+
+                  // Inform customer
+                  const beyondRadiusMsg = `📍 Location saved!\n\n⚠️ Your location appears to be beyond our regular delivery area (${(deliveryFeeResult.distance_meters / 1000).toFixed(1)}km).\n\nOur operations team will review and confirm if we can deliver to your location.\n\n_You'll receive a confirmation shortly. Thank you for your patience!_`;
+                  await sendWhatsAppMessage(phone, beyondRadiusMsg);
+                  await saveOutgoingMessage(session.id, beyondRadiusMsg);
+                  logger.info(`[DEBUG-LOC] Beyond radius - pending approval set for session ${session.id}`);
+                  continue;
+                }
+
                 // Show date selection buttons instead of asking for time as text
                 if (!sessionWithItems.delivery_time) {
                   logger.info(`[DEBUG-LOC] Step 8: Sending date buttons...`);
@@ -2680,7 +2719,8 @@ export async function handleWhatsAppWebhook(
                   const locationSummary = await generateOrderSummary(session.id, {
                     includeCta: true,
                     ctaMessage: '\n📍 Location saved! Reply *YES* to confirm your order.',
-                    timezone: businessTimezone
+                    timezone: businessTimezone,
+                    includeDeliveryFee: true
                   });
                   await sendWhatsAppMessage(phone, locationSummary);
                   await saveOutgoingMessage(session.id, locationSummary);

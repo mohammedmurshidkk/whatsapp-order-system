@@ -36,6 +36,11 @@ CREATE TABLE businesses (
   delivery_fee DECIMAL(10, 2) DEFAULT 0,
   free_delivery_above DECIMAL(10, 2),
   delivery_radius_km DECIMAL(5, 2),
+  free_radius_meters INTEGER DEFAULT 3000,
+  minimum_delivery_charge DECIMAL(10,2) DEFAULT 30,
+  minimum_charge_distance_meters INTEGER DEFAULT 6000,
+  increment_per_km DECIMAL(10,2) DEFAULT 10,
+  max_delivery_radius_meters INTEGER DEFAULT 15000,
   logo_url TEXT,
   custom_ai_prompt TEXT,
   critical_message TEXT,
@@ -385,6 +390,7 @@ CREATE TABLE orders (
   pickup_outlet_id UUID REFERENCES business_outlets(id),
   pickup_time TIMESTAMP,
   fulfillment_notes TEXT,
+  delivery_fee DECIMAL(10,2) DEFAULT 0,
   updated_at TIMESTAMP DEFAULT NOW()
 );
 
