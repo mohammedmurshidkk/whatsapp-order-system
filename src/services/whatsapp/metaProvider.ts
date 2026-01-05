@@ -343,6 +343,50 @@ export function verifyWebhookChallenge(
 }
 
 /**
+ * Mark a message as read (shows blue checkmarks)
+ * Meta Cloud API doesn't support typing indicators, but marking as read
+ * gives visual feedback that the message was received
+ */
+export async function markAsRead(messageId: string): Promise<void> {
+  const { phoneNumberId, accessToken } = getConfig();
+
+  if (!isConfigured() || !messageId) {
+    return;
+  }
+
+  try {
+    await axios.post(
+      `${WHATSAPP_API_BASE}/${phoneNumberId}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        status: 'read',
+        message_id: messageId,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+    logger.debug(`Message marked as read: ${messageId}`);
+  } catch (error) {
+    // Don't throw - marking as read is not critical
+    logger.debug('Failed to mark message as read', error);
+  }
+}
+
+/**
+ * Show typing indicator - NOT supported by Meta Cloud API
+ * This is a no-op for Meta, but kept for interface compatibility
+ */
+export async function sendTypingIndicator(_to: string): Promise<void> {
+  // Meta Cloud API doesn't support typing indicators
+  // The markAsRead function can be used instead to show blue checkmarks
+  logger.debug('Typing indicator not supported by Meta Cloud API');
+}
+
+/**
  * Get provider status
  */
 export function getStatus(): ProviderStatus {

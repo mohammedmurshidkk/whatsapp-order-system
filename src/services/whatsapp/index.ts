@@ -138,5 +138,30 @@ export function getProviderName(): 'meta' | 'webjs' {
   return WHATSAPP_PROVIDER;
 }
 
+/**
+ * Mark a message as read (shows blue checkmarks to sender)
+ * Only works with Meta provider
+ */
+export async function markAsRead(messageId: string): Promise<void> {
+  if (isWebJS) {
+    // WebJS handles read receipts automatically
+    return;
+  }
+  return metaProvider.markAsRead(messageId);
+}
+
+/**
+ * Send typing indicator
+ * Note: Meta Cloud API does NOT support typing indicators
+ * For Meta, this is a no-op. Consider using markAsRead() instead.
+ */
+export async function sendTypingIndicator(to: string): Promise<void> {
+  if (isWebJS) {
+    // Would call webjsProvider.sendTypingIndicator if implemented
+    return;
+  }
+  return metaProvider.sendTypingIndicator(to);
+}
+
 // Re-export types for convenience
 export * from './types';

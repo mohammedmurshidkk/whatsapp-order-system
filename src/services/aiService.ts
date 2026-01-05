@@ -210,8 +210,21 @@ INTENTS:
 - modify_custom_text: Change cake writing (include customText)
 - remove_custom_text: Remove cake writing
 - remove_addon: Remove addon (include addon.addon_name)
+- custom_cake_inquiry: Customer asking about custom/personalized cake design
 - cancel_existing_order/check_order_status: Include order_id (e.g., "OKS-1")
 - show_menu, item_not_available, cancel, conversation_ended
+
+🎂 CUSTOM CAKE INQUIRIES:
+When customer asks about custom cakes, personalized designs, "can you make this", "do you do custom cakes", "cake like this image":
+- Use intent "custom_cake_inquiry"
+- Ask them to: 1) Share an image OR describe what they want, 2) Specify weight (kg)
+- Example: "Yes, we do custom cakes! Please share an image of the design you'd like OR describe it. Also, what weight/size do you need? (e.g., 1kg, 2kg)"
+
+⚠️ CUSTOM CAKE PRICE RULES (IMPORTANT):
+- For CUSTOM DESIGNED cakes (cakes with images/personalized designs), NEVER calculate prices yourself
+- If customer asks about custom cake prices (rate/price/cost for custom design), say: "Our team will prepare a customized quote for your design."
+- ONLY calculate prices for REGULAR MENU ITEMS with custom weights
+- Custom cake pricing is ALWAYS confirmed by admin, not calculated by you
 
 EXAMPLES:
 Customer: "Rainbow 1kg" → {"reply": "Added Rainbow (1kg)! Anything else?", "intent": "add_item", "item": {"name": "Rainbow", "quantity": 1, "size_or_weight": "1kg"}}
@@ -312,6 +325,28 @@ function parseAIResponse(responseText: string): AIResponse {
   }
 
   jsonStr = jsonStr.trim();
+
+  // ROBUST FIX: Extract only the first complete JSON object
+  // Handles cases where AI returns duplicate JSON (e.g., raw JSON followed by markdown block)
+  // Example: {"reply":"..."}\n```json\n{"reply":"..."}\n```
+  const firstBrace = jsonStr.indexOf('{');
+  if (firstBrace !== -1) {
+    let braceCount = 0;
+    let endIndex = -1;
+    for (let i = firstBrace; i < jsonStr.length; i++) {
+      if (jsonStr[i] === '{') braceCount++;
+      else if (jsonStr[i] === '}') {
+        braceCount--;
+        if (braceCount === 0) {
+          endIndex = i;
+          break;
+        }
+      }
+    }
+    if (endIndex !== -1) {
+      jsonStr = jsonStr.substring(firstBrace, endIndex + 1);
+    }
+  }
 
   try {
     const parsed = JSON.parse(jsonStr);
@@ -512,6 +547,7 @@ export interface CustomTextClassification {
   isValidText: boolean;      // True if user provided actual text to write
   cleanedText: string | null; // Extracted text (stripped of "yes", "ok" prefixes)
   isQuestion: boolean;       // True if user is asking a question
+  isAffirmation: boolean;    // True if user said "yes/ok" meaning they want to provide text (but haven't yet)
 }
 
 export async function classifyCustomTextResponse(
@@ -526,24 +562,31 @@ CUSTOMER'S RESPONSE: "${userResponse}"
 Classify the response:
 1. VALID_TEXT: Customer provided text to write (even with "yes"/"ok" prefix, or in Malayalam/other languages)
 2. QUESTION: Customer is asking a question (price, availability, "how much", "rate ethra", etc.)
-3. SKIP: Customer wants to skip (no, nothing, skip, none, venda, etc.)
+3. AFFIRMATION: Customer said just "yes"/"yeah"/"ok"/"sure"/"athe"/"sheri" alone - meaning they WANT to provide text but haven't given it yet
+4. SKIP: Customer wants to skip (no, nothing, skip, none, venda, etc.)
 
 If VALID_TEXT: Extract ONLY the text to write on cake (remove conversational prefixes like "yes", "ok", "sure", "athe", "sheri")
-If QUESTION or SKIP: cleanedText should be null
+If QUESTION, AFFIRMATION, or SKIP: cleanedText should be null
 
 Respond with JSON only:
-{"isValidText": boolean, "cleanedText": "string or null", "isQuestion": boolean}
+{"isValidText": boolean, "cleanedText": "string or null", "isQuestion": boolean, "isAffirmation": boolean}
 
 Examples:
-- "Yes, Happy Birthday" → {"isValidText": true, "cleanedText": "Happy Birthday", "isQuestion": false}
-- "How much" → {"isValidText": false, "cleanedText": null, "isQuestion": true}
-- "Janmadhinashamsakal" → {"isValidText": true, "cleanedText": "Janmadhinashamsakal", "isQuestion": false}
-- "What's the rate?" → {"isValidText": false, "cleanedText": null, "isQuestion": true}
-- "rate ethra" → {"isValidText": false, "cleanedText": null, "isQuestion": true}
-- "no thanks" → {"isValidText": false, "cleanedText": null, "isQuestion": false}
-- "ok write Happy Anniversary" → {"isValidText": true, "cleanedText": "Happy Anniversary", "isQuestion": false}
-- "Best Wishes to Mom" → {"isValidText": true, "cleanedText": "Best Wishes to Mom", "isQuestion": false}
-- "athe, Congrats" → {"isValidText": true, "cleanedText": "Congrats", "isQuestion": false}`;
+- "Yes, Happy Birthday" → {"isValidText": true, "cleanedText": "Happy Birthday", "isQuestion": false, "isAffirmation": false}
+- "How much" → {"isValidText": false, "cleanedText": null, "isQuestion": true, "isAffirmation": false}
+- "Janmadhinashamsakal" → {"isValidText": true, "cleanedText": "Janmadhinashamsakal", "isQuestion": false, "isAffirmation": false}
+- "What's the rate?" → {"isValidText": false, "cleanedText": null, "isQuestion": true, "isAffirmation": false}
+- "rate ethra" → {"isValidText": false, "cleanedText": null, "isQuestion": true, "isAffirmation": false}
+- "no thanks" → {"isValidText": false, "cleanedText": null, "isQuestion": false, "isAffirmation": false}
+- "ok write Happy Anniversary" → {"isValidText": true, "cleanedText": "Happy Anniversary", "isQuestion": false, "isAffirmation": false}
+- "Best Wishes to Mom" → {"isValidText": true, "cleanedText": "Best Wishes to Mom", "isQuestion": false, "isAffirmation": false}
+- "athe, Congrats" → {"isValidText": true, "cleanedText": "Congrats", "isQuestion": false, "isAffirmation": false}
+- "Yes" → {"isValidText": false, "cleanedText": null, "isQuestion": false, "isAffirmation": true}
+- "yeah" → {"isValidText": false, "cleanedText": null, "isQuestion": false, "isAffirmation": true}
+- "ok" → {"isValidText": false, "cleanedText": null, "isQuestion": false, "isAffirmation": true}
+- "sure" → {"isValidText": false, "cleanedText": null, "isQuestion": false, "isAffirmation": true}
+- "athe" → {"isValidText": false, "cleanedText": null, "isQuestion": false, "isAffirmation": true}
+- "sheri" → {"isValidText": false, "cleanedText": null, "isQuestion": false, "isAffirmation": true}`;
 
   try {
     const aiClient = getAIClient();
@@ -552,7 +595,7 @@ Examples:
     if (!responseText) {
       logger.warn('Empty response from AI for custom text classification');
       // Default: assume it's valid text, save as-is
-      return { isValidText: true, cleanedText: userResponse, isQuestion: false };
+      return { isValidText: true, cleanedText: userResponse, isQuestion: false, isAffirmation: false };
     }
 
     // Parse JSON response
@@ -564,19 +607,25 @@ Examples:
 
     const parsed = JSON.parse(jsonStr);
 
-    logger.info(`Custom text classification: "${userResponse}" → valid=${parsed.isValidText}, question=${parsed.isQuestion}, cleaned="${parsed.cleanedText}"`);
+    logger.info(`Custom text classification: "${userResponse}" → valid=${parsed.isValidText}, question=${parsed.isQuestion}, affirmation=${parsed.isAffirmation}, cleaned="${parsed.cleanedText}"`);
 
     return {
       isValidText: parsed.isValidText === true,
       cleanedText: parsed.cleanedText || null,
       isQuestion: parsed.isQuestion === true,
+      isAffirmation: parsed.isAffirmation === true,
     };
   } catch (error) {
     logger.error('Failed to classify custom text response', { error, userResponse });
-    // Fallback: assume it's valid text, do basic cleanup
+    // Fallback: check if it's just an affirmation word
+    const affirmationOnly = /^(yes|yeah|yep|yup|ok|okay|sure|athe|ath|sheri)$/i.test(userResponse.trim());
+    if (affirmationOnly) {
+      return { isValidText: false, cleanedText: null, isQuestion: false, isAffirmation: true };
+    }
+    // Otherwise assume it's valid text, do basic cleanup
     let cleaned = userResponse;
     cleaned = cleaned.replace(/^(yes|yeah|yep|yup|ok|okay|sure|athe|ath|sheri)[,.\s]+/i, '').trim();
-    return { isValidText: true, cleanedText: cleaned, isQuestion: false };
+    return { isValidText: true, cleanedText: cleaned, isQuestion: false, isAffirmation: false };
   }
 }
 

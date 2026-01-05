@@ -12,6 +12,8 @@ import {
   getFullPricingConfig,
   formatPricingConfigForAI,
   CakePricingConfig,
+  findFlavorWeightPrice,
+  parseWeightFromString,
 } from './cakePricingService';
 import { downloadWhatsAppMedia, storeMediaInSupabase } from './mediaService';
 import { notifyBusinessAdmin } from './notificationService';
@@ -28,7 +30,6 @@ async function analyzeImageWithGemini(
   customerFlavor?: string
 ): Promise<CakeAIAnalysis | null> {
   const apiKey = process.env.GEMINI_API_KEY;
-  logger.info('GEM KEY: ', apiKey)
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY not configured');
   }
@@ -40,23 +41,53 @@ async function analyzeImageWithGemini(
     .map(e => `- ${e.element_key}: "${e.element_label}" (₹${e.price} ${e.price_type === 'per_unit' ? 'per unit' : 'fixed'})`)
     .join('\n');
 
+  // Build available flavors list
+  const flavorsText = pricingConfig.flavorsGrouped
+    .map(f => {
+      const prices = f.weights.map(w => `${w.weight_grams}g: ₹${w.base_price}`).join(', ');
+      return `- ${f.flavor_name}: ${prices}`;
+    })
+    .join('\n');
+
+  // Determine base price from customer specifications or defaults
+  let basePriceInfo = '';
+  if (customerFlavor && customerWeight) {
+    const weightGrams = parseWeightFromString(customerWeight);
+    if (weightGrams) {
+      const priceResult = findFlavorWeightPrice(customerFlavor, weightGrams, pricingConfig.flavors);
+      if (priceResult) {
+        basePriceInfo = `\nBase price for ${customerFlavor} ${customerWeight}: ₹${priceResult.price}${priceResult.isCalculated ? ' (calculated)' : ''}`;
+      }
+    }
+  }
+
   const prompt = `You are a cake pricing assistant for a bakery. Analyze the cake image and identify design elements to calculate pricing.
 
 ${pricingText}
+
+## Available Flavors with Pricing:
+${flavorsText || 'No flavor pricing configured.'}
+${basePriceInfo}
 
 ## Available Design Elements to Detect:
 ${elementsText || 'No elements configured - estimate based on complexity.'}
 
 ## Customer Information:
-- Requested weight: ${customerWeight || 'not specified'}
-- Requested flavor: ${customerFlavor || 'not specified'}
+- Requested weight: ${customerWeight || 'not specified (use 1kg default)'}
+- Requested flavor: ${customerFlavor || 'not specified (use first available or cheapest)'}
 
 ## Your Task:
 1. Analyze the cake image carefully
 2. Identify all visible design elements from the available list
 3. Count quantities where applicable (letters, tiers, decorative pieces)
 4. Assess overall complexity level
-5. Calculate total price using business pricing rules
+5. Calculate total price: base_price (flavor+weight) + design_elements
+
+## Price Calculation Rules:
+- base_price = price from flavor+weight combination
+- For custom weights (2kg, 3kg): calculate from 1kg price (e.g., 2kg = 1kg price × 2)
+- design_elements_total = sum of all detected element prices
+- grand_total = base_price + design_elements_total
 
 ## Response Format (JSON only, no markdown):
 {
@@ -71,12 +102,13 @@ ${elementsText || 'No elements configured - estimate based on complexity.'}
       "notes": "string (optional observation)"
     }
   ],
+  "detected_flavor": "string (flavor identified or suggested)",
+  "detected_weight_grams": number,
   "tier_count": number,
   "complexity_level": "simple|moderate|elaborate|premium",
   "complexity_reasoning": "string explaining why",
   "price_breakdown": {
-    "base_price": number,
-    "flavor_addition": number,
+    "base_price": number (flavor+weight price),
     "design_elements_total": number,
     "grand_total": number
   },
@@ -88,8 +120,9 @@ ${elementsText || 'No elements configured - estimate based on complexity.'}
 ## Important Rules:
 - Only identify elements you can clearly see
 - If unsure about an element, use lower confidence score
-- If weight not specified, use 1kg (1000g) as default for pricing
-- If flavor not specified, use the cheapest/default flavor or 0 addition
+- If weight not specified, use 1kg (1000g) as default
+- If flavor not specified, use the first available flavor from the list
+- base_price already includes the flavor - no separate flavor_addition needed
 - Be conservative with pricing
 - The suggested_message should be warm, professional, and include itemized breakdown
 - Return ONLY valid JSON, no markdown code blocks`;
@@ -380,6 +413,160 @@ export async function cancelQuote(quoteId: string, adminId?: string): Promise<Ca
   return updateQuoteStatus(quoteId, 'cancelled', adminId);
 }
 
+/**
+ * Get the most recent 'sent' quote for a session (customer needs to accept)
+ */
+export async function getSentQuoteForSession(sessionId: string): Promise<CakePriceQuote | null> {
+  const { data, error } = await supabase
+    .from('cake_price_quotes')
+    .select('*')
+    .eq('session_id', sessionId)
+    .eq('status', 'sent')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
+
+  if (error || !data) {
+    return null;
+  }
+
+  return data as CakePriceQuote;
+}
+
+/**
+ * Mark a quote as accepted by customer
+ */
+export async function markQuoteAsAccepted(quoteId: string): Promise<CakePriceQuote | null> {
+  const { data, error } = await supabase
+    .from('cake_price_quotes')
+    .update({
+      status: 'accepted',
+      accepted_at: new Date().toISOString(),
+    })
+    .eq('id', quoteId)
+    .select()
+    .single();
+
+  if (error) {
+    logger.error('Failed to mark quote as accepted', error);
+    return null;
+  }
+
+  logger.info(`Cake quote accepted: ${quoteId}`);
+  return data as CakePriceQuote;
+}
+
+/**
+ * Get accepted quote for session (for time confirmation flow)
+ */
+export async function getAcceptedQuoteForSession(sessionId: string): Promise<CakePriceQuote | null> {
+  const { data, error } = await supabase
+    .from('cake_price_quotes')
+    .select('*')
+    .eq('session_id', sessionId)
+    .eq('status', 'accepted')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
+
+  if (error || !data) {
+    return null;
+  }
+
+  return data as CakePriceQuote;
+}
+
+/**
+ * Update quote with requested delivery/pickup time (pending admin confirmation)
+ */
+export async function updateQuoteTimeRequest(
+  quoteId: string,
+  requestedTime: string,
+  fulfillmentType: 'delivery' | 'takeaway'
+): Promise<CakePriceQuote | null> {
+  const { data, error } = await supabase
+    .from('cake_price_quotes')
+    .update({
+      requested_delivery_time: requestedTime,
+      requested_fulfillment_type: fulfillmentType,
+      time_confirmed: false,
+    })
+    .eq('id', quoteId)
+    .select()
+    .single();
+
+  if (error) {
+    logger.error('Failed to update quote time request', error);
+    return null;
+  }
+
+  logger.info(`Time request saved for quote ${quoteId}: ${requestedTime}`);
+  return data as CakePriceQuote;
+}
+
+/**
+ * Admin confirms the requested time
+ */
+export async function confirmQuoteTime(quoteId: string): Promise<CakePriceQuote | null> {
+  const { data, error } = await supabase
+    .from('cake_price_quotes')
+    .update({
+      time_confirmed: true,
+      time_confirmed_at: new Date().toISOString(),
+    })
+    .eq('id', quoteId)
+    .select()
+    .single();
+
+  if (error) {
+    logger.error('Failed to confirm quote time', error);
+    return null;
+  }
+
+  logger.info(`Time confirmed for quote: ${quoteId}`);
+  return data as CakePriceQuote;
+}
+
+/**
+ * Create a revision quote when customer requests weight/design change
+ * Reuses the existing quote's image but with new weight, status = pending
+ */
+export async function createQuoteRevision(
+  existingQuote: CakePriceQuote,
+  newWeight: string,
+  _revisionNote?: string
+): Promise<CakePriceQuote> {
+  const expiresAt = new Date();
+  expiresAt.setHours(expiresAt.getHours() + 24);
+
+  const { data, error } = await supabase
+    .from('cake_price_quotes')
+    .insert({
+      business_id: existingQuote.business_id,
+      session_id: existingQuote.session_id,
+      customer_id: existingQuote.customer_id,
+      image_url: existingQuote.image_url,
+      customer_weight: newWeight,
+      customer_flavor: existingQuote.customer_flavor,
+      ai_analysis: existingQuote.ai_analysis, // Keep elements from original quote
+      suggested_price: null,
+      suggested_message: null,
+      status: 'pending',
+      created_at: new Date().toISOString(),
+      expires_at: expiresAt.toISOString(),
+    })
+    .select()
+    .single();
+
+  if (error) {
+    logger.error('Failed to create quote revision', error);
+    throw new Error('Failed to create quote revision');
+  }
+
+  logger.info(`Quote revision created: ${data.id} (from ${existingQuote.id}, new weight: ${newWeight})`);
+  return data as CakePriceQuote;
+}
+
 export async function expireOldQuotes(): Promise<number> {
   const { data, error } = await supabase
     .from('cake_price_quotes')
@@ -517,26 +704,29 @@ export function formatQuoteSummaryForAdmin(quote: CakePriceQuoteWithCustomer): s
   }
 
   let summary = `**Customer:** ${quote.customer?.name || quote.customer?.phone || 'Unknown'}\n`;
-  summary += `**Weight:** ${quote.customer_weight || 'Not specified'}\n`;
-  summary += `**Flavor:** ${quote.customer_flavor || 'Not specified'}\n\n`;
+  summary += `**Flavor:** ${analysis.detected_flavor || quote.customer_flavor || 'Not specified'}\n`;
+  summary += `**Weight:** ${analysis.detected_weight_grams ? `${analysis.detected_weight_grams}g` : quote.customer_weight || 'Not specified'}\n\n`;
 
   summary += `**Detected Elements:**\n`;
-  analysis.detected_elements.forEach(e => {
-    summary += `- ${e.element_label}: ${e.quantity}x @ ₹${e.unit_price} = ₹${e.total_price} (${Math.round(e.confidence * 100)}% conf)\n`;
-  });
+  if (analysis.detected_elements.length === 0) {
+    summary += `_No design elements detected_\n`;
+  } else {
+    analysis.detected_elements.forEach(e => {
+      summary += `- ${e.element_label}: ${e.quantity}x @ ₹${e.unit_price} = ₹${e.total_price} (${Math.round(e.confidence * 100)}% conf)\n`;
+    });
+  }
 
   summary += `\n**Complexity:** ${analysis.complexity_level}\n`;
   summary += `_${analysis.complexity_reasoning}_\n\n`;
 
   summary += `**Price Breakdown:**\n`;
-  summary += `- Base: ₹${analysis.price_breakdown.base_price}\n`;
-  summary += `- Flavor: ₹${analysis.price_breakdown.flavor_addition}\n`;
-  summary += `- Design: ₹${analysis.price_breakdown.design_elements_total}\n`;
+  summary += `- Base (${analysis.detected_flavor || 'flavor'} + ${analysis.detected_weight_grams ? `${analysis.detected_weight_grams}g` : 'weight'}): ₹${analysis.price_breakdown.base_price}\n`;
+  summary += `- Design Elements: ₹${analysis.price_breakdown.design_elements_total}\n`;
   summary += `- **Total: ₹${analysis.price_breakdown.grand_total}**\n\n`;
 
   summary += `**Confidence:** ${Math.round(analysis.confidence_score * 100)}%\n`;
 
-  if (analysis.warnings.length > 0) {
+  if (analysis.warnings && analysis.warnings.length > 0) {
     summary += `\n**Warnings:**\n`;
     analysis.warnings.forEach(w => {
       summary += `- ${w}\n`;

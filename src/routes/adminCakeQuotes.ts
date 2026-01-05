@@ -6,6 +6,7 @@ import {
   sendQuote,
   cancelQuoteHandler,
   getQuoteSummary,
+  confirmTimeHandler,
 } from '../controllers/adminCakeQuotesController';
 import { authMiddleware } from '../middleware/auth';
 
@@ -28,6 +29,9 @@ router.get('/:id/summary', getQuoteSummary);
 
 // Mark quote as sent
 router.post('/:id/send', sendQuote);
+
+// Confirm time for custom cake (after customer provides time)
+router.post('/:id/confirm-time', confirmTimeHandler);
 
 // Cancel quote
 router.post('/:id/cancel', cancelQuoteHandler);

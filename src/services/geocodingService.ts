@@ -49,7 +49,7 @@ export async function reverseGeocode(
       },
       headers: {
         // Nominatim requires a User-Agent header
-        'User-Agent': 'WhatsAppOrderingSystem/1.0 (contact@example.com)',
+        'User-Agent': 'WhatsAppOrderingSystem/1.0 (muhammedmurshid43@gmail.com)',
         'Accept-Language': 'en',
         'Accept': 'application/json',
       },

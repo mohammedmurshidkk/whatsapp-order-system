@@ -15,6 +15,10 @@ import {
   getMediaTypeFromMimeType,
   MediaType,
 } from '../services/mediaService';
+import {
+  getPendingQuoteForSession,
+  markQuoteAsSent,
+} from '../services/cakeQuoteService';
 
 
 // ============================================
@@ -218,8 +222,9 @@ export async function getSessionMessages(req: AuthRequest, res: Response): Promi
 export async function sendReply(req: AuthRequest, res: Response): Promise<void> {
   try {
     const businessId = getBusinessId(req);
+    const adminId = req.user?.id;
     const { sessionId } = req.params;
-    const { type, content, media_id, caption, filename } = req.body;
+    const { type, content, media_id, caption, filename, quote_id, quote_price } = req.body;
 
     if (!businessId) {
       res.status(401).json({ success: false, error: 'Unauthorized' });
@@ -354,11 +359,60 @@ export async function sendReply(req: AuthRequest, res: Response): Promise<void> 
       .update({ last_message_at: new Date().toISOString() })
       .eq('id', sessionId);
 
+    // ============================================
+    // HANDLE CAKE QUOTE UPDATE
+    // ============================================
+    // If quote_id and quote_price are provided, mark the quote as sent
+    // This happens when admin sends a custom cake price quote via chat
+    let quoteUpdated = false;
+    if (quote_id && quote_price !== undefined) {
+      try {
+        const updatedQuote = await markQuoteAsSent(
+          quote_id,
+          adminId || 'unknown',
+          content, // Save the message as admin_final_message
+          parseFloat(quote_price)
+        );
+        if (updatedQuote) {
+          quoteUpdated = true;
+          logger.info(`Quote ${quote_id} marked as sent with price ₹${quote_price}`);
+        }
+      } catch (quoteError) {
+        logger.error('Failed to update quote status', quoteError);
+        // Don't fail the request - message was sent successfully
+      }
+    } else if (type === 'text' && content) {
+      // Auto-detect: If there's a pending quote for this session and message contains a price
+      // Try to extract price from message (e.g., "₹1500", "Rs 1500", "1500/-")
+      const priceMatch = content.match(/(?:₹|Rs\.?|INR)\s*(\d+(?:,\d{3})*(?:\.\d{2})?)|(\d+(?:,\d{3})*)\s*(?:\/-|rupees?)/i);
+      if (priceMatch) {
+        const pendingQuote = await getPendingQuoteForSession(sessionId);
+        if (pendingQuote) {
+          const extractedPrice = parseFloat((priceMatch[1] || priceMatch[2]).replace(/,/g, ''));
+          try {
+            const updatedQuote = await markQuoteAsSent(
+              pendingQuote.id,
+              adminId || 'unknown',
+              content,
+              extractedPrice
+            );
+            if (updatedQuote) {
+              quoteUpdated = true;
+              logger.info(`Auto-detected quote ${pendingQuote.id} marked as sent with price ₹${extractedPrice}`);
+            }
+          } catch (quoteError) {
+            logger.error('Failed to auto-update quote status', quoteError);
+          }
+        }
+      }
+    }
+
     res.status(200).json({
       success: true,
       data: {
         message: savedMessage,
         whatsapp_message_id: whatsappMessageId,
+        quote_updated: quoteUpdated,
       },
     });
   } catch (error) {

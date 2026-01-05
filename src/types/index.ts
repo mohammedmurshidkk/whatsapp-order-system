@@ -258,6 +258,7 @@ export type AIIntent =
   | 'save_custom_text'      // Save custom text response (e.g., cake message)
   | 'modify_custom_text'    // Customer wants to change cake writing
   | 'remove_custom_text'    // Customer wants to remove cake writing
+  | 'custom_cake_inquiry'   // Customer asking about custom/personalized cake design
   | 'confirm_order'         // Final confirmation (step 2 of 2-step checkout)
   | 'cancel'
   | 'cancel_existing_order' // Cancel a confirmed order
@@ -402,9 +403,12 @@ export interface TestMessageRequest {
 // CUSTOM CAKE PRICING TYPES
 // ============================================
 
-export interface CakeWeightPricing {
+// Combined Flavor + Weight pricing
+// Each flavor has its own price for each weight (e.g., Vanilla 500g: 600, Chocolate 1kg: 1200)
+export interface CakeFlavorPricing {
   id: string;
   business_id: string;
+  flavor_name: string;
   weight_grams: number;
   base_price: number;
   is_active: boolean;
@@ -412,14 +416,13 @@ export interface CakeWeightPricing {
   updated_at: string;
 }
 
-export interface CakeFlavorPricing {
-  id: string;
-  business_id: string;
+// Grouped format for display (flavor with all its weight options)
+export interface CakeFlavorWithWeights {
   flavor_name: string;
-  additional_price: number;
-  is_active: boolean;
-  created_at: string;
-  updated_at: string;
+  weights: Array<{
+    weight_grams: number;
+    base_price: number;
+  }>;
 }
 
 export type CakeDesignPriceType = 'fixed' | 'per_unit';
@@ -437,7 +440,7 @@ export interface CakeDesignElement {
   updated_at: string;
 }
 
-export type CakePriceQuoteStatus = 'pending' | 'sent' | 'cancelled' | 'expired';
+export type CakePriceQuoteStatus = 'pending' | 'sent' | 'accepted' | 'cancelled' | 'expired';
 
 export interface CakeAIDetectedElement {
   element_key: string;
@@ -451,12 +454,13 @@ export interface CakeAIDetectedElement {
 
 export interface CakeAIAnalysis {
   detected_elements: CakeAIDetectedElement[];
+  detected_flavor?: string;
+  detected_weight_grams?: number;
   tier_count: number;
   complexity_level: 'simple' | 'moderate' | 'elaborate' | 'premium';
   complexity_reasoning: string;
   price_breakdown: {
-    base_price: number;
-    flavor_addition: number;
+    base_price: number;           // Combined flavor + weight price
     design_elements_total: number;
     grand_total: number;
   };
@@ -466,6 +470,7 @@ export interface CakeAIAnalysis {
 }
 
 export interface CakePriceQuote {
+  final_price: any;
   id: string;
   business_id: string;
   session_id: string | null;
@@ -481,6 +486,12 @@ export interface CakePriceQuote {
   admin_final_price: number | null;
   reviewed_by: string | null;
   reviewed_at: string | null;
+  accepted_at: string | null;
+  // Time confirmation for custom cakes
+  requested_delivery_time: string | null;
+  requested_fulfillment_type: 'delivery' | 'takeaway' | null;
+  time_confirmed: boolean;
+  time_confirmed_at: string | null;
   created_at: string;
   expires_at: string;
 }

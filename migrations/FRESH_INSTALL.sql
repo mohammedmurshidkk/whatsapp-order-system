@@ -421,33 +421,23 @@ ALTER TABLE businesses ADD COLUMN IF NOT EXISTS custom_cake_enabled BOOLEAN DEFA
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS custom_cake_auto_send BOOLEAN DEFAULT false;
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS custom_cake_quote_expiry_hours INTEGER DEFAULT 24;
 
--- Weight-based pricing per business
-CREATE TABLE cake_weight_pricing (
+-- Combined Flavor + Weight pricing per business
+-- Each flavor has its own price for each weight (e.g., Vanilla 500g: 600, Vanilla 1kg: 800, Chocolate 500g: 700)
+-- For custom weights (2kg, 3kg), price is calculated proportionally from 1kg price
+CREATE TABLE cake_flavor_pricing (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  flavor_name VARCHAR(100) NOT NULL,
   weight_grams INTEGER NOT NULL,
   base_price DECIMAL(10, 2) NOT NULL,
   is_active BOOLEAN DEFAULT true,
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW(),
-  UNIQUE(business_id, weight_grams)
-);
-
-CREATE INDEX idx_cake_weight_pricing_business ON cake_weight_pricing(business_id) WHERE is_active = true;
-
--- Flavor pricing per business
-CREATE TABLE cake_flavor_pricing (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
-  flavor_name VARCHAR(100) NOT NULL,
-  additional_price DECIMAL(10, 2) DEFAULT 0,
-  is_active BOOLEAN DEFAULT true,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW(),
-  UNIQUE(business_id, flavor_name)
+  UNIQUE(business_id, flavor_name, weight_grams)
 );
 
 CREATE INDEX idx_cake_flavor_pricing_business ON cake_flavor_pricing(business_id) WHERE is_active = true;
+CREATE INDEX idx_cake_flavor_pricing_flavor ON cake_flavor_pricing(business_id, flavor_name) WHERE is_active = true;
 
 -- Design elements pricing per business
 CREATE TABLE cake_design_elements (
@@ -478,11 +468,17 @@ CREATE TABLE cake_price_quotes (
   ai_analysis JSONB,
   suggested_price DECIMAL(10, 2),
   suggested_message TEXT,
-  status VARCHAR(20) DEFAULT 'pending', -- pending, sent, cancelled, expired
+  status VARCHAR(20) DEFAULT 'pending', -- pending, sent, accepted, cancelled, expired
   admin_final_message TEXT,
   admin_final_price DECIMAL(10, 2),
   reviewed_by UUID REFERENCES admin_users(id),
   reviewed_at TIMESTAMP,
+  accepted_at TIMESTAMPTZ, -- When customer accepted the quote
+  -- Time confirmation for custom cakes
+  requested_delivery_time VARCHAR(100),
+  requested_fulfillment_type VARCHAR(20), -- delivery or takeaway
+  time_confirmed BOOLEAN DEFAULT false,
+  time_confirmed_at TIMESTAMP,
   created_at TIMESTAMP DEFAULT NOW(),
   expires_at TIMESTAMP DEFAULT NOW() + INTERVAL '24 hours'
 );

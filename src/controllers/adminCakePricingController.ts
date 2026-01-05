@@ -3,10 +3,10 @@ import { AuthRequest, getBusinessId } from '../middleware/auth';
 import { supabase } from '../config/database';
 import { logger } from '../utils/logger';
 import {
-  getWeightPricings,
-  createWeightPricing,
-  updateWeightPricing,
-  deleteWeightPricing,
+  // getWeightPricings,
+  // createWeightPricing,
+  // updateWeightPricing,
+  // deleteWeightPricing,
   getFlavorPricings,
   createFlavorPricing,
   updateFlavorPricing,
@@ -32,8 +32,9 @@ export async function listWeightPricings(req: AuthRequest, res: Response): Promi
       return;
     }
 
-    const weights = await getWeightPricings(businessId);
-    res.status(200).json({ success: true, data: weights });
+    throw new Error('####### hi - 444  - -- - ')
+    // const weights = await getWeightPricings(businessId);
+    // res.status(200).json({ success: true, data: weights });
   } catch (error) {
     logger.error('Failed to list weight pricings', error);
     res.status(500).json({ error: 'Failed to fetch weight pricings' });
@@ -60,9 +61,9 @@ export async function createWeight(req: AuthRequest, res: Response): Promise<voi
       return;
     }
 
-    const weight = await createWeightPricing(businessId, weight_grams, base_price);
-    logger.info(`Weight pricing created: ${weight_grams}g = ₹${base_price}`);
-    res.status(201).json({ success: true, data: weight });
+    // const weight = await createWeightPricing(businessId, weight_grams, base_price);
+    // logger.info(`Weight pricing created: ${weight_grams}g = ₹${base_price}`);
+    // res.status(201).json({ success: true, data: weight });
   } catch (error) {
     logger.error('Failed to create weight pricing', error);
     res.status(500).json({ error: 'Failed to create weight pricing' });
@@ -85,9 +86,10 @@ export async function updateWeight(req: AuthRequest, res: Response): Promise<voi
     if (base_price !== undefined) updates.base_price = base_price;
     if (is_active !== undefined) updates.is_active = is_active;
 
-    const weight = await updateWeightPricing(id, updates);
-    logger.info(`Weight pricing updated: ${id}`);
-    res.status(200).json({ success: true, data: weight });
+    throw new Error('####### hi - 333  - -- - ')
+    // const weight = await updateWeightPricing(id, updates);
+    // logger.info(`Weight pricing updated: ${id}`);
+    // res.status(200).json({ success: true, data: weight });
   } catch (error) {
     logger.error('Failed to update weight pricing', error);
     res.status(500).json({ error: 'Failed to update weight pricing' });
@@ -103,12 +105,14 @@ export async function deleteWeight(req: AuthRequest, res: Response): Promise<voi
     }
 
     const { id } = req.params;
-    const success = await deleteWeightPricing(id);
+    // const success = await deleteWeightPricing(id);
 
-    if (!success) {
-      res.status(404).json({ error: 'Weight pricing not found' });
-      return;
-    }
+    // if (!success) {
+    //   res.status(404).json({ error: 'Weight pricing not found' });
+    //   return;
+    // }
+
+    throw new Error('####### hi  - -- - ')
 
     logger.info(`Weight pricing deleted: ${id}`);
     res.status(200).json({ success: true });
@@ -153,7 +157,8 @@ export async function createFlavor(req: AuthRequest, res: Response): Promise<voi
       return;
     }
 
-    const flavor = await createFlavorPricing(businessId, flavor_name, additional_price);
+    const flavor = await createFlavorPricing(businessId, flavor_name, additional_price, 111);
+    throw new Error('####### hi - 22  - -- - ');
     logger.info(`Flavor pricing created: ${flavor_name} = +₹${additional_price}`);
     res.status(201).json({ success: true, data: flavor });
   } catch (error) {

@@ -14,6 +14,7 @@ export async function notifyBusinessAdmin(
     phone?: string;
     imageId?: string;
     message: string;
+    quoteId?: string
   }
 ): Promise<Notification | null> {
   const { data, error } = await supabase

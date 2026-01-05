@@ -312,33 +312,97 @@ ALTER TABLE businesses ADD COLUMN IF NOT EXISTS custom_cake_enabled BOOLEAN DEFA
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS custom_cake_auto_send BOOLEAN DEFAULT false;
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS custom_cake_quote_expiry_hours INTEGER DEFAULT 24;
 
--- Weight-based pricing per business
-CREATE TABLE IF NOT EXISTS cake_weight_pricing (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
-  weight_grams INTEGER NOT NULL,
-  base_price DECIMAL(10, 2) NOT NULL,
-  is_active BOOLEAN DEFAULT true,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW(),
-  UNIQUE(business_id, weight_grams)
-);
+-- ============================================
+-- MIGRATE cake_flavor_pricing to combined Flavor + Weight structure
+-- Old: flavor_name + additional_price (added to base weight price)
+-- New: flavor_name + weight_grams + base_price (complete price per flavor+weight)
+-- ============================================
 
-CREATE INDEX IF NOT EXISTS idx_cake_weight_pricing_business ON cake_weight_pricing(business_id) WHERE is_active = true;
-
--- Flavor pricing per business
+-- Step 1: Create new combined table if it doesn't exist with new structure
 CREATE TABLE IF NOT EXISTS cake_flavor_pricing (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
   flavor_name VARCHAR(100) NOT NULL,
-  additional_price DECIMAL(10, 2) DEFAULT 0,
+  weight_grams INTEGER NOT NULL DEFAULT 1000,
+  base_price DECIMAL(10, 2) NOT NULL DEFAULT 0,
   is_active BOOLEAN DEFAULT true,
   created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW(),
-  UNIQUE(business_id, flavor_name)
+  updated_at TIMESTAMP DEFAULT NOW()
 );
 
+-- Step 2: Add new columns if table exists but doesn't have them
+ALTER TABLE cake_flavor_pricing ADD COLUMN IF NOT EXISTS weight_grams INTEGER NOT NULL DEFAULT 1000;
+ALTER TABLE cake_flavor_pricing ADD COLUMN IF NOT EXISTS base_price DECIMAL(10, 2) NOT NULL DEFAULT 0;
+
+-- Step 3: Migrate data from old structure if additional_price column exists
+-- Combine old flavor pricing with weight pricing to create new records
+DO $$
+DECLARE
+  has_additional_price BOOLEAN;
+  has_weight_pricing BOOLEAN;
+BEGIN
+  -- Check if old additional_price column exists
+  SELECT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'cake_flavor_pricing' AND column_name = 'additional_price'
+  ) INTO has_additional_price;
+
+  -- Check if old cake_weight_pricing table exists
+  SELECT EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_name = 'cake_weight_pricing'
+  ) INTO has_weight_pricing;
+
+  -- If old structure exists, migrate data
+  IF has_additional_price AND has_weight_pricing THEN
+    -- Insert combined records for each flavor + weight combination
+    INSERT INTO cake_flavor_pricing (business_id, flavor_name, weight_grams, base_price, is_active, created_at, updated_at)
+    SELECT
+      f.business_id,
+      f.flavor_name,
+      w.weight_grams,
+      w.base_price + COALESCE(f.additional_price, 0) as base_price,
+      f.is_active AND w.is_active,
+      NOW(),
+      NOW()
+    FROM cake_flavor_pricing f
+    CROSS JOIN cake_weight_pricing w
+    WHERE f.business_id = w.business_id
+      AND f.additional_price IS NOT NULL
+    ON CONFLICT DO NOTHING;
+
+    -- Drop old additional_price column after migration
+    ALTER TABLE cake_flavor_pricing DROP COLUMN IF EXISTS additional_price;
+  END IF;
+END $$;
+
+-- Step 4: Drop old unique constraint and create new one
+DO $$
+BEGIN
+  -- Drop old constraint if exists (business_id, flavor_name)
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'cake_flavor_pricing_business_id_flavor_name_key'
+  ) THEN
+    ALTER TABLE cake_flavor_pricing DROP CONSTRAINT cake_flavor_pricing_business_id_flavor_name_key;
+  END IF;
+
+  -- Add new unique constraint (business_id, flavor_name, weight_grams)
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'cake_flavor_pricing_business_id_flavor_name_weight_grams_key'
+  ) THEN
+    ALTER TABLE cake_flavor_pricing ADD CONSTRAINT cake_flavor_pricing_business_id_flavor_name_weight_grams_key
+      UNIQUE (business_id, flavor_name, weight_grams);
+  END IF;
+END $$;
+
+-- Step 5: Create indexes
 CREATE INDEX IF NOT EXISTS idx_cake_flavor_pricing_business ON cake_flavor_pricing(business_id) WHERE is_active = true;
+CREATE INDEX IF NOT EXISTS idx_cake_flavor_pricing_flavor ON cake_flavor_pricing(business_id, flavor_name) WHERE is_active = true;
+
+-- Step 6: Drop old weight pricing table (deprecated - now combined with flavor)
+DROP TABLE IF EXISTS cake_weight_pricing;
 
 -- Design elements pricing per business
 CREATE TABLE IF NOT EXISTS cake_design_elements (
@@ -382,6 +446,12 @@ CREATE INDEX IF NOT EXISTS idx_cake_price_quotes_business ON cake_price_quotes(b
 CREATE INDEX IF NOT EXISTS idx_cake_price_quotes_session ON cake_price_quotes(session_id);
 CREATE INDEX IF NOT EXISTS idx_cake_price_quotes_status ON cake_price_quotes(business_id, status);
 CREATE INDEX IF NOT EXISTS idx_cake_price_quotes_pending ON cake_price_quotes(business_id) WHERE status = 'pending';
+
+ALTER TABLE cake_price_quotes ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
+ALTER TABLE cake_price_quotes ADD COLUMN IF NOT EXISTS requested_delivery_time VARCHAR(100);
+ALTER TABLE cake_price_quotes ADD COLUMN IF NOT EXISTS requested_fulfillment_type VARCHAR(20);
+ALTER TABLE cake_price_quotes ADD COLUMN IF NOT EXISTS time_confirmed BOOLEAN DEFAULT false;
+ALTER TABLE cake_price_quotes ADD COLUMN IF NOT EXISTS time_confirmed_at TIMESTAMP;
 
 -- ============================================
 -- DONE

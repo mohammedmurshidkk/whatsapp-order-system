@@ -77,6 +77,7 @@ import {
   sendInteractiveListMessage,
   sendLocationRequest,
   sendDocument,
+  markAsRead,
 } from '../services/whatsapp';
 import { getMenuPdfUrl, menuPdfExists } from '../services/pdfService';
 import { getAddressFromCoordinates } from '../services/geocodingService';
@@ -86,7 +87,15 @@ import {
   isVoiceEnabled,
 } from '../services/speechService';
 import { notifyBusinessAdmin } from '../services/notificationService';
-import { processCakeImage } from '../services/cakeQuoteService';
+import {
+  processCakeImage,
+  getPendingQuoteForSession,
+  getSentQuoteForSession,
+  markQuoteAsAccepted,
+  getAcceptedQuoteForSession,
+  updateQuoteTimeRequest,
+  createQuoteRevision,
+} from '../services/cakeQuoteService';
 import {
   isValidPhoneNumber,
   sanitizePhoneNumber,
@@ -106,6 +115,74 @@ const pendingAddonSelectionMap = new Map<string, { itemId: string; addons: MenuA
 
 // Track pending date selection for time button flow (date selected, waiting for time)
 const pendingDateSelectionMap = new Map<string, { date: 'today' | 'tomorrow'; fulfillmentType: 'delivery' | 'takeaway' }>(); // sessionId -> { date, fulfillmentType }
+
+// Message debounce buffer - waits for user to finish typing before processing
+interface PendingMessage {
+  messages: string[];
+  businessId: string;
+  customerName?: string;
+  timer: NodeJS.Timeout;
+}
+const messageDebounceMap = new Map<string, PendingMessage>(); // phone -> pending messages
+
+const DEBOUNCE_DELAY_MS = 10000; // Wait 10 seconds for more messages
+
+async function processDebouncedMessages(phone: string): Promise<void> {
+  const pending = messageDebounceMap.get(phone);
+  if (!pending) return;
+
+  messageDebounceMap.delete(phone);
+
+  // Combine all messages into one
+  const combinedMessage = pending.messages.join('\n');
+
+  logger.info(`Processing ${pending.messages.length} debounced message(s) for ${phone}`);
+
+  try {
+    const reply = await processMessage(
+      phone,
+      combinedMessage,
+      pending.businessId,
+      pending.customerName
+    );
+    if (reply !== null) {
+      await sendWhatsAppMessage(phone, reply);
+    }
+  } catch (error) {
+    logger.error('Error processing debounced messages', error);
+    await sendWhatsAppMessage(
+      phone,
+      "We're experiencing a temporary issue. Please try again in a moment."
+    );
+  }
+}
+
+function queueMessageForDebounce(
+  phone: string,
+  messageText: string,
+  businessId: string,
+  customerName?: string
+): void {
+  const existing = messageDebounceMap.get(phone);
+
+  if (existing) {
+    // Clear existing timer and add message to queue
+    clearTimeout(existing.timer);
+    existing.messages.push(messageText);
+    existing.timer = setTimeout(() => processDebouncedMessages(phone), DEBOUNCE_DELAY_MS);
+    logger.debug(`Added to debounce queue for ${phone}, total: ${existing.messages.length}`);
+  } else {
+    // Create new queue
+    const timer = setTimeout(() => processDebouncedMessages(phone), DEBOUNCE_DELAY_MS);
+    messageDebounceMap.set(phone, {
+      messages: [messageText],
+      businessId,
+      customerName,
+      timer,
+    });
+    logger.debug(`Created debounce queue for ${phone}`);
+  }
+}
 
 // Format session items as strings for AI context
 function formatSessionItemsForAI(items: SessionItem[]): string[] {
@@ -248,6 +325,14 @@ export async function processMessage(
         isCustomTextQuestion = true; // Flag to skip pendingAddon check
         await saveIncomingMessage(session.id, messageText);
         // Fall through to AI processing (don't return here)
+      } else if (classification.isAffirmation) {
+        // User said just "yes"/"ok" - they want to provide text but haven't yet
+        // Keep pending state, ask them for the actual text
+        logger.info(`Custom text affirmation detected: "${originalMessage}" - asking for actual text`);
+        await saveIncomingMessage(session.id, messageText);
+        const askForTextReply = "Great! What would you like written on the cake?";
+        await saveOutgoingMessage(session.id, askForTextReply);
+        return askForTextReply;
       } else if (!classification.isValidText) {
         // AI detected a skip (e.g., "no", "nothing", "venda")
         logger.info(`AI detected skip for custom text: "${originalMessage}"`);
@@ -435,6 +520,51 @@ export async function processMessage(
             }
           }
 
+          // ============================================
+          // CUSTOM CAKE TIME CONFIRMATION FLOW
+          // ============================================
+          // Check if this is a custom cake order that needs admin time confirmation
+          const acceptedQuote = await getAcceptedQuoteForSession(session.id);
+
+          if (acceptedQuote && !acceptedQuote.time_confirmed) {
+            // This is a custom cake order - time needs admin confirmation
+            const fulfillmentType = needsDeliveryTime ? 'delivery' : 'takeaway';
+            logger.info(`🎂 Custom cake time request: ${parsedTime} (${fulfillmentType})`);
+
+            // Save time to quote (pending confirmation)
+            await updateQuoteTimeRequest(acceptedQuote.id, parsedTime, fulfillmentType);
+
+            // Also save to session for display purposes
+            if (needsDeliveryTime) {
+              await updateSessionDeliveryInfo(session.id, {
+                address: sessionForTimeCheck.delivery_address!,
+                time: parsedTime,
+              });
+            } else {
+              await updateSessionPickupInfo(session.id, {
+                outlet_id: sessionForTimeCheck.pickup_outlet_id!,
+                time: parsedTime,
+              });
+            }
+
+            // Notify admin about time confirmation request
+            await notifyBusinessAdmin(businessId, {
+              type: 'cake_time_confirmation',
+              customerId: customer.id,
+              phone,
+              message: `Custom cake time confirmation needed: ${parsedTime} (${fulfillmentType})`,
+              quoteId: acceptedQuote.id,
+            });
+
+            // Tell customer to wait for confirmation
+            const timeConfirmMsg = `⏰ We've noted your preferred ${fulfillmentType === 'delivery' ? 'delivery' : 'pickup'} time: *${parsedTime}*\n\n` +
+              `Since this is a custom designed cake, our team will confirm if we can deliver by this time.\n\n` +
+              `_You'll receive a confirmation shortly. Thank you for your patience! 🙏_`;
+            await saveOutgoingMessage(session.id, timeConfirmMsg);
+            return timeConfirmMsg;
+          }
+
+          // Normal flow - save time and show confirmation
           if (needsDeliveryTime) {
             await updateSessionDeliveryInfo(session.id, {
               address: sessionForTimeCheck.delivery_address!,
@@ -473,7 +603,186 @@ export async function processMessage(
 
   // Get session with items (for duplicate prevention)
   const sessionWithItems = await getSessionWithItems(session.id);
-  const existingItems = sessionWithItems?.items || [];
+  let existingItems = sessionWithItems?.items || [];
+
+  // ============================================
+  // CUSTOM CAKE QUOTE ACCEPTANCE HANDLER
+  // ============================================
+  // Check if customer is accepting a sent quote (before AI processing)
+  // Flexible matching - allows phrases like "Ooh.. Okay", "Yes please", "please proceed"
+  const acceptancePatterns = [
+    /\b(okay|ok)\b/i,                          // "Ooh.. Okay", "Ok"
+    /\b(yes|yeah|yep|yup)\b/i,                 // "Yes", "Yes please"
+    /\b(sure|confirm|accept|agreed)\b/i,       // "Sure", "I accept"
+    /\bproceed\b/i,                            // "Please proceed", "No please proceed"
+    /\bgo\s*ahead\b/i,                         // "Go ahead"
+    /\bsheri\b/i,                              // Malayalam "sheri" = okay
+  ];
+  const isAcceptMessage = acceptancePatterns.some(pattern => pattern.test(messageText.trim()));
+
+  if (isAcceptMessage) {
+    // IMPORTANT: Skip quote acceptance if fulfillment is already complete
+    // This means user is saying "Yes" to confirm their ORDER, not to accept a quote
+    const fulfillmentComplete = sessionWithItems?.fulfillment_type &&
+        (sessionWithItems?.delivery_address || sessionWithItems?.pickup_outlet_id);
+
+    if (fulfillmentComplete && existingItems.length > 0) {
+      logger.info(`Quote acceptance skipped - fulfillment complete, this is order confirmation`);
+      // Let the code continue to AI processing and confirm_order intent handling
+    } else {
+      // Check if there's a sent quote waiting for acceptance
+      const sentQuote = await getSentQuoteForSession(session.id);
+      logger.info(`Quote acceptance check - message: "${messageText}", sessionId: ${session.id}, sentQuote: ${sentQuote?.id || 'none'}`);
+
+
+    if (sentQuote) {
+      logger.info(`🎂 Customer accepting custom cake quote: ${sentQuote.id}`);
+
+      // Mark quote as accepted
+      const acceptedQuote = await markQuoteAsAccepted(sentQuote.id);
+
+      if (acceptedQuote) {
+        // Use admin-confirmed price, fallback to AI suggested price
+        const finalPrice = acceptedQuote.admin_final_price ?? acceptedQuote.suggested_price ?? 0;
+        const cakeFlavor = acceptedQuote.ai_analysis?.detected_flavor || acceptedQuote.customer_flavor || 'Custom';
+        const cakeWeight = acceptedQuote.customer_weight ||
+          (acceptedQuote.ai_analysis?.detected_weight_grams ? `${acceptedQuote.ai_analysis.detected_weight_grams}g` : '1kg');
+
+        // Add custom cake to cart
+        const customCakeItem = await saveOrderItem(session.id, {
+          name: `Custom ${cakeFlavor} Cake`,
+          size_or_weight: cakeWeight,
+          quantity: 1,
+          notes: 'Custom designed cake (quote accepted)',
+        }, businessId);
+
+        // Update the item with admin-confirmed price directly
+        const { supabase } = await import('../config/database');
+        await supabase
+          .from('session_items')
+          .update({ unit_price: finalPrice })
+          .eq('id', customCakeItem.id);
+
+        logger.info(`✅ Custom cake added to cart: ${customCakeItem.id}, price: ₹${finalPrice}`);
+
+        // Store last item for addons
+        lastAddedItemMap.set(session.id, customCakeItem.id);
+
+        // Refresh existing items
+        const updatedSession = await getSessionWithItems(session.id);
+        existingItems = updatedSession?.items || [];
+
+        // Save incoming message
+        await saveIncomingMessage(session.id, messageText);
+
+        // Generate summary and ask for fulfillment
+        const summary = await generateOrderSummary(session.id, { includeCta: false, timezone: business?.timezone || 'Asia/Kolkata' });
+
+        let quoteAcceptedReply: string;
+        if (business?.supports_delivery && business?.supports_takeaway) {
+          quoteAcceptedReply = `Great! Your custom cake order has been added! 🎂\n\n${summary}\n\nHow would you like to receive your order?`;
+          await saveOutgoingMessage(session.id, quoteAcceptedReply);
+          await sendReplyButtons(phone, quoteAcceptedReply, [
+            { id: 'delivery', title: '🚚 Delivery' },
+            { id: 'takeaway', title: '🏪 Takeaway' },
+          ]);
+          return null;
+        } else if (business?.supports_delivery) {
+          quoteAcceptedReply = `Great! Your custom cake order has been added! 🎂\n\n${summary}\n\nPlease share your delivery address and preferred date/time.`;
+        } else {
+          quoteAcceptedReply = `Great! Your custom cake order has been added! 🎂\n\n${summary}\n\nPlease select your preferred pickup location.`;
+          if (outlets.length > 0) {
+            quoteAcceptedReply += '\n\n' + formatOutletsForCustomer(outlets);
+          }
+        }
+
+        await saveOutgoingMessage(session.id, quoteAcceptedReply);
+        return quoteAcceptedReply;
+      }
+    }
+    } // Close else block for fulfillment check
+  }
+
+  // ============================================
+  // CUSTOM CAKE PRICE/WEIGHT CHANGE DETECTION
+  // ============================================
+  // If customer has an accepted/sent quote and asks about different weight/price,
+  // create a revision quote for admin review instead of letting AI calculate
+  const existingQuoteForRevision = await getAcceptedQuoteForSession(session.id) || await getSentQuoteForSession(session.id);
+
+  if (existingQuoteForRevision && businessId) {
+    // Patterns that indicate price/weight inquiry or change request
+    // Malayalam: "ethra" = how much, "rate" = rate/price, "vila" = price
+    // English: "price", "rate", "cost", "how much"
+    // Weight patterns: "2kg", "2 kg", "3kg", "1.5kg", etc.
+    const priceInquiryPattern = /(?:rate|price|cost|ethra|vila|how much|enna vila|enthu vila)/i;
+    const weightPattern = /(\d+(?:\.\d+)?)\s*(?:kg|kilo|kilogram)/i;
+    const weightChangePattern = /(?:make it|change to|want|need|update to|change weight|different weight)\s*(\d+(?:\.\d+)?)\s*(?:kg|kilo)?/i;
+
+    const hasPriceInquiry = priceInquiryPattern.test(messageText);
+    const weightMatch = messageText.match(weightPattern);
+    const weightChangeMatch = messageText.match(weightChangePattern);
+
+    // Check if message mentions a weight different from current quote
+    const currentWeight = existingQuoteForRevision.customer_weight || '1kg';
+    const currentWeightNum = parseFloat(currentWeight.replace(/[^\d.]/g, '')) || 1;
+
+    let requestedWeight: string | null = null;
+    let requestedWeightNum: number | null = null;
+
+    if (weightMatch) {
+      requestedWeightNum = parseFloat(weightMatch[1]);
+      requestedWeight = `${requestedWeightNum}kg`;
+    } else if (weightChangeMatch) {
+      requestedWeightNum = parseFloat(weightChangeMatch[1]);
+      requestedWeight = `${requestedWeightNum}kg`;
+    }
+
+    // If asking about different weight (price inquiry or change request)
+    if (requestedWeight && requestedWeightNum && requestedWeightNum !== currentWeightNum) {
+      logger.info(`🎂 Custom cake weight/price change detected: ${currentWeight} → ${requestedWeight}`);
+
+      await saveIncomingMessage(session.id, messageText);
+
+      // Create a revision quote for admin to review
+      try {
+        const revisionQuote = await createQuoteRevision(
+          existingQuoteForRevision,
+          requestedWeight,
+          `Customer requested ${requestedWeight} (was ${currentWeight})`
+        );
+
+        // Notify admin about the revision request
+        await notifyBusinessAdmin(businessId, {
+          type: 'cake_quote_revision',
+          customerId: customer.id,
+          phone,
+          message: `Custom cake quote revision needed: ${currentWeight} → ${requestedWeight}`,
+          quoteId: revisionQuote.id,
+        });
+
+        const revisionMsg = `For the customized ${requestedWeight} cake, our team needs to confirm the pricing.\n\n` +
+          `We're preparing a new quote for you. You'll receive it shortly! 🎂`;
+        await saveOutgoingMessage(session.id, revisionMsg);
+        return revisionMsg;
+      } catch (error) {
+        logger.error('Failed to create quote revision', error);
+        // Fall through to AI processing if revision creation fails
+      }
+    }
+
+    // If just asking about price without specific weight change (e.g., "how much", "rate ethra")
+    // and there's already a pending quote, remind them to wait
+    if (hasPriceInquiry && !requestedWeight) {
+      const pendingQuote = await getPendingQuoteForSession(session.id);
+      if (pendingQuote) {
+        await saveIncomingMessage(session.id, messageText);
+        const waitMsg = `Our team is still preparing the customized quote for your cake design. We will share it with you as soon as it's ready! 🙏`;
+        await saveOutgoingMessage(session.id, waitMsg);
+        return waitMsg;
+      }
+    }
+  }
 
   // Get recent message history
   const messageHistory = await getRecentMessages(session.id);
@@ -545,6 +854,70 @@ export async function processMessage(
       intentToProcess = 'confirm_order';
     }
     // If no fulfillment yet, let AI handle it naturally (will ask for delivery/takeaway)
+  }
+
+  // ============================================
+  // FALLBACK: Custom cake quote when AI adds item but menu validation fails
+  // ============================================
+  // If AI tried to add a custom cake but it was rejected as "item_not_available",
+  // check if there's a sent quote and add the custom cake from the quote
+  if (intentToProcess === 'item_not_available') {
+    const sentQuote = await getSentQuoteForSession(session.id);
+    if (sentQuote) {
+      logger.info(`🎂 Fallback: Found sent quote ${sentQuote.id} for item_not_available - adding custom cake`);
+
+      // Mark quote as accepted
+      const acceptedQuote = await markQuoteAsAccepted(sentQuote.id);
+
+      if (acceptedQuote) {
+        const finalPrice = acceptedQuote.admin_final_price ?? acceptedQuote.suggested_price ?? 0;
+        const cakeFlavor = acceptedQuote.ai_analysis?.detected_flavor || acceptedQuote.customer_flavor || 'Custom';
+        const cakeWeight = acceptedQuote.customer_weight ||
+          (acceptedQuote.ai_analysis?.detected_weight_grams ? `${acceptedQuote.ai_analysis.detected_weight_grams}g` : '1kg');
+
+        // Add custom cake to cart
+        const customCakeItem = await saveOrderItem(session.id, {
+          name: `Custom ${cakeFlavor} Cake`,
+          size_or_weight: cakeWeight,
+          quantity: 1,
+          notes: 'Custom designed cake (quote accepted)',
+        }, businessId);
+
+        // Update with admin-confirmed price
+        const { supabase } = await import('../config/database');
+        await supabase
+          .from('session_items')
+          .update({ unit_price: finalPrice })
+          .eq('id', customCakeItem.id);
+
+        logger.info(`✅ Custom cake added via fallback: ${customCakeItem.id}, price: ₹${finalPrice}`);
+        lastAddedItemMap.set(session.id, customCakeItem.id);
+
+        // Generate summary and ask for fulfillment
+        const summary = await generateOrderSummary(session.id, { includeCta: false, timezone: business?.timezone || 'Asia/Kolkata' });
+
+        let fallbackReply: string;
+        if (business?.supports_delivery && business?.supports_takeaway) {
+          fallbackReply = `Great! Your custom cake order has been added! 🎂\n\n${summary}\n\nHow would you like to receive your order?`;
+          await saveOutgoingMessage(session.id, fallbackReply);
+          await sendReplyButtons(phone, fallbackReply, [
+            { id: 'delivery', title: '🚚 Delivery' },
+            { id: 'takeaway', title: '🏪 Takeaway' },
+          ]);
+          return null;
+        } else if (business?.supports_delivery) {
+          fallbackReply = `Great! Your custom cake order has been added! 🎂\n\n${summary}\n\nPlease share your delivery address and preferred date/time.`;
+        } else {
+          fallbackReply = `Great! Your custom cake order has been added! 🎂\n\n${summary}\n\nPlease select your preferred pickup location.`;
+          if (outlets.length > 0) {
+            fallbackReply += '\n\n' + formatOutletsForCustomer(outlets);
+          }
+        }
+
+        await saveOutgoingMessage(session.id, fallbackReply);
+        return fallbackReply;
+      }
+    }
   }
 
   // Handle different intents
@@ -975,6 +1348,25 @@ export async function processMessage(
       }
       // Clear pending custom text if exists
       pendingCustomTextMap.delete(session.id);
+      break;
+
+    case 'custom_cake_inquiry':
+      // Customer asking about custom/personalized cake design
+      // Check if custom cakes are enabled for this business
+      if (business && (business as any).custom_cake_enabled) {
+        logger.info('Custom cake inquiry - custom cakes enabled');
+        // AI response should already ask for image/description and weight
+        // Just use the AI's reply
+      } else {
+        // Custom cakes not enabled - provide contact info
+        logger.info('Custom cake inquiry - custom cakes not enabled');
+        const supportPhone = business?.customer_support_phone;
+        if (supportPhone) {
+          replyMessage = `For custom cake designs, please contact our team at ${supportPhone}. They'll help you with personalized cake orders!`;
+        } else {
+          replyMessage = aiResponse.reply; // Use AI's reply
+        }
+      }
       break;
 
     case 'show_menu':
@@ -1523,6 +1915,18 @@ export async function processMessage(
         break;
       }
 
+      // ============================================
+      // CUSTOM CAKE: Block order if time not confirmed by admin
+      // ============================================
+      const customCakeQuote = await getAcceptedQuoteForSession(session.id);
+      if (customCakeQuote && customCakeQuote.requested_delivery_time && !customCakeQuote.time_confirmed) {
+        logger.warn(`⏳ Custom cake order blocked - waiting for admin time confirmation. Quote: ${customCakeQuote.id}`);
+        replyMessage = `⏳ Your custom cake order is awaiting time confirmation from our team.\n\n` +
+          `We're reviewing your requested time and will confirm shortly.\n\n` +
+          `_Please wait for our confirmation before proceeding. Thank you for your patience! 🙏_`;
+        break;
+      }
+
       try {
         logger.info(`📦 Creating order with ${latestSession.items.length} items for session ${session.id}`);
         const order = await createFinalOrder(session.id);
@@ -1773,6 +2177,11 @@ export async function handleWhatsAppWebhook(
         for (const message of value.messages) {
           const phone = sanitizePhoneNumber(message.from);
 
+          // Mark message as read immediately (shows blue checkmarks to sender)
+          if (message.id) {
+            markAsRead(message.id).catch(() => {});
+          }
+
           // Handle image messages (Feature 4)
           if (message.type === 'image' && message.image) {
             logger.info(`Image received from ${phone}: ${message.image.id}`);
@@ -1785,17 +2194,114 @@ export async function handleWhatsAppWebhook(
             const customCakeEnabled = (business as any).custom_cake_enabled === true;
 
             if (customCakeEnabled) {
+              // Extract weight/flavor from recent session messages (customer input)
+              const recentMessages = await getRecentMessages(session.id, 10);
+              const inboundMessages = recentMessages.filter(m => m.direction === 'inbound');
+
+              // ============================================
+              // CONTEXT CHECK: Is customer in custom cake flow?
+              // ============================================
+              // Check 1: Is there already a quote for this session (any status)?
+              const existingPendingQuote = await getPendingQuoteForSession(session.id);
+              const existingSentQuote = await getSentQuoteForSession(session.id);
+              const existingAcceptedQuote = await getAcceptedQuoteForSession(session.id);
+              const hasExistingQuote = existingPendingQuote || existingSentQuote || existingAcceptedQuote;
+
+              // Check 2: Did conversation mention custom cake? (check BOTH customer AND AI messages)
+              const customCakeKeywords = [
+                // English keywords
+                'custom cake', 'customized cake', 'personalized cake', 'designer cake',
+                'custom design', 'cake design', 'special cake', 'photo cake', 'picture cake',
+                'birthday cake design', 'wedding cake design', 'theme cake',
+                'make a cake', 'design a cake', 'create a cake',
+                'share your cake', 'send a picture', 'send an image', 'share a photo',
+                'customized quote', 'cake image', 'design you want',
+                // Common English phrases
+                'like this', 'this design', 'this cake', 'same design', 'similar cake',
+                'can you make', 'want this', 'need this', 'order this',
+                'how much', 'what price', 'cost of this', 'price for this',
+                'make this', 'prepare this', 'bake this',
+                // Malayalam keywords
+                'ingane', 'ithupole', 'ee design', 'ee cake', 'custom',
+                'ethra', 'vila', 'price', 'cost',
+                'undakkam', 'undakkan', 'undakkumo', 'undakki tharumo',
+                'ith undakkam', 'ith pole', 'ingane oru',
+                'cake venam', 'cake vേണം', 'order cheyyam', 'order ചെയ്യാം',
+              ];
+              const caption = message.image.caption?.toLowerCase() || '';
+              // Check ALL messages (both inbound and outbound) for context
+              const allRecentText = recentMessages.map(m => m.content?.toLowerCase() || '').join(' ');
+              const hasCustomCakeContext = customCakeKeywords.some(keyword =>
+                allRecentText.includes(keyword) || caption.includes(keyword)
+              );
+
+              // If no context, ask what the image is for
+              if (!hasExistingQuote && !hasCustomCakeContext) {
+                logger.info(`Image received without custom cake context - asking customer`);
+
+                // Save image message
+                const mediaResult = await processIncomingMedia(
+                  message.image.id,
+                  message.image.mime_type || 'image/jpeg',
+                  business.id
+                );
+                await saveIncomingMediaMessage(
+                  session.id,
+                  'image',
+                  mediaResult?.mediaUrl || '',
+                  message.image.mime_type || 'image/jpeg',
+                  { caption: message.image.caption }
+                );
+
+                // Ask for context
+                const contextMsg = `I received your image! 📸\n\nCould you please let me know what this is for?\n\n` +
+                  `• Is this a *cake design* you'd like us to create?\n` +
+                  `• Or something else you'd like to share with us?`;
+                await sendWhatsAppMessage(phone, contextMsg);
+                await saveOutgoingMessage(session.id, contextMsg);
+                continue;
+              }
+
               // Process as cake image for pricing
               logger.info(`Processing cake image for business ${business.id}`);
 
-              // Extract weight/flavor from caption if provided
-              const caption = message.image.caption || '';
-              const weightMatch = caption.match(/(\d+(?:\.\d+)?)\s*(?:kg|g)/i);
-              const customerWeight = weightMatch ? weightMatch[0] : undefined;
+              let customerWeight: string | undefined;
+              let customerFlavor: string | undefined;
 
-              // Try to extract flavor from caption
               const flavorKeywords = ['chocolate', 'vanilla', 'strawberry', 'red velvet', 'butterscotch', 'pineapple', 'mango', 'black forest'];
-              const customerFlavor = flavorKeywords.find(f => caption.toLowerCase().includes(f));
+
+              // Search through customer messages for weight and flavor
+              for (const msg of inboundMessages) {
+                const content = msg.content?.toLowerCase() || '';
+
+                // Look for weight (e.g., "2kg", "1.5 kg", "500g")
+                if (!customerWeight) {
+                  const weightMatch = content.match(/(\d+(?:\.\d+)?)\s*(?:kg|g)/i);
+                  if (weightMatch) {
+                    customerWeight = weightMatch[0];
+                  }
+                }
+
+                // Look for flavor
+                if (!customerFlavor) {
+                  customerFlavor = flavorKeywords.find(f => content.includes(f));
+                }
+
+                // Stop if both found
+                if (customerWeight && customerFlavor) break;
+              }
+
+              // Also check image caption as fallback
+              // const caption = message.image.caption || '';
+              if (!customerWeight) {
+                const captionWeightMatch = caption.match(/(\d+(?:\.\d+)?)\s*(?:kg|g)/i);
+                if (captionWeightMatch) customerWeight = captionWeightMatch[0];
+              }
+              if (!customerFlavor) {
+                customerFlavor = flavorKeywords.find(f => caption.toLowerCase().includes(f));
+              }
+
+              logger.info(`Extracted from conversation - weight: ${customerWeight}, flavor: ${customerFlavor}`);
 
               const result = await processCakeImage(
                 business.id,
@@ -2390,9 +2896,56 @@ export async function handleWhatsAppWebhook(
                 const timeLabel = timeLabels[buttonId] || buttonId;
                 await saveIncomingMessage(session.id, `[Selected: ${timeLabel}]`);
 
-                // Save time and show final invoice
                 const fulfillmentType = pendingDate?.fulfillmentType || sessionWithItems?.fulfillment_type;
 
+                // ============================================
+                // CUSTOM CAKE TIME CONFIRMATION CHECK (BUTTON FLOW)
+                // ============================================
+                const acceptedQuoteForTime = await getAcceptedQuoteForSession(session.id);
+
+                if (acceptedQuoteForTime && !acceptedQuoteForTime.time_confirmed) {
+                  // This is a custom cake order - time needs admin confirmation
+                  const fulfillmentTypeForQuote = fulfillmentType === 'delivery' ? 'delivery' : 'takeaway';
+                  logger.info(`🎂 Custom cake time request (button): ${calculatedTime} (${fulfillmentTypeForQuote})`);
+
+                  // Save time to quote (pending confirmation)
+                  await updateQuoteTimeRequest(acceptedQuoteForTime.id, calculatedTime, fulfillmentTypeForQuote);
+
+                  // Also save to session for display purposes
+                  if (fulfillmentType === 'delivery') {
+                    await updateSessionDeliveryInfo(session.id, {
+                      address: sessionWithItems?.delivery_address || '',
+                      time: calculatedTime,
+                    });
+                  } else {
+                    await updateSessionPickupInfo(session.id, {
+                      outlet_id: sessionWithItems?.pickup_outlet_id || '',
+                      time: calculatedTime,
+                    });
+                  }
+
+                  // Notify admin about time confirmation request
+                  await notifyBusinessAdmin(business.id, {
+                    type: 'cake_time_confirmation',
+                    customerId: customer.id,
+                    phone,
+                    message: `Custom cake time confirmation needed: ${calculatedTime} (${fulfillmentTypeForQuote})`,
+                    quoteId: acceptedQuoteForTime.id,
+                  });
+
+                  // Clear pending date selection
+                  pendingDateSelectionMap.delete(session.id);
+
+                  // Tell customer to wait for confirmation
+                  const timeConfirmMsg = `⏰ We've noted your preferred ${fulfillmentTypeForQuote === 'delivery' ? 'delivery' : 'pickup'} time: *${calculatedTime}*\n\n` +
+                    `Since this is a custom designed cake, our team will confirm if we can ${fulfillmentTypeForQuote === 'delivery' ? 'deliver' : 'have it ready'} by this time.\n\n` +
+                    `_You'll receive a confirmation shortly. Thank you for your patience! 🙏_`;
+                  await sendWhatsAppMessage(phone, timeConfirmMsg);
+                  await saveOutgoingMessage(session.id, timeConfirmMsg);
+                  continue;
+                }
+
+                // Normal flow - save time and show final invoice
                 if (fulfillmentType === 'delivery') {
                   await updateSessionDeliveryInfo(session.id, {
                     address: sessionWithItems?.delivery_address || '',
@@ -2553,23 +3106,9 @@ export async function handleWhatsAppWebhook(
             continue;
           }
 
-          try {
-            // Use business ID from phone lookup
-            const reply = await processMessage(phone, messageText, business.id, customerName);
-            // Only send message if AI is not paused (reply will be null if paused)
-            if (reply !== null) {
-              await sendWhatsAppMessage(phone, reply);
-            }
-          } catch (error) {
-            logger.error('Error processing message', error);
-            const supportPhone = business.customer_support_phone;
-            let errorMsg = "We're experiencing a temporary issue. Please try again in a moment.";
-            if (supportPhone) {
-              errorMsg += `\n\n📞 Need immediate help? Contact us: ${supportPhone}`;
-            }
-            errorMsg += "\n\n_Tip: You can continue by telling us what you'd like to order._";
-            await sendWhatsAppMessage(phone, errorMsg);
-          }
+          // Queue message for debouncing - waits for user to finish typing
+          // Multiple rapid messages will be combined into one before processing
+          queueMessageForDebounce(phone, messageText, business.id, customerName);
         }
       }
     }
