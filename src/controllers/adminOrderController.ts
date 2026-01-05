@@ -127,6 +127,7 @@ export async function listOrders(req: AuthRequest, res: Response): Promise<void>
         pickup_outlet_id: order.pickup_outlet_id,
         pickup_outlet_name: order.pickup_outlet_id ? outletMap.get(order.pickup_outlet_id) || null : null,
         pickup_time: order.pickup_time,
+        delivery_fee: order.delivery_fee,
       };
     });
 
