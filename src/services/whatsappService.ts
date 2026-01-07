@@ -277,6 +277,69 @@ export async function sendDocument(
 }
 
 /**
+ * Send WhatsApp image message
+ */
+export async function sendImage(
+  to: string,
+  imageUrl: string,
+  caption?: string
+): Promise<void> {
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+
+  if (!phoneNumberId || !accessToken) {
+    logger.info(`[WhatsApp Mock] Image to: ${to}`);
+    logger.info(`[WhatsApp Mock] URL: ${imageUrl}`);
+    if (caption) logger.info(`[WhatsApp Mock] Caption: ${caption}`);
+    return;
+  }
+
+  const payload: {
+    messaging_product: string;
+    to: string;
+    type: string;
+    image: {
+      link: string;
+      caption?: string;
+    };
+  } = {
+    messaging_product: 'whatsapp',
+    to,
+    type: 'image',
+    image: {
+      link: imageUrl,
+    },
+  };
+
+  if (caption) {
+    payload.image.caption = caption;
+  }
+
+  try {
+    await axios.post(
+      `${WHATSAPP_API_BASE}/${phoneNumberId}/messages`,
+      payload,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+    logger.info(`WhatsApp image sent to ${to}`);
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      logger.error('WhatsApp API error (image)', {
+        status: error.response?.status,
+        data: error.response?.data,
+      });
+    } else {
+      logger.error('Failed to send WhatsApp image', error);
+    }
+  }
+}
+
+/**
  * Send WhatsApp interactive list message
  */
 export async function sendInteractiveListMessage(

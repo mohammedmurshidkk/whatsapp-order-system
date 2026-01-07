@@ -463,6 +463,27 @@ ALTER TABLE cake_price_quotes ADD COLUMN IF NOT EXISTS requested_fulfillment_typ
 ALTER TABLE cake_price_quotes ADD COLUMN IF NOT EXISTS time_confirmed BOOLEAN DEFAULT false;
 ALTER TABLE cake_price_quotes ADD COLUMN IF NOT EXISTS time_confirmed_at TIMESTAMP;
 
+  CREATE TABLE IF NOT EXISTS business_amenities (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    description TEXT NOT NULL,
+    image_url TEXT,
+    images TEXT[] DEFAULT '{}',
+    is_active BOOLEAN DEFAULT true,
+    display_order INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ,
+    UNIQUE(business_id, slug)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_business_amenities_business ON business_amenities(business_id);
+  CREATE INDEX IF NOT EXISTS idx_business_amenities_slug ON business_amenities(business_id, slug);
+
+-- Add images column to existing business_amenities table
+ALTER TABLE business_amenities ADD COLUMN IF NOT EXISTS images TEXT[] DEFAULT '{}';
+
 -- ============================================
 -- DONE
 -- ============================================

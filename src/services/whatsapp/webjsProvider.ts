@@ -118,6 +118,43 @@ export async function sendDocument(
 }
 
 /**
+ * Send image via whatsapp-web.js
+ * Uses MessageMedia.fromUrl to fetch and send the image
+ */
+export async function sendImage(
+  to: string,
+  imageUrl: string,
+  caption?: string
+): Promise<void> {
+  const client = getClient();
+
+  if (!client || !isClientReady()) {
+    logger.warn('[WebJS] Client not ready, image not sent');
+    logger.info(`[WebJS Mock] Image to: ${to}`);
+    logger.info(`[WebJS Mock] URL: ${imageUrl}`);
+    if (caption) logger.info(`[WebJS Mock] Caption: ${caption}`);
+    return;
+  }
+
+  try {
+    // Dynamic import to avoid loading whatsapp-web.js when not needed
+    const { MessageMedia } = await import('whatsapp-web.js');
+    const media = await MessageMedia.fromUrl(imageUrl, { unsafeMime: true });
+
+    const chatId = formatPhoneForWebJS(to);
+    await client.sendMessage(chatId, media, { caption });
+    logMessageSend('WebJS', to, `[Image]`);
+  } catch (error) {
+    logMessageError('WebJS', to, error);
+    // Fallback: send URL as text
+    const fallbackMessage = caption
+      ? `${caption}\n\nView image: ${imageUrl}`
+      : `View image: ${imageUrl}`;
+    await sendMessage(to, fallbackMessage);
+  }
+}
+
+/**
  * Get provider status
  */
 export function getStatus(): ProviderStatus {

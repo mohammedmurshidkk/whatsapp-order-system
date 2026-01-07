@@ -597,9 +597,9 @@ export async function calculateDistanceBasedDeliveryFee(
   }
 
   // Get pricing config with defaults
-  const freeRadius = business.free_radius_meters || 3000; // 3km default
+  const freeRadius = business.free_radius_meters || 3500; // 3.5km default
   const minimumCharge = business.minimum_delivery_charge || 30;
-  const minimumChargeDistance = business.minimum_charge_distance_meters || 6000; // 6km default
+  const minimumChargeDistance = business.minimum_charge_distance_meters || 3000; // 3km billable distance for min charge
   const incrementPerKm = business.increment_per_km || 10;
 
   // Calculate billable distance (distance beyond free radius)
@@ -628,7 +628,7 @@ export async function calculateDistanceBasedDeliveryFee(
   // Calculate additional charge beyond minimum distance
   const additionalDistanceMeters = billableDistance - minimumChargeDistance;
   const additionalDistanceKm = additionalDistanceMeters / 1000;
-  const additionalCharge = Math.ceil(additionalDistanceKm) * incrementPerKm;
+  const additionalCharge = Math.floor(additionalDistanceKm) * incrementPerKm;
   const totalFee = minimumCharge + additionalCharge;
 
   logger.info(`Delivery fee calculated: ${totalFee} (base: ${minimumCharge}, extra: ${additionalCharge} for ${additionalDistanceKm.toFixed(1)}km)`);

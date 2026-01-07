@@ -34,6 +34,21 @@ export interface Business {
   updated_at?: string;
 }
 
+// Business Amenity types (generic amenities like party hall, catering, etc.)
+export interface BusinessAmenity {
+  id: string;
+  business_id: string;
+  name: string;           // Display name: "Party Hall", "Catering", etc.
+  slug: string;           // For AI matching: "party_hall", "catering"
+  description: string;    // Info message to send to customer
+  image_url: string | null; // Supabase storage URL (legacy single image)
+  images: string[];       // Array of image URLs for multiple images
+  is_active: boolean;
+  display_order: number;
+  created_at: string;
+  updated_at?: string;
+}
+
 // Outlet types
 export interface BusinessOutlet {
   id: string;
@@ -283,7 +298,9 @@ export type AIIntent =
   | 'smalltalk'
   | 'show_menu'
   | 'conversation_ended'
-  | 'item_not_available';
+  | 'item_not_available'
+  | 'amenity_inquiry'        // Customer asking about an amenity (party hall, etc.)
+  | 'amenity_booking_request'; // Customer wants to book/reserve an amenity
 
 export interface AIAddonResponse {
   addon_id?: string;
@@ -310,6 +327,11 @@ export interface AIFulfillmentResponse {
   fulfillment_notes?: string;
 }
 
+export interface AIAmenityResponse {
+  amenity_slug: string;      // Which amenity the customer is asking about
+  amenity_name?: string;     // Display name (optional, for logging)
+}
+
 export interface AIResponse {
   reply: string;
   intent: AIIntent;
@@ -320,6 +342,7 @@ export interface AIResponse {
   addon?: AIAddonResponse; // NEW: For add-on responses
   suggested_addons?: string[]; // NEW: List of addon IDs to suggest
   customText?: string; // For save_custom_text intent (e.g., cake message)
+  amenity?: AIAmenityResponse; // For amenity inquiry/booking intents
 }
 
 // Notification types (for admin alerts)

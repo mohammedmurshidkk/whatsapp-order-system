@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { Message, AIResponse, Session, Business, MenuItem, MenuCategory, BusinessOutlet, MenuAddon } from '../types';
+import { Message, AIResponse, Session, Business, MenuItem, MenuCategory, BusinessOutlet, MenuAddon, BusinessAmenity } from '../types';
 import { formatMessagesForAI } from './messageService';
 import { logger } from '../utils/logger';
 import { getAIClient } from './aiClient';
@@ -35,6 +35,7 @@ export interface AIContext {
   sessionHasPickupInfo?: boolean;
   availableAddons?: MenuAddon[]; // NEW: Available add-ons for current item
   lastAddedItemId?: string; // NEW: Last added session item ID (for add-on flow)
+  amenities?: BusinessAmenity[]; // Available amenities (party hall, etc.)
 }
 
 // Format menu for AI - includes item names, sizes, AND PRICES
@@ -177,16 +178,27 @@ function getSystemPrompt(context: AIContext): string {
     customerSupportSection = `\n📞 CUSTOMER SUPPORT: ${context.business.customer_support_phone}\nIf customer asks for help, support, contact number, or has issues outside your capabilities, provide this number.\n`;
   }
 
+  // Format amenities (party hall, catering, etc.)
+  let amenitiesSection = '';
+  if (context.amenities && context.amenities.length > 0) {
+    amenitiesSection = `\n🏢 BUSINESS AMENITIES/SERVICES (NOT food items - these are services like party hall, catering):\n`;
+    context.amenities.forEach(amenity => {
+      amenitiesSection += `- "${amenity.name}" (slug: "${amenity.slug}")\n`;
+    });
+    amenitiesSection += `\nWhen customer asks about these services, use intent "amenity_inquiry" with amenity.amenity_slug.\n`;
+    amenitiesSection += `If customer wants to BOOK/RESERVE an amenity, use intent "amenity_booking_request" (admin will be notified).\n`;
+  }
+
   // Static prompt template
   const staticPrompt = `You are an AI ordering assistant for ${businessName}.
 ${customInstructions}${customerSupportSection}
 ${menuSection}
-${outletsSection}
+${outletsSection}${amenitiesSection}
 ⚠️ RULES: Only accept menu items. Match names EXACTLY. Never invent items/prices.
 VALID ITEMS: [${itemNamesList}]
 
 📋 JSON RESPONSE FORMAT:
-{"reply": "1-2 sentences", "intent": "add_item|ask_question|modify_order|ready_for_checkout|confirm_order|cancel|show_menu|item_not_available|modify_custom_text|remove_custom_text|cancel_existing_order|check_order_status|conversation_ended", "item": {"name": "exact menu name", "quantity": 1, "size_or_weight": "exact size", "notes": "per-item modifier"}, "items": [{"name": "item1", "quantity": 1, "notes": "modifier1"}, {"name": "item2", "quantity": 1, "notes": "modifier2"}], "fulfillment": {"fulfillment_type": "delivery|takeaway", "delivery_address": "", "delivery_time": ""}, "customText": "cake message", "order_id": "OKS-1"}
+{"reply": "1-2 sentences", "intent": "add_item|ask_question|modify_order|ready_for_checkout|confirm_order|cancel|show_menu|item_not_available|modify_custom_text|remove_custom_text|cancel_existing_order|check_order_status|conversation_ended|amenity_inquiry|amenity_booking_request", "item": {"name": "exact menu name", "quantity": 1, "size_or_weight": "exact size", "notes": "per-item modifier"}, "items": [{"name": "item1", "quantity": 1, "notes": "modifier1"}, {"name": "item2", "quantity": 1, "notes": "modifier2"}], "fulfillment": {"fulfillment_type": "delivery|takeaway", "delivery_address": "", "delivery_time": ""}, "customText": "cake message", "order_id": "OKS-1", "amenity": {"amenity_slug": "party_hall"}}
 
 📝 ITEM NOTES (per-item modifiers):
 - When customer specifies different notes for items, use "items" array instead of "item"
@@ -213,6 +225,8 @@ INTENTS:
 - custom_cake_inquiry: Customer asking about custom/personalized cake design
 - cancel_existing_order/check_order_status: Include order_id (e.g., "OKS-1")
 - show_menu, item_not_available, cancel, conversation_ended
+- amenity_inquiry: Customer asking about an amenity (party hall, etc.) - include amenity.amenity_slug
+- amenity_booking_request: Customer wants to book/reserve an amenity - notify admin
 
 🎂 CUSTOM CAKE INQUIRIES:
 When customer asks about custom cakes, personalized designs, "can you make this", "do you do custom cakes", "cake like this image":
@@ -232,6 +246,8 @@ Customer: "Delivery" → {"reply": "Share address and time (e.g., MG Road, tomor
 Customer: "MG Road, nale 5pm" → {"reply": "Delivery to MG Road tomorrow 5pm. Confirm YES.", "intent": "collect_delivery_info", "fulfillment": {"fulfillment_type": "delivery", "delivery_address": "MG Road", "delivery_time": "tomorrow 5pm"}}
 Customer: "Change text to Happy Birthday" → {"reply": "Updated!", "intent": "modify_custom_text", "customText": "Happy Birthday"}
 Customer: "Cancel OKS-1" → {"reply": "Cancelling OKS-1.", "intent": "cancel_existing_order", "order_id": "OKS-1"}
+Customer: "Do you have party hall?" → {"reply": "Yes! Let me share our party hall details.", "intent": "amenity_inquiry", "amenity": {"amenity_slug": "party_hall"}}
+Customer: "I want to book the party hall" → {"reply": "I'll notify our team about your booking request!", "intent": "amenity_booking_request", "amenity": {"amenity_slug": "party_hall"}}
 
 STYLE: Friendly, short replies. Emojis sparingly. Prices as ₹150. Malayalam: oru=1, randu=2, mathi=enough, sheri=ok. Process all messages naturally without commenting on language or voice.`;
 
@@ -364,6 +380,7 @@ function parseAIResponse(responseText: string): AIResponse {
       fulfillment: parsed.fulfillment,  // CRITICAL: Include fulfillment data!
       addon: parsed.addon,  // For remove_addon/add_addon intents
       customText: parsed.customText,  // For modify_custom_text intent
+      amenity: parsed.amenity,  // For amenity_inquiry/amenity_booking_request intents
     };
   } catch (error) {
     logger.warn('Failed to parse AI response as JSON', { error, responseText });

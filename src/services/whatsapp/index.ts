@@ -96,6 +96,22 @@ export async function sendDocument(
 }
 
 /**
+ * Send image message
+ * Meta: Native image message
+ * WebJS: MessageMedia attachment
+ */
+export async function sendImage(
+  to: string,
+  imageUrl: string,
+  caption?: string
+): Promise<void> {
+  if (isWebJS) {
+    return webjsProvider.sendImage(to, imageUrl, caption);
+  }
+  return metaProvider.sendImage(to, imageUrl, caption);
+}
+
+/**
  * Verify webhook signature (Meta only)
  */
 export function verifyWebhookSignature(signature: string, payload: string): boolean {

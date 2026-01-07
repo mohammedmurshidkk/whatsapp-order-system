@@ -78,8 +78,10 @@ import {
   sendInteractiveListMessage,
   sendLocationRequest,
   sendDocument,
+  sendImage,
   markAsRead,
 } from '../services/whatsapp';
+import { getAmenityBySlug, getBusinessAmenities } from '../services/amenityService';
 import { getMenuPdfUrl, menuPdfExists } from '../services/pdfService';
 import { getAddressFromCoordinates } from '../services/geocodingService';
 import {
@@ -794,10 +796,12 @@ export async function processMessage(
   // Get menu for AI context
   let menuItems;
   let menuCategories;
+  let amenities;
   if (businessId) {
     menuItems = await getMenuItems(businessId);
     menuCategories = await getMenuCategories(businessId);
-    logger.info(`Menu loaded: ${menuItems?.length || 0} items, ${menuCategories?.length || 0} categories`);
+    amenities = await getBusinessAmenities(businessId);
+    logger.info(`Menu loaded: ${menuItems?.length || 0} items, ${menuCategories?.length || 0} categories, ${amenities?.length || 0} amenities`);
   } else {
     logger.warn('No business found - AI will have no menu context!');
   }
@@ -813,6 +817,7 @@ export async function processMessage(
     sessionHasFulfillmentType: !!latestSessionData.fulfillment_type,
     sessionHasDeliveryInfo: !!latestSessionData.delivery_address,
     sessionHasPickupInfo: !!latestSessionData.pickup_outlet_id,
+    amenities,
   };
 
   logger.debug(`AI context fulfillment: type=${latestSessionData.fulfillment_type}, addr=${latestSessionData.delivery_address}, outlet=${latestSessionData.pickup_outlet_id}`);
@@ -2099,6 +2104,58 @@ export async function processMessage(
         }
       }
       // Use AI's reply (possibly modified above)
+      break;
+
+    case 'amenity_inquiry':
+      // Customer is asking about an amenity (party hall, etc.)
+      if (aiResponse.amenity?.amenity_slug && business) {
+        const amenity = await getAmenityBySlug(business.id, aiResponse.amenity.amenity_slug);
+        if (amenity) {
+          // Send amenity description first
+          replyMessage = amenity.description;
+
+          // Check for multiple images first, then fall back to single image_url
+          const imagesToSend = amenity.images?.length > 0
+            ? amenity.images
+            : (amenity.image_url ? [amenity.image_url] : []);
+
+          if (imagesToSend.length > 0) {
+            // Send text message first
+            await sendWhatsAppMessage(phone, replyMessage);
+
+            // Send all images
+            for (const imageUrl of imagesToSend) {
+              await sendImage(phone, imageUrl);
+            }
+
+            // Mark that we've already sent the message
+            replyMessage = ''; // Clear so we don't send duplicate
+          }
+        } else {
+          // Amenity not found, use AI's reply
+          replyMessage = aiResponse.reply;
+        }
+      }
+      break;
+
+    case 'amenity_booking_request':
+      // Customer wants to book/reserve an amenity - notify admin
+      if (business) {
+        const amenitySlug = aiResponse.amenity?.amenity_slug || 'unknown';
+        const amenityName = aiResponse.amenity?.amenity_slug
+          ? (await getAmenityBySlug(business.id, aiResponse.amenity.amenity_slug))?.name || amenitySlug
+          : 'an amenity';
+
+        // Create notification for admin
+        await notifyBusinessAdmin(business.id, {
+          type: 'amenity_booking',
+          customerId: customer?.id,
+          phone: phone,
+          message: `Customer wants to book ${amenityName}. Phone: ${phone}`,
+        });
+
+        replyMessage = aiResponse.reply || `Thank you for your interest in ${amenityName}! Our team has been notified and will contact you shortly to confirm your booking.`;
+      }
       break;
 
     case 'smalltalk':

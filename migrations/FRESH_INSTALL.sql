@@ -494,6 +494,24 @@ CREATE INDEX idx_cake_price_quotes_session ON cake_price_quotes(session_id);
 CREATE INDEX idx_cake_price_quotes_status ON cake_price_quotes(business_id, status);
 CREATE INDEX idx_cake_price_quotes_pending ON cake_price_quotes(business_id) WHERE status = 'pending';
 
+  CREATE TABLE business_amenities (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    description TEXT NOT NULL,
+    image_url TEXT,
+    images TEXT[] DEFAULT '{}',
+    is_active BOOLEAN DEFAULT true,
+    display_order INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ,
+    UNIQUE(business_id, slug)
+  );
+
+  CREATE INDEX idx_business_amenities_business ON business_amenities(business_id);
+  CREATE INDEX idx_business_amenities_slug ON business_amenities(business_id, slug);
+
 -- ============================================
 -- DONE
 -- ============================================
