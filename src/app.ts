@@ -39,7 +39,12 @@ const PORT = process.env.PORT || 8080;
 initializeSocket(httpServer);
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: true, // Allow all origins (or specify: ['https://conversa-admin.murshidkk.info'])
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
 app.use(express.json());
 app.use(requestLogger);
 app.use(express.urlencoded({ extended: true }));
@@ -89,9 +94,20 @@ app.use((_req: Request, res: Response) => {
   res.status(404).json({ error: 'Not found' });
 });
 
-// Error handler
-app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+// Error handler (includes multer errors)
+app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
   logger.error('Unhandled error', { error: logger.formatError(err) });
+
+  // Handle multer errors
+  if (err.message === 'Only image files are allowed') {
+    res.status(400).json({ error: err.message });
+    return;
+  }
+  if (err.message?.includes('File too large')) {
+    res.status(400).json({ error: 'File size exceeds limit' });
+    return;
+  }
+
   res.status(500).json({ error: 'Internal server error' });
 });
 
