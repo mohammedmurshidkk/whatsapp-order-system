@@ -2,6 +2,7 @@ import { supabase } from '../config/database';
 import { Session, SessionWithItems, SessionItem } from '../types';
 import { SESSION_TIMEOUT_HOURS } from '../config/constants';
 import { logger } from '../utils/logger';
+import type { SupportedLanguage } from '../i18n';
 
 export async function findOrCreateSession(customerId: string, businessId: string): Promise<Session> {
   const timeoutThreshold = new Date();
@@ -288,4 +289,35 @@ export async function updateSessionItemCustomText(
 
   logger.info(`Custom text updated for item ${itemId}: "${customText}"`);
   return true;
+}
+
+/**
+ * Update session language preference
+ * @param sessionId - Session ID
+ * @param language - Language code ('en' or 'ml')
+ */
+export async function updateSessionLanguage(
+  sessionId: string,
+  language: SupportedLanguage
+): Promise<void> {
+  const { error } = await supabase
+    .from('sessions')
+    .update({ language })
+    .eq('id', sessionId);
+
+  if (error) {
+    logger.error('Failed to update session language', error);
+    throw new Error('Failed to update session language');
+  }
+
+  logger.info(`Session ${sessionId} language set to: ${language}`);
+}
+
+/**
+ * Get session language (with fallback to default)
+ * @param session - Session object
+ * @returns Language code
+ */
+export function getSessionLanguage(session: Session): SupportedLanguage {
+  return session.language || 'ml';
 }

@@ -177,6 +177,8 @@ export interface Session {
   // Beyond radius approval
   delivery_pending_approval?: boolean;
   delivery_approval_status?: 'pending' | 'approved' | 'rejected' | null;
+  // i18n: Customer preferred language (ml=Malayalam, en=English)
+  language?: 'en' | 'ml';
 }
 
 export interface SessionWithItems extends Session {

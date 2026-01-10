@@ -36,6 +36,7 @@ export interface AIContext {
   availableAddons?: MenuAddon[]; // NEW: Available add-ons for current item
   lastAddedItemId?: string; // NEW: Last added session item ID (for add-on flow)
   amenities?: BusinessAmenity[]; // Available amenities (party hall, etc.)
+  customerLanguage?: 'en' | 'ml'; // i18n: Customer's preferred language
 }
 
 // Format menu for AI - includes item names, sizes, AND PRICES
@@ -249,7 +250,18 @@ Customer: "Cancel OKS-1" → {"reply": "Cancelling OKS-1.", "intent": "cancel_ex
 Customer: "Do you have party hall?" → {"reply": "Yes! Let me share our party hall details.", "intent": "amenity_inquiry", "amenity": {"amenity_slug": "party_hall"}}
 Customer: "I want to book the party hall" → {"reply": "I'll notify our team about your booking request!", "intent": "amenity_booking_request", "amenity": {"amenity_slug": "party_hall"}}
 
-STYLE: Friendly, short replies. Emojis sparingly. Prices as ₹150. Malayalam: oru=1, randu=2, mathi=enough, sheri=ok. Process all messages naturally without commenting on language or voice.`;
+STYLE: Friendly, short replies. Emojis sparingly. Prices as ₹150.
+
+🗣️ LANGUAGE:
+${context.customerLanguage === 'en'
+  ? `- Respond in English. Customer has chosen English.
+- Understand both Malayalam and English input.
+- Common Malayalam words: oru=1, randu=2, mathi=enough, sheri=ok, venda=no, athe=yes, nale=tomorrow, innu=today.`
+  : `- DEFAULT: Always respond in Malayalam (മലയാളം). All replies must be in Malayalam.
+- If customer writes in English or asks "English please"/"respond in English", switch to English.
+- Understand both Malayalam and English input, but RESPOND in Malayalam unless customer explicitly requests English.
+- Common words: oru=1, randu=2, mathi=enough, sheri=ok, venda=no, athe=yes, nale=tomorrow, innu=today.`}
+- Process all messages naturally without commenting on language or voice.`;
 
   // ============================================
   // DYNAMIC SECTION (changes per request - at BOTTOM)

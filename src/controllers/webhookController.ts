@@ -7,6 +7,8 @@ import {
   getSessionWithItems,
   isAIPaused,
   updateSessionItemCustomText,
+  updateSessionLanguage,
+  getSessionLanguage,
 } from '../services/sessionService';
 import {
   getRecentMessages,
@@ -106,6 +108,7 @@ import {
   sanitizeMessage,
 } from '../utils/validators';
 import { logger } from '../utils/logger';
+import { SupportedLanguage, detectLanguageRequest, t } from '../i18n';
 
 // Track last added item per session for add-on attachment
 const lastAddedItemMap = new Map<string, string>(); // sessionId -> itemId
@@ -153,10 +156,16 @@ async function processDebouncedMessages(phone: string): Promise<void> {
     }
   } catch (error) {
     logger.error('Error processing debounced messages', error);
-    await sendWhatsAppMessage(
-      phone,
-      "We're experiencing a temporary issue. Please try again in a moment."
-    );
+    try {
+      const customer = await findOrCreateCustomer(phone, pending.businessId, pending.customerName);
+      const session = await findOrCreateSession(customer.id, pending.businessId);
+      const lang: SupportedLanguage = getSessionLanguage(session);
+      await sendWhatsAppMessage(phone, t('error.generic', lang));
+    } catch (langError) {
+      logger.error('Could not get session language for error message', langError);
+      // Fallback to default language
+      await sendWhatsAppMessage(phone, t('error.generic', 'en'));
+    }
   }
 }
 
@@ -277,6 +286,15 @@ export async function processMessage(
   // Update session activity
   await updateSessionActivity(session.id);
 
+  // i18n: Detect language switch request and update session
+  const langRequest = detectLanguageRequest(originalMessage);
+  if (langRequest && langRequest !== session.language) {
+    await updateSessionLanguage(session.id, langRequest);
+    session.language = langRequest;
+    logger.info(`Language switched to ${langRequest} for session ${session.id}`);
+  }
+  const lang: SupportedLanguage = getSessionLanguage(session);
+
   // Check for pending custom text question (e.g., "What to write on cake?")
   const pendingCustomText = pendingCustomTextMap.get(session.id);
   if (pendingCustomText) {
@@ -293,19 +311,19 @@ export async function processMessage(
     if (wantsToSkip) {
       logger.info(`Customer skipped custom text for item ${pendingCustomText.itemId}`);
       pendingCustomTextMap.delete(session.id);
-      await saveIncomingMessage(session.id, messageText);
+      await saveIncomingMessage(session.id, originalMessage);
 
       // Check if there are pending addons to ask about (stored when custom text was first asked)
       const pendingAddonsAfterSkip = pendingAddonSelectionMap.get(session.id);
       if (pendingAddonsAfterSkip && pendingAddonsAfterSkip.itemId === pendingCustomText.itemId) {
         // Ask about addons now
         const addonsMessage = formatAddonsForCustomer(pendingAddonsAfterSkip.addons);
-        const skipWithAddons = `No problem!\n\n${addonsMessage}`;
+        const skipWithAddons = `${t('customText.skipped', lang).split('!')[0]}!\n\n${addonsMessage}`;
         await saveOutgoingMessage(session.id, skipWithAddons);
         return skipWithAddons;
       }
 
-      const skipReply = "No problem! Anything else you'd like to order?";
+      const skipReply = t('customText.skipped', lang);
       await saveOutgoingMessage(session.id, skipReply);
       return skipReply;
     }
@@ -326,32 +344,33 @@ export async function processMessage(
         // Pending will remain so after AI answers, user can still provide the text
         logger.info(`Custom text response is a question: "${originalMessage}" - passing to AI`);
         isCustomTextQuestion = true; // Flag to skip pendingAddon check
-        await saveIncomingMessage(session.id, messageText);
+        await saveIncomingMessage(session.id, originalMessage);
         // Fall through to AI processing (don't return here)
       } else if (classification.isAffirmation) {
         // User said just "yes"/"ok" - they want to provide text but haven't yet
         // Keep pending state, ask them for the actual text
         logger.info(`Custom text affirmation detected: "${originalMessage}" - asking for actual text`);
-        await saveIncomingMessage(session.id, messageText);
-        const askForTextReply = "Great! What would you like written on the cake?";
+        await saveIncomingMessage(session.id, originalMessage);
+        const askForTextReply = t('customText.affirmationPrompt', lang);
         await saveOutgoingMessage(session.id, askForTextReply);
         return askForTextReply;
       } else if (!classification.isValidText) {
         // AI detected a skip (e.g., "no", "nothing", "venda")
         logger.info(`AI detected skip for custom text: "${originalMessage}"`);
         pendingCustomTextMap.delete(session.id);
-        await saveIncomingMessage(session.id, messageText);
+        await saveIncomingMessage(session.id, originalMessage);
 
         // Check for pending addons
         const pendingAddonsAfterSkip = pendingAddonSelectionMap.get(session.id);
         if (pendingAddonsAfterSkip && pendingAddonsAfterSkip.itemId === pendingCustomText.itemId) {
+          // Ask about addons now
           const addonsMessage = formatAddonsForCustomer(pendingAddonsAfterSkip.addons);
-          const skipWithAddons = `No problem!\n\n${addonsMessage}`;
+          const skipWithAddons = `${t('customText.skipped', lang).split('!')[0]}!\n\n${addonsMessage}`;
           await saveOutgoingMessage(session.id, skipWithAddons);
           return skipWithAddons;
         }
 
-        const skipReply = "No problem! Anything else you'd like to order?";
+        const skipReply = t('customText.skipped', lang);
         await saveOutgoingMessage(session.id, skipReply);
         return skipReply;
       } else {
@@ -363,20 +382,20 @@ export async function processMessage(
         pendingCustomTextMap.delete(session.id);
 
         // Save incoming message
-        await saveIncomingMessage(session.id, messageText);
+        await saveIncomingMessage(session.id, originalMessage);
 
         // Check if there are pending addons to ask about (stored when custom text was first asked)
         const pendingAddonsAfterText = pendingAddonSelectionMap.get(session.id);
         if (pendingAddonsAfterText && pendingAddonsAfterText.itemId === pendingCustomText.itemId) {
           // Ask about addons now
           const addonsMessage = formatAddonsForCustomer(pendingAddonsAfterText.addons);
-          const confirmWithAddons = `Got it! "${cleanedText}" will be written on your cake.\n\n${addonsMessage}`;
+          const confirmWithAddons = `${t('customText.saved', lang, { text: cleanedText })}\n\n${addonsMessage}`;
           await saveOutgoingMessage(session.id, confirmWithAddons);
           return confirmWithAddons;
         }
 
         // No addons to ask about
-        const confirmReply = `Got it! "${cleanedText}" will be added to your cake. Anything else you'd like to order?`;
+        const confirmReply = t('customText.savedAnythingElse', lang, { text: cleanedText });
         await saveOutgoingMessage(session.id, confirmReply);
         return confirmReply;
       }
@@ -390,12 +409,13 @@ export async function processMessage(
     const normalizedInput = messageText.toLowerCase().trim();
 
     // Check if user wants to skip addons
-    if (['no', 'no thanks', 'skip', 'none', 'nope', 'nothing'].some(s => normalizedInput === s || normalizedInput.startsWith(s + ' '))) {
+    if (['no', 'no thanks', 'skip', 'none', 'nope', 'nothing'].some(s => normalizedInput === s || normalizedInput.startsWith(s + ' ')))
+     {
       logger.info(`Customer declined addons for item ${pendingAddon.itemId}`);
       pendingAddonSelectionMap.delete(session.id);
 
-      await saveIncomingMessage(session.id, messageText);
-      const skipReply = "No problem! Anything else you'd like to order?";
+      await saveIncomingMessage(session.id, originalMessage);
+      const skipReply = t('addons.declined', lang);
       await saveOutgoingMessage(session.id, skipReply);
       return skipReply;
     }
@@ -414,20 +434,20 @@ export async function processMessage(
         await updateSessionItemCustomText(pendingAddon.itemId, customTextContent);
         logger.info(`Custom text saved during addon selection: "${customTextContent}"`);
         // Keep addon selection pending - user might still want addons
-        await saveIncomingMessage(session.id, messageText);
+        await saveIncomingMessage(session.id, originalMessage);
         const addonNames = pendingAddon.addons.map((a, i) => `${i + 1}. ${a.name}`).join('\n');
-        const customTextReply = `Got it! "${customTextContent}" will be written on your cake.\n\nWould you also like any add-ons?\n${addonNames}\n\nOr say "no thanks" to skip.`;
+        const customTextReply = t('customText.savedWithAddonPrompt', lang, { text: customTextContent, options: addonNames });
         await saveOutgoingMessage(session.id, customTextReply);
         return customTextReply;
       } else {
         // Ask for the custom text
-        await saveIncomingMessage(session.id, messageText);
-        const askTextReply = "Sure! What would you like written on the cake?";
+        await saveIncomingMessage(session.id, originalMessage);
+        const askTextReply = t('customText.askPrompt', lang);
         await saveOutgoingMessage(session.id, askTextReply);
         // Set pending custom text for next message
         pendingCustomTextMap.set(session.id, {
           itemId: pendingAddon.itemId,
-          prompt: "What would you like written on the cake?",
+          prompt: t('customText.askPrompt', lang),
         });
         return askTextReply;
       }
@@ -447,10 +467,10 @@ export async function processMessage(
       }
       pendingAddonSelectionMap.delete(session.id);
 
-      await saveIncomingMessage(session.id, messageText);
+      await saveIncomingMessage(session.id, originalMessage);
       const addonReply = selectedAddons.length === 1
-        ? `Added ${addedNames[0]}! Would you like anything else?`
-        : `Added ${addedNames.join(', ')}! Would you like anything else?`;
+        ? t('addons.added', lang, { addon: addedNames[0] })
+        : t('addons.addedMultiple', lang, { addons: addedNames.join(', ') });
       await saveOutgoingMessage(session.id, addonReply);
       return addonReply;
     }
@@ -467,10 +487,10 @@ export async function processMessage(
     } else {
       // Give hint about addon selection
       logger.info(`Input "${messageText}" didn't match addons, giving hint`);
-      await saveIncomingMessage(session.id, messageText);
+      await saveIncomingMessage(session.id, originalMessage);
 
       const addonNames = pendingAddon.addons.map((a, i) => `${i + 1}. ${a.name}`).join('\n');
-      const hintReply = `I didn't catch that. Please reply with:\n${addonNames}\n\nOr say "no thanks" to skip add-ons.\n\n💡 _To add a cake message, say "write Happy Birthday" or similar._`;
+      const hintReply = t('addons.hint', lang, { options: addonNames });
       await saveOutgoingMessage(session.id, hintReply);
       return hintReply;
     }
@@ -490,14 +510,14 @@ export async function processMessage(
 
     if (needsDeliveryTime || needsPickupTime) {
       // Check if message looks like a time input
-      const looksLikeTime = /\d{1,2}(?::\d{2})?\s*(?:am|pm)|morning|evening|afternoon|today|tomorrow|nale|innu/i.test(messageText);
+      const looksLikeTime = /\d{1,2}(?:[:\d]{2})?\s*(?:am|pm)|morning|evening|afternoon|today|tomorrow|nale|innu/i.test(messageText);
 
       if (looksLikeTime) {
         logger.info(`Session needs time, parsing: "${messageText}"`);
         const parsedTime = parseDeliveryTime(messageText, businessTimezone);
 
         if (parsedTime) {
-          await saveIncomingMessage(session.id, messageText);
+          await saveIncomingMessage(session.id, originalMessage);
 
           // Validate against operating hours
           if (needsPickupTime && sessionForTimeCheck.pickup_outlet_id) {
@@ -506,7 +526,7 @@ export async function processMessage(
               const validation = validateOperatingHours(parsedTime, selectedOutlet, businessTimezone);
               if (!validation.valid) {
                 logger.warn(`Pickup time ${parsedTime} rejected: ${validation.reason}`);
-                const errorMsg = `⏰ ${validation.reason}\n\nPlease choose a different time.`;
+                const errorMsg = t('time.outsideHours', lang, { reason: validation.reason });
                 await saveOutgoingMessage(session.id, errorMsg);
                 return errorMsg;
               }
@@ -517,15 +537,15 @@ export async function processMessage(
             const validation = validateOperatingHours(parsedTime, primaryOutlet, businessTimezone);
             if (!validation.valid) {
               logger.warn(`Delivery time ${parsedTime} rejected: ${validation.reason}`);
-              const errorMsg = `⏰ ${validation.reason}\n\nPlease choose a different time.`;
+              const errorMsg = t('time.outsideHours', lang, { reason: validation.reason });
               await saveOutgoingMessage(session.id, errorMsg);
               return errorMsg;
             }
           }
 
-          // ============================================
+          // ============================================ 
           // CUSTOM CAKE TIME CONFIRMATION FLOW
-          // ============================================
+          // ============================================ 
           // Check if this is a custom cake order that needs admin time confirmation
           const acceptedQuote = await getAcceptedQuoteForSession(session.id);
 
@@ -560,9 +580,10 @@ export async function processMessage(
             });
 
             // Tell customer to wait for confirmation
-            const timeConfirmMsg = `⏰ We've noted your preferred ${fulfillmentType === 'delivery' ? 'delivery' : 'pickup'} time: *${parsedTime}*\n\n` +
-              `Since this is a custom designed cake, our team will confirm if we can deliver by this time.\n\n` +
-              `_You'll receive a confirmation shortly. Thank you for your patience! 🙏_`;
+            const timeConfirmMsg = t('customCake.timeConfirmRequest', lang, {
+              type: fulfillmentType,
+              time: parsedTime,
+            });
             await saveOutgoingMessage(session.id, timeConfirmMsg);
             return timeConfirmMsg;
           }
@@ -585,7 +606,7 @@ export async function processMessage(
           // Show final invoice with confirmation prompt
           const finalSummary = await generateOrderSummary(session.id, {
             includeCta: true,
-            ctaMessage: '\nPlease review your order. Reply *YES* to confirm.',
+            ctaMessage: t('orderSummary.reviewPrompt', lang),
             timezone: businessTimezone,
           });
           await saveOutgoingMessage(session.id, finalSummary);
@@ -600,7 +621,7 @@ export async function processMessage(
   if (aiPaused) {
     logger.info(`AI paused for session ${session.id}, skipping AI response`);
     // Still save the incoming message for record
-    await saveIncomingMessage(session.id, messageText);
+    await saveIncomingMessage(session.id, originalMessage);
     return null; // Return null to indicate no AI response
   }
 
@@ -608,9 +629,9 @@ export async function processMessage(
   const sessionWithItems = await getSessionWithItems(session.id);
   let existingItems = sessionWithItems?.items || [];
 
-  // ============================================
+  // ============================================ 
   // CUSTOM CAKE QUOTE ACCEPTANCE HANDLER
-  // ============================================
+  // ============================================ 
   // Check if customer is accepting a sent quote (before AI processing)
   // Flexible matching - allows phrases like "Ooh.. Okay", "Yes please", "please proceed"
   const acceptancePatterns = [
@@ -645,7 +666,6 @@ export async function processMessage(
       const acceptedQuote = await markQuoteAsAccepted(sentQuote.id);
 
       if (acceptedQuote) {
-        // Use admin-confirmed price, fallback to AI suggested price
         const finalPrice = acceptedQuote.admin_final_price ?? acceptedQuote.suggested_price ?? 0;
         const cakeFlavor = acceptedQuote.ai_analysis?.detected_flavor || acceptedQuote.customer_flavor || 'Custom';
         const cakeWeight = acceptedQuote.customer_weight ||
@@ -676,24 +696,24 @@ export async function processMessage(
         existingItems = updatedSession?.items || [];
 
         // Save incoming message
-        await saveIncomingMessage(session.id, messageText);
+        await saveIncomingMessage(session.id, originalMessage);
 
         // Generate summary and ask for fulfillment
         const summary = await generateOrderSummary(session.id, { includeCta: false, timezone: business?.timezone || 'Asia/Kolkata' });
 
         let quoteAcceptedReply: string;
         if (business?.supports_delivery && business?.supports_takeaway) {
-          quoteAcceptedReply = `Great! Your custom cake order has been added! 🎂\n\n${summary}\n\nHow would you like to receive your order?`;
+          quoteAcceptedReply = t('customCake.addedThenAskFulfillment', lang, { summary });
           await saveOutgoingMessage(session.id, quoteAcceptedReply);
           await sendReplyButtons(phone, quoteAcceptedReply, [
-            { id: 'delivery', title: '🚚 Delivery' },
-            { id: 'takeaway', title: '🏪 Takeaway' },
+            { id: 'delivery', title: t('fulfillment.deliveryBtn', lang) },
+            { id: 'takeaway', title: t('fulfillment.takeawayBtn', lang) },
           ]);
           return null;
         } else if (business?.supports_delivery) {
-          quoteAcceptedReply = `Great! Your custom cake order has been added! 🎂\n\n${summary}\n\nPlease share your delivery address and preferred date/time.`;
+          quoteAcceptedReply = t('customCake.addedThenAskDelivery', lang, { summary });
         } else {
-          quoteAcceptedReply = `Great! Your custom cake order has been added! 🎂\n\n${summary}\n\nPlease select your preferred pickup location.`;
+          quoteAcceptedReply = t('customCake.addedThenAskPickup', lang, { summary });
           if (outlets.length > 0) {
             quoteAcceptedReply += '\n\n' + formatOutletsForCustomer(outlets);
           }
@@ -706,9 +726,9 @@ export async function processMessage(
     } // Close else block for fulfillment check
   }
 
-  // ============================================
+  // ============================================ 
   // CUSTOM CAKE PRICE/WEIGHT CHANGE DETECTION
-  // ============================================
+  // ============================================ 
   // If customer has an accepted/sent quote and asks about different weight/price,
   // create a revision quote for admin review instead of letting AI calculate
   const existingQuoteForRevision = await getAcceptedQuoteForSession(session.id) || await getSentQuoteForSession(session.id);
@@ -745,7 +765,7 @@ export async function processMessage(
     if (requestedWeight && requestedWeightNum && requestedWeightNum !== currentWeightNum) {
       logger.info(`🎂 Custom cake weight/price change detected: ${currentWeight} → ${requestedWeight}`);
 
-      await saveIncomingMessage(session.id, messageText);
+      await saveIncomingMessage(session.id, originalMessage);
 
       // Create a revision quote for admin to review
       try {
@@ -764,8 +784,7 @@ export async function processMessage(
           quoteId: revisionQuote.id,
         });
 
-        const revisionMsg = `For the customized ${requestedWeight} cake, our team needs to confirm the pricing.\n\n` +
-          `We're preparing a new quote for you. You'll receive it shortly! 🎂`;
+        const revisionMsg = t('customCake.revisionQuote', lang, { weight: requestedWeight });
         await saveOutgoingMessage(session.id, revisionMsg);
         return revisionMsg;
       } catch (error) {
@@ -779,8 +798,8 @@ export async function processMessage(
     if (hasPriceInquiry && !requestedWeight) {
       const pendingQuote = await getPendingQuoteForSession(session.id);
       if (pendingQuote) {
-        await saveIncomingMessage(session.id, messageText);
-        const waitMsg = `Our team is still preparing the customized quote for your cake design. We will share it with you as soon as it's ready! 🙏`;
+        await saveIncomingMessage(session.id, originalMessage);
+        const waitMsg = t('customCake.quoteWaiting', lang);
         await saveOutgoingMessage(session.id, waitMsg);
         return waitMsg;
       }
@@ -818,6 +837,7 @@ export async function processMessage(
     sessionHasDeliveryInfo: !!latestSessionData.delivery_address,
     sessionHasPickupInfo: !!latestSessionData.pickup_outlet_id,
     amenities,
+    customerLanguage: lang, // i18n: Pass customer's preferred language to AI
   };
 
   logger.debug(`AI context fulfillment: type=${latestSessionData.fulfillment_type}, addr=${latestSessionData.delivery_address}, outlet=${latestSessionData.pickup_outlet_id}`);
@@ -830,8 +850,8 @@ export async function processMessage(
     aiContext
   );
 
-  // Save incoming message
-  await saveIncomingMessage(session.id, messageText);
+  // Save incoming message (use original, not normalized, to preserve customer's actual input)
+  await saveIncomingMessage(session.id, originalMessage);
 
   let replyMessage = aiResponse.reply;
   let intentToProcess = aiResponse.intent;
@@ -862,9 +882,9 @@ export async function processMessage(
     // If no fulfillment yet, let AI handle it naturally (will ask for delivery/takeaway)
   }
 
-  // ============================================
+  // ============================================ 
   // FALLBACK: Custom cake quote when AI adds item but menu validation fails
-  // ============================================
+  // ============================================ 
   // If AI tried to add a custom cake but it was rejected as "item_not_available",
   // check if there's a sent quote and add the custom cake from the quote
   if (intentToProcess === 'item_not_available') {
@@ -904,22 +924,21 @@ export async function processMessage(
 
         let fallbackReply: string;
         if (business?.supports_delivery && business?.supports_takeaway) {
-          fallbackReply = `Great! Your custom cake order has been added! 🎂\n\n${summary}\n\nHow would you like to receive your order?`;
+          fallbackReply = t('customCake.addedThenAskFulfillment', lang, { summary });
           await saveOutgoingMessage(session.id, fallbackReply);
           await sendReplyButtons(phone, fallbackReply, [
-            { id: 'delivery', title: '🚚 Delivery' },
-            { id: 'takeaway', title: '🏪 Takeaway' },
+            { id: 'delivery', title: t('fulfillment.deliveryBtn', lang) },
+            { id: 'takeaway', title: t('fulfillment.takeawayBtn', lang) },
           ]);
           return null;
         } else if (business?.supports_delivery) {
-          fallbackReply = `Great! Your custom cake order has been added! 🎂\n\n${summary}\n\nPlease share your delivery address and preferred date/time.`;
+          fallbackReply = t('customCake.addedThenAskDelivery', lang, { summary });
         } else {
-          fallbackReply = `Great! Your custom cake order has been added! 🎂\n\n${summary}\n\nPlease select your preferred pickup location.`;
+          fallbackReply = t('customCake.addedThenAskPickup', lang, { summary });
           if (outlets.length > 0) {
             fallbackReply += '\n\n' + formatOutletsForCustomer(outlets);
           }
         }
-
         await saveOutgoingMessage(session.id, fallbackReply);
         return fallbackReply;
       }
@@ -968,7 +987,7 @@ export async function processMessage(
         }
 
         if (addedItemNames.length > 0) {
-          replyMessage = `Added to cart:\n${addedItemNames.map((n, i) => `${i + 1}. ${n}`).join('\n')}\n\nAnything else?`;
+          replyMessage = t('cart.addedMultiple', lang, { items: addedItemNames.map((n, i) => `${i + 1}. ${n}`).join('\n') });
         }
         break;
       }
@@ -1037,7 +1056,8 @@ export async function processMessage(
                       ? `${addedMenuItem.name} (${aiResponse.item.size_or_weight})`
                       : addedMenuItem.name;
                     const notePrefix = categoryNoteToShow ? `_${categoryNoteToShow}_\n\n` : '';
-                    replyMessage = `Added ${itemDesc} to your cart! 🛒\n\n${notePrefix}${category.custom_text_prompt}`;
+                    // i18n: Use translated "Added to cart" message, keep custom_text_prompt as-is (business sets it)
+                    replyMessage = `${t('cart.added', lang, { item: itemDesc })}\n\n${notePrefix}${category.custom_text_prompt}`;
                   } else if (categoryNoteToShow) {
                     // Only display note (no input expected), continue with addons
                     replyMessage = aiResponse.reply + `\n\n_${categoryNoteToShow}_`;
@@ -1064,7 +1084,9 @@ export async function processMessage(
           } catch (saveError) {
             logger.error(`❌ Failed to save item to DB: ${aiResponse.item.name}`, saveError);
             const supportPhone = business?.customer_support_phone;
-            replyMessage = `We couldn't add that item to your cart. Please try again.${supportPhone ? `\n\n📞 Need help? Contact: ${supportPhone}` : ''}`;
+            replyMessage = t('error.cartAddFailed', lang, {
+              support: supportPhone ? t('error.contactSupport', lang, { phone: supportPhone }) : '',
+            });
           }
         }
       } else {
@@ -1105,7 +1127,7 @@ export async function processMessage(
       // Always show updated summary after modification
       const modifiedSummary = await generateOrderSummary(session.id, {
         includeCta: true,
-        ctaMessage: 'Reply *YES* to confirm these items.',
+        ctaMessage: t('orderSummary.confirmItems', lang),
         timezone: businessTimezone
       });
       replyMessage = aiResponse.reply + '\n\n' + modifiedSummary;
@@ -1124,7 +1146,7 @@ export async function processMessage(
 
         if (!lastItemId) {
           logger.warn('No last item found for add-on attachment');
-          replyMessage = "I couldn't find the item to attach this add-on to. Please add an item first, then we can add extras to it.";
+          replyMessage = t('addons.noItemForAddon', lang);
           break;
         }
 
@@ -1147,7 +1169,7 @@ export async function processMessage(
               if (!selectedAddon) {
                 selectedAddon = availableAddons.find(
                   addon => addon.name.toLowerCase() === aiResponse.addon!.addon_name.toLowerCase()
-                ) || null
+                ) || null;
               }
 
               if (selectedAddon) {
@@ -1156,11 +1178,11 @@ export async function processMessage(
 
                 // Update reply to confirm
                 if (!replyMessage.includes('Added')) {
-                  replyMessage = `Added ${selectedAddon.name}${selectedAddon.price ? ` (₹${selectedAddon.price})` : ' (FREE)'}! ${replyMessage}`;
+                  replyMessage = t('addons.added', lang, { addon: `${selectedAddon.name}${selectedAddon.price ? ` (₹${selectedAddon.price})` : ' (FREE)'}` }) + `! ${replyMessage}`;
                 }
               } else {
                 logger.warn(`Add-on not found: ${aiResponse.addon.addon_name}`);
-                replyMessage = "That add-on isn't available. Would you like something else?";
+                replyMessage = t('addons.notAvailable', lang);
               }
             }
           }
@@ -1181,16 +1203,16 @@ export async function processMessage(
 
         if (removeResult.success) {
           logger.info(`Add-on removed: ${removeResult.addonName} from ${removeResult.itemName}`);
-          replyMessage = `✅ Removed ${removeResult.addonName} from your ${removeResult.itemName}. Anything else?`;
+          replyMessage = t('addons.removed', lang, { addonName: removeResult.addonName ?? '', itemName: removeResult.itemName ?? '' });
 
           // Clear pending addon selection if exists
           pendingAddonSelectionMap.delete(session.id);
         } else {
           logger.warn(`Failed to remove addon: ${aiResponse.addon.addon_name}`);
-          replyMessage = `I couldn't find "${aiResponse.addon.addon_name}" in your order. Would you like me to show your current order?`;
+          replyMessage = t('addons.notFound', lang, { addon: aiResponse.addon.addon_name });
         }
       } else {
-        replyMessage = "Which add-on would you like to remove?";
+        replyMessage = t('addons.whichRemove', lang);
       }
       break;
 
@@ -1289,12 +1311,12 @@ export async function processMessage(
         if (itemToUpdate) {
           await updateSessionItemCustomText(itemToUpdate.id, newCustomText);
           logger.info(`Custom text modified: "${newCustomText}" for item ${itemToUpdate.id} (${itemToUpdate.item_name})`);
-          replyMessage = `Got it! Updated the message on your ${itemToUpdate.item_name} to "${newCustomText}". Anything else?`;
+          replyMessage = t('customText.updated', lang, { item: itemToUpdate.item_name, text: newCustomText });
           // Clear pending custom text only after successfully updating
           pendingCustomTextMap.delete(session.id);
         } else {
           logger.warn('No item found to update custom text');
-          replyMessage = "I couldn't find an item with text to update. Would you like to add something first?";
+          replyMessage = t('customText.updateFailedNoItem', lang);
         }
       } else {
         // No custom text provided - need to SET pending state to wait for user's response
@@ -1310,7 +1332,7 @@ export async function processMessage(
           if (!userMentionedSpecificItem) {
             // Multiple cakes and user didn't specify - ask which one
             const cakeList = customizableItems.map((item, i) => `${i + 1}. ${item.item_name}`).join('\n');
-            replyMessage = `You have multiple items. Which one would you like to add writing to?\n\n${cakeList}`;
+            replyMessage = t('customText.clarifyItem', lang, { items: cakeList });
             // Don't set pending yet - wait for them to specify which cake
             break;
           }
@@ -1319,11 +1341,11 @@ export async function processMessage(
           if (itemToUpdate) {
             pendingCustomTextMap.set(session.id, {
               itemId: itemToUpdate.id,
-              prompt: `What would you like written on your ${itemToUpdate.item_name}?`,
+              prompt: t('customText.askPromptForItem', lang, { item: itemToUpdate.item_name }),
             });
-            replyMessage = `What would you like written on your ${itemToUpdate.item_name}?`;
+            replyMessage = t('customText.askPromptForItem', lang, { item: itemToUpdate.item_name });
           } else {
-            replyMessage = "I couldn't find that item in your order. Which item would you like to add writing to?";
+            replyMessage = t('customText.addFailedNoItem', lang);
           }
         } else {
           // Single item or no ambiguity
@@ -1331,11 +1353,11 @@ export async function processMessage(
           if (itemToUpdate) {
             pendingCustomTextMap.set(session.id, {
               itemId: itemToUpdate.id,
-              prompt: `What would you like written on your ${itemToUpdate.item_name}?`,
+              prompt: t('customText.askPromptForItem', lang, { item: itemToUpdate.item_name }),
             });
-            replyMessage = `What would you like written on your ${itemToUpdate.item_name}?`;
+            replyMessage = t('customText.askPromptForItem', lang, { item: itemToUpdate.item_name });
           } else {
-            replyMessage = "I couldn't find an item to update. Would you like to add something first?";
+            replyMessage = t('customText.updateFailedNoItem', lang);
           }
         }
       }
@@ -1347,10 +1369,10 @@ export async function processMessage(
       if (itemWithText) {
         await updateSessionItemCustomText(itemWithText.id, ''); // Clear the custom text
         logger.info(`Custom text removed for item ${itemWithText.id}`);
-        replyMessage = `Done! I've removed the text from your ${itemWithText.item_name}. Anything else you'd like to change?`;
+        replyMessage = t('customText.removed', lang, { item: itemWithText.item_name });
       } else {
         logger.warn('No item found with custom text to remove');
-        replyMessage = "There's no text to remove from your order. Anything else I can help with?";
+        replyMessage = t('customText.removeFailedNoText', lang);
       }
       // Clear pending custom text if exists
       pendingCustomTextMap.delete(session.id);
@@ -1368,7 +1390,7 @@ export async function processMessage(
         logger.info('Custom cake inquiry - custom cakes not enabled');
         const supportPhone = business?.customer_support_phone;
         if (supportPhone) {
-          replyMessage = `For custom cake designs, please contact our team at ${supportPhone}. They'll help you with personalized cake orders!`;
+          replyMessage = t('customCake.contactSupport', lang, { phone: supportPhone });
         } else {
           replyMessage = aiResponse.reply; // Use AI's reply
         }
@@ -1381,7 +1403,7 @@ export async function processMessage(
         const pdfExists = await menuPdfExists(business.id);
         if (pdfExists) {
           const pdfUrl = getMenuPdfUrl(business.id);
-          const menuCaption = `Here's our menu! Browse through and let me know what you'd like to order.`;
+          const menuCaption = t('menu.pdfCaption', lang);
           await saveOutgoingMessage(session.id, `[Menu PDF sent] ${menuCaption}`);
           await sendDocument(
             phone,
@@ -1398,13 +1420,13 @@ export async function processMessage(
           // Large menu: Use interactive list with smart groupings
           const categorySections = buildCategoryListSections(menuCategories);
           if (categorySections.length > 0) {
-            const menuIntro = `Welcome to ${business?.name || 'our cafe'}! Tap below to browse our menu.`;
+            const menuIntro = t('menu.welcome', lang, { businessName: business?.name || t('menu.ourMenu', lang) });
             await saveOutgoingMessage(session.id, menuIntro);
             await sendInteractiveListMessage(
               phone,
-              'Our Menu',
+              t('menu.ourMenu', lang),
               menuIntro,
-              'Browse Menu',
+              t('menu.browseBtn', lang),
               categorySections
             );
             return null; // Don't send another message
@@ -1413,8 +1435,7 @@ export async function processMessage(
         // Small menu or fallback: use text format
         replyMessage = formatMenuForCustomer(menuItems, menuCategories);
       } else {
-        replyMessage =
-          "We have cakes, coffee, tea, cold drinks, and snacks! Just tell me what you'd like.";
+        replyMessage = t('menu.fallback', lang);
       }
       break;
 
@@ -1423,33 +1444,35 @@ export async function processMessage(
       const checkoutSession = await getSessionWithItems(session.id);
       if (!checkoutSession || checkoutSession.items.length === 0) {
         logger.warn(`⚠️ READY_FOR_CHECKOUT but cart is EMPTY! Session: ${session.id}`);
-        replyMessage = "Your cart is empty! What would you like to order?";
+        replyMessage = t('cart.empty', lang);
         break;
       }
       // Show summary and ask for delivery/takeaway directly (no separate item confirmation)
       const summary = await generateOrderSummary(session.id, { includeCta: false, timezone: businessTimezone });
       if (business?.supports_delivery && business?.supports_takeaway) {
         // Use interactive buttons for delivery/takeaway choice
-        await saveOutgoingMessage(session.id, summary + '\n\nHow would you like to receive your order?');
-        await sendReplyButtons(phone, summary + '\n\nHow would you like to receive your order?', [
-          { id: 'delivery', title: '🚚 Delivery' },
-          { id: 'takeaway', title: '🏪 Takeaway' },
+        const askFulfillment = summary + '\n\n' + t('fulfillment.askType', lang);
+        await saveOutgoingMessage(session.id, askFulfillment);
+        await sendReplyButtons(phone, askFulfillment, [
+          { id: 'delivery', title: t('fulfillment.deliveryBtn', lang) },
+          { id: 'takeaway', title: t('fulfillment.takeawayBtn', lang) },
         ]);
         return null; // Don't send another message
       } else if (business?.supports_delivery) {
-        replyMessage = summary + '\n\nPlease share your delivery address and preferred time.';
+        replyMessage = summary + '\n\n' + t('fulfillment.deliveryPrompt', lang);
       } else {
         // Takeaway only - Use interactive list for outlet selection
         if (outlets.length > 0) {
           await updateSessionFulfillmentType(session.id, 'takeaway');
-          await saveOutgoingMessage(session.id, summary + '\n\nPlease select your preferred pickup location.');
+          const pickupPrompt = summary + '\n\n' + t('fulfillment.pickupPrompt', lang);
+          await saveOutgoingMessage(session.id, pickupPrompt);
           await sendInteractiveListMessage(
             phone,
-            '📍 Pickup Locations',
-            summary + '\n\nPlease select your preferred pickup location:',
-            'Choose Location',
+            t('buttons.pickupLocations', lang),
+            pickupPrompt,
+            t('buttons.chooseLocation', lang),
             [{
-              title: 'Available Outlets',
+              title: t('buttons.availableOutlets', lang),
               rows: outlets.map(o => ({
                 id: o.id,
                 title: o.outlet_name,
@@ -1459,7 +1482,7 @@ export async function processMessage(
           );
           return null; // Don't send another message
         } else {
-          replyMessage = summary + '\n\nPlease let us know when you would like to pick up your order.';
+          replyMessage = summary + '\n\n' + t('fulfillment.askPickupTimeGeneric', lang);
         }
       }
       break;
@@ -1469,16 +1492,16 @@ export async function processMessage(
       const itemsSession = await getSessionWithItems(session.id);
       if (!itemsSession || itemsSession.items.length === 0) {
         logger.warn(`⚠️ CONFIRM_ITEMS but cart is EMPTY! Session: ${session.id}`);
-        replyMessage = "Your cart is empty! What would you like to order?";
+        replyMessage = t('cart.empty', lang);
         break;
       }
       // Ask for delivery or takeaway
       if (business?.supports_delivery && business?.supports_takeaway) {
-        replyMessage = "Would you like *delivery* or *takeaway*?";
+        replyMessage = t('fulfillment.askTypeDirect', lang);
       } else if (business?.supports_delivery) {
-        replyMessage = "Please share your delivery address.";
+        replyMessage = t('fulfillment.askAddress', lang);
       } else {
-        replyMessage = "Please select your preferred pickup location.";
+        replyMessage = t('fulfillment.pickupPrompt', lang);
         if (outlets.length > 0) {
           replyMessage += '\n\n' + formatOutletsForCustomer(outlets);
         }
@@ -1488,11 +1511,11 @@ export async function processMessage(
     case 'ask_fulfillment_type':
       // Ask customer for delivery or takeaway
       if (business?.supports_delivery && business?.supports_takeaway) {
-        replyMessage = aiResponse.reply || 'Would you like delivery or takeaway?';
+        replyMessage = aiResponse.reply || t('fulfillment.askType', lang);
       } else if (business?.supports_delivery) {
-        replyMessage = 'We offer delivery service. Please share your delivery address.';
+        replyMessage = t('fulfillment.offerDelivery', lang);
       } else {
-        replyMessage = 'Please select your preferred pickup location.';
+        replyMessage = t('fulfillment.pickupPrompt', lang);
       }
       break;
 
@@ -1550,13 +1573,13 @@ export async function processMessage(
               // Show final invoice
               const deliverySummary = await generateOrderSummary(session.id, {
                 includeCta: true,
-                ctaMessage: '\nPlease review your order. Reply *YES* to confirm or you can add more items.',
+                ctaMessage: t('orderSummary.reviewPromptAdd', lang),
                 timezone: businessTimezone
               });
               replyMessage = deliverySummary;
             } else if (!sessionData?.delivery_time) {
               // Need to ask for time
-              replyMessage = `📍 Location saved!\n\n⏰ What time would you like delivery?\n_Examples: 'today 5pm', 'tomorrow 3pm', 'nale 4pm', 'innu evening'_`;
+              replyMessage = t('fulfillment.locationSavedThenAskTime', lang);
             }
           } else {
             // No existing location - save the AI-extracted address
@@ -1569,7 +1592,6 @@ export async function processMessage(
               const extracted = extractAddressAndTime(messageText, businessTimezone);
               if (extracted.time) {
                 deliveryTime = extracted.time;
-                logger.info(`Extracted time from message: ${extracted.time}`);
               }
             }
 
@@ -1582,12 +1604,12 @@ export async function processMessage(
 
             // Check if time was provided - if not, ask for it
             if (!deliveryTime) {
-              replyMessage = `Got it, delivery to ${addressFromAI}.\n\n⏰ What time would you like delivery?\n_Examples: 'today 5pm', 'tomorrow 3pm', 'nale 4pm', 'innu evening'_`;
+              replyMessage = t('fulfillment.gotAddress', lang, { address: addressFromAI });
             } else {
               // Show final invoice with delivery details and ask for confirmation
               const deliverySummary = await generateOrderSummary(session.id, {
                 includeCta: true,
-                ctaMessage: '\nPlease review your order. Reply *YES* to confirm or you can add more items.',
+                ctaMessage: t('orderSummary.reviewPromptAdd', lang),
                 timezone: businessTimezone
               });
               replyMessage = deliverySummary;
@@ -1630,7 +1652,7 @@ export async function processMessage(
               const validation = validateOperatingHours(pickupTime, selectedOutlet, businessTimezone);
               if (!validation.valid) {
                 logger.warn(`Pickup time ${pickupTime} rejected: ${validation.reason}`);
-                replyMessage = `⏰ ${validation.reason}\n\nPlease choose a different time for pickup from ${selectedOutlet.outlet_name}.`;
+                replyMessage = t('time.outsideHours', lang, { reason: validation.reason });
                 break;
               }
             }
@@ -1644,12 +1666,12 @@ export async function processMessage(
 
             // If time was NOT provided, ask for it
             if (!pickupTime) {
-              replyMessage = `Great! What time would you like to pick up your order from ${selectedOutlet.outlet_name}?`;
+              replyMessage = t('fulfillment.askPickupTime', lang, { outlet: selectedOutlet.outlet_name });
             } else {
               // Show final invoice with pickup details and ask for confirmation
               const pickupSummary = await generateOrderSummary(session.id, {
                 includeCta: true,
-                ctaMessage: `\n📍 Pickup at: ${selectedOutlet.outlet_name}\n🕐 Time: ${pickupTime}\n\nPlease review your order. Reply *YES* to confirm or you can add more items.`,
+                ctaMessage: `\n${t('fulfillment.pickupFrom', lang)}: ${selectedOutlet.outlet_name}\n${t('orderSummary.time', lang)}: ${pickupTime}\n\n${t('orderSummary.reviewPromptAdd', lang)}`,
                 timezone: businessTimezone
               });
               replyMessage = pickupSummary;
@@ -1672,7 +1694,7 @@ export async function processMessage(
               const validation = validateOperatingHours(pickupTime, selectedOutlet, businessTimezone);
               if (!validation.valid) {
                 logger.warn(`Pickup time ${pickupTime} rejected: ${validation.reason}`);
-                replyMessage = `⏰ ${validation.reason}\n\nPlease choose a different time.`;
+                replyMessage = t('time.outsideHours', lang, { reason: validation.reason });
                 break;
               }
             }
@@ -1689,23 +1711,23 @@ export async function processMessage(
             // Show final invoice with pickup details and ask for confirmation
             const pickupSummary = await generateOrderSummary(session.id, {
               includeCta: true,
-              ctaMessage: `\n📍 Pickup at: ${outletName}\n🕐 Time: ${pickupTime}\n\nPlease review your order. Reply *YES* to confirm or you can add more items.`,
+              ctaMessage: `\n${t('fulfillment.pickupFrom', lang)}: ${outletName}\n${t('orderSummary.time', lang)}: ${pickupTime}\n\n${t('orderSummary.reviewPromptAdd', lang)}`,
               timezone: businessTimezone
             });
             replyMessage = pickupSummary;
           } else {
-            replyMessage = "I couldn't understand that time format. Please try something like:\n• 'today 5pm'\n• 'tomorrow 10am'\n• 'nale 4pm' (Malayalam for tomorrow)";
+            replyMessage = t('time.invalidFormat', lang);
           }
         } else if (!session.pickup_outlet_id && outlets.length > 0) {
           // Use interactive list for outlet selection
           await saveOutgoingMessage(session.id, aiResponse.reply);
           await sendInteractiveListMessage(
             phone,
-            '📍 Pickup Locations',
+            t('buttons.pickupLocations', lang),
             aiResponse.reply,
-            'Choose Location',
+            t('buttons.chooseLocation', lang),
             [{
-              title: 'Available Outlets',
+              title: t('buttons.availableOutlets', lang),
               rows: outlets.map(o => ({
                 id: o.id,
                 title: o.outlet_name,
@@ -1785,7 +1807,7 @@ export async function processMessage(
             const validation = validateOperatingHours(deliveryTime, primaryOutlet, businessTimezone);
             if (!validation.valid) {
               logger.warn(`Delivery time ${deliveryTime} rejected in confirm_order: ${validation.reason}`);
-              replyMessage = `⏰ ${validation.reason}\n\nPlease choose a different delivery time.`;
+              replyMessage = t('time.outsideHours', lang, { reason: validation.reason });
               break;
             }
           }
@@ -1836,7 +1858,7 @@ export async function processMessage(
                 const validation = validateOperatingHours(pickupTime, selectedOutlet, businessTimezone);
                 if (!validation.valid) {
                   logger.warn(`Pickup time ${pickupTime} rejected in confirm_order: ${validation.reason}`);
-                  replyMessage = `⏰ ${validation.reason}\n\nPlease choose a different pickup time.`;
+                  replyMessage = t('time.outsideHours', lang, { reason: validation.reason });
                   break;
                 }
               }
@@ -1854,7 +1876,7 @@ export async function processMessage(
           logger.info(`📋 Fulfillment just collected - showing invoice for confirmation`);
           const confirmationSummary = await generateOrderSummary(session.id, {
             includeCta: true,
-            ctaMessage: '\nPlease review your order. Reply *YES* to confirm or you can add more items.',
+            ctaMessage: t('orderSummary.reviewPromptAdd', lang),
             timezone: businessTimezone
           });
           replyMessage = confirmationSummary;
@@ -1868,7 +1890,7 @@ export async function processMessage(
       // VALIDATION: Check if cart has items before confirming
       if (!latestSession || latestSession.items.length === 0) {
         logger.warn(`⚠️ CONFIRM_ORDER attempted but cart is EMPTY! Session: ${session.id}`);
-        replyMessage = "Your cart is empty! Please add items before confirming. What would you like to order?";
+        replyMessage = t('order.emptyCart', lang);
         break;
       }
 
@@ -1878,11 +1900,11 @@ export async function processMessage(
         // Show summary and ask for fulfillment
         const orderSummary = await generateOrderSummary(session.id, { includeCta: false, timezone: businessTimezone });
         if (business?.supports_delivery && business?.supports_takeaway) {
-          replyMessage = orderSummary + '\n\nWould you like *delivery* or *takeaway*?';
+          replyMessage = orderSummary + '\n\n' + t('fulfillment.askTypeDirect', lang);
         } else if (business?.supports_delivery) {
-          replyMessage = orderSummary + '\n\nPlease share your delivery address.';
+          replyMessage = orderSummary + '\n\n' + t('fulfillment.askAddress', lang);
         } else {
-          replyMessage = orderSummary + '\n\nPlease select your preferred pickup location.';
+          replyMessage = orderSummary + '\n\n' + t('fulfillment.pickupPrompt', lang);
           if (outlets.length > 0) {
             replyMessage += '\n\n' + formatOutletsForCustomer(outlets);
           }
@@ -1895,14 +1917,14 @@ export async function processMessage(
         (latestSession.delivery_latitude && latestSession.delivery_longitude);
       if (latestSession.fulfillment_type === 'delivery' && !hasDeliveryLocationForValidation) {
         logger.warn(`⚠️ CONFIRM_ORDER attempted but no delivery address/location! Session: ${session.id}`);
-        replyMessage = "Please share your delivery address to complete the order.";
+        replyMessage = t('fulfillment.noAddress', lang);
         break;
       }
 
       // For takeaway, check if outlet is selected
       if (latestSession.fulfillment_type === 'takeaway' && !latestSession.pickup_outlet_id && outlets.length > 0) {
         logger.warn(`⚠️ CONFIRM_ORDER attempted but no pickup outlet! Session: ${session.id}`);
-        replyMessage = "Please select your preferred pickup location:\n\n" + formatOutletsForCustomer(outlets);
+        replyMessage = t('fulfillment.noOutlet', lang, { outlets: formatOutletsForCustomer(outlets) });
         break;
       }
 
@@ -1912,24 +1934,22 @@ export async function processMessage(
 
       if (!hasDeliveryTime && !hasPickupTime) {
         logger.warn(`⚠️ CONFIRM_ORDER attempted but no date/time provided! Session: ${session.id}`);
-        const timeExamples = "Examples: 'today 5pm', 'tomorrow 3pm', 'nale 4pm', 'innu evening'";
+        const timeExamples = t('time.examples', lang);
         if (latestSession.fulfillment_type === 'delivery') {
-          replyMessage = `⏰ Please provide a delivery date and time to confirm your order.\n\n${timeExamples}`;
+          replyMessage = t('time.needTime', lang, { type: t('time.deliveryTime', lang), examples: timeExamples });
         } else {
-          replyMessage = `⏰ Please provide a pickup date and time to confirm your order.\n\n${timeExamples}`;
+          replyMessage = t('time.needTime', lang, { type: t('time.pickupTime', lang), examples: timeExamples });
         }
         break;
       }
 
-      // ============================================
+      // ============================================ 
       // CUSTOM CAKE: Block order if time not confirmed by admin
-      // ============================================
+      // ============================================ 
       const customCakeQuote = await getAcceptedQuoteForSession(session.id);
       if (customCakeQuote && customCakeQuote.requested_delivery_time && !customCakeQuote.time_confirmed) {
         logger.warn(`⏳ Custom cake order blocked - waiting for admin time confirmation. Quote: ${customCakeQuote.id}`);
-        replyMessage = `⏳ Your custom cake order is awaiting time confirmation from our team.\n\n` +
-          `We're reviewing your requested time and will confirm shortly.\n\n` +
-          `_Please wait for our confirmation before proceeding. Thank you for your patience! 🙏_`;
+        replyMessage = t('customCake.waitingConfirmation', lang);
         break;
       }
 
@@ -1940,53 +1960,53 @@ export async function processMessage(
         // businessTimezone is already defined at the start of processMessage
 
         // Build confirmation message with fulfillment details (use LATEST session data)
-        let confirmMsg = `✅ Order confirmed!\n\n📋 Order #: *${order.order_number}*\n💰 Total: ₹${order.total_amount}`;
+        let confirmMsg = `${t('order.confirmed', lang)}\n\n📋 ${t('order.orderNumber', lang)}: *${order.order_number}*\n${t('order.total', lang, { amount: order.total_amount })}`;
 
         if (latestSession.fulfillment_type === 'delivery') {
-          confirmMsg += `\n\n🚚 *Delivery*\n📍 ${latestSession.delivery_address}`;
+          confirmMsg += `\n\n${t('order.delivery', lang)}\n📍 ${latestSession.delivery_address}`;
           if (latestSession.delivery_time) {
-            confirmMsg += `\n🕐 Time: ${formatDeliveryTime(latestSession.delivery_time, businessTimezone)}`;
+            confirmMsg += `\n${t('order.time', lang, { time: formatDeliveryTime(latestSession.delivery_time, businessTimezone) })}`;
           }
         } else if (latestSession.fulfillment_type === 'takeaway') {
-          confirmMsg += `\n\n🏪 *Takeaway*`;
+          confirmMsg += `\n\n${t('order.takeaway', lang)}`;
           const selectedOutlet = outlets.find(o => o.id === latestSession.pickup_outlet_id);
           if (selectedOutlet) {
             confirmMsg += `\n📍 ${selectedOutlet.outlet_name}`;
           }
           if (latestSession.pickup_time) {
-            confirmMsg += `\n🕐 Time: ${formatDeliveryTime(latestSession.pickup_time, businessTimezone)}`;
+            confirmMsg += `\n${t('order.time', lang, { time: formatDeliveryTime(latestSession.pickup_time, businessTimezone) })}`;
           }
         }
 
-        confirmMsg += `\n\n_Save your order number *${order.order_number}* to check status or cancel._`;
+        confirmMsg += `\n\n_${t('order.saveNumber', lang, { orderNumber: order.order_number })}_`;
         const closingMsg = business?.closing_message || 'Thank you for your order!';
         confirmMsg += `\n\n${closingMsg} 🙏`;
         replyMessage = confirmMsg;
       } catch (error) {
         logger.error('Failed to create order', error);
         const supportPhone = business?.customer_support_phone;
-        replyMessage = `We encountered an issue while processing your order. Please try again.${supportPhone ? `\n\n📞 Need immediate help? Contact us: ${supportPhone}` : ''}\n\n_Your cart items are still saved. Just say 'yes' to try again._`;
+        replyMessage = t('order.failed', lang, {
+          support: supportPhone ? t('error.contactSupport', lang, { phone: supportPhone }) : '',
+        });
       }
       break;
 
     case 'cancel':
-      replyMessage =
-        "No problem! Your order has been cancelled. Feel free to start a new order whenever you're ready!";
+      replyMessage = t('order.cancelled', lang);
       break;
 
     case 'cancel_existing_order':
       if (aiResponse.order_id) {
         const cancelResult = await cancelOrderById(aiResponse.order_id, customer.id, businessId);
         if (cancelResult.success) {
-          replyMessage = `✅ ${cancelResult.message}\n\nIf you'd like to place a new order, just let me know!`;
+          replyMessage = t('order.cancelledSuccess', lang, { message: cancelResult.message });
         } else {
-          replyMessage = `❌ ${cancelResult.message}`;
+          replyMessage = t('order.cancelFailed', lang, { message: cancelResult.message });
         }
       } else {
-        replyMessage = "Could you please provide the order number? It's the code you received when you placed the order (e.g., OKS-1).";
+        replyMessage = t('order.provideOrderNumber', lang);
       }
       break;
-
     case 'check_order_status':
       if (aiResponse.order_id) {
         // Customer provided order number - look up specific order
@@ -1995,15 +2015,15 @@ export async function processMessage(
         if (statusResult.success) {
           replyMessage = statusResult.message;
         } else {
-          replyMessage = `❌ ${statusResult.message}`;
+          replyMessage = t('order.cancelFailed', lang, { message: statusResult.message });
         }
       } else {
         // No order number provided - try to find their active order
         const activeOrder = await getCustomerActiveOrder(customer.id, businessId);
         if (activeOrder) {
-          replyMessage = getOrderStatusMessage(activeOrder, businessTimezone);
+          replyMessage = getOrderStatusMessage(activeOrder, lang, businessTimezone);
         } else {
-          replyMessage = "You don't have any active orders right now. Would you like to place one? 😊";
+          replyMessage = t('order.noActive', lang);
         }
       }
       break;
@@ -2068,7 +2088,7 @@ export async function processMessage(
 
               // If no time provided, prompt for it
               if (!deliveryTime) {
-                replyMessage = `Got it, delivery to ${addressFromAI}.\n\n⏰ What time would you like delivery?\n_Examples: 'today 5pm', 'tomorrow 3pm', 'nale 4pm', 'innu evening'_`;
+                replyMessage = t('fulfillment.gotAddress', lang, { address: addressFromAI });
               }
             }
           }
@@ -2154,7 +2174,7 @@ export async function processMessage(
           message: `Customer wants to book ${amenityName}. Phone: ${phone}`,
         });
 
-        replyMessage = aiResponse.reply || `Thank you for your interest in ${amenityName}! Our team has been notified and will contact you shortly to confirm your booking.`;
+        replyMessage = aiResponse.reply || t('amenity.bookingRequestConfirmation', lang, { amenity: amenityName });
       }
       break;
 
@@ -2312,9 +2332,8 @@ export async function handleWhatsAppWebhook(
                 );
 
                 // Ask for context
-                const contextMsg = `I received your image! 📸\n\nCould you please let me know what this is for?\n\n` +
-                  `• Is this a *cake design* you'd like us to create?\n` +
-                  `• Or something else you'd like to share with us?`;
+                const lang = getSessionLanguage(session);
+                const contextMsg = t('image.askContext', lang);
                 await sendWhatsAppMessage(phone, contextMsg);
                 await saveOutgoingMessage(session.id, contextMsg);
                 continue;
@@ -2421,12 +2440,10 @@ export async function handleWhatsAppWebhook(
 
               // Don't send automated response if AI is paused (human takeover)
               if (!session.ai_paused) {
+                const lang = getSessionLanguage(session);
                 const supportPhone = business.customer_support_phone;
-                let imageResponse = `I see you've sent an image! 📸\n\nSince I can't view images yet, I've notified our team to check it. They'll respond shortly!`;
-                if (supportPhone) {
-                  imageResponse += `\n\n📞 Need immediate help? Contact: ${supportPhone}`;
-                }
-                imageResponse += `\n\nIn the meantime, you can describe what you'd like to order? 😊`;
+                const support = supportPhone ? t('error.contactSupport', lang, { phone: supportPhone }) : '';
+                const imageResponse = t('image.fallback', lang, { support });
                 await sendWhatsAppMessage(phone, imageResponse);
                 await saveOutgoingMessage(session.id, imageResponse);
               }
@@ -2471,12 +2488,10 @@ export async function handleWhatsAppWebhook(
 
             // Don't send automated response if AI is paused (human takeover)
             if (!session.ai_paused) {
+              const lang = getSessionLanguage(session);
               const supportPhone = business.customer_support_phone;
-              let videoResponse = `I see you've sent a video! 🎬\n\nI've notified our team to check it. They'll respond shortly!`;
-              if (supportPhone) {
-                videoResponse += `\n\n📞 Need immediate help? Contact: ${supportPhone}`;
-              }
-              videoResponse += `\n\nIn the meantime, you can describe what you'd like to order? 😊`;
+              const support = supportPhone ? t('error.contactSupport', lang, { phone: supportPhone }) : '';
+              const videoResponse = t('video.fallback', lang, { support });
               await sendWhatsAppMessage(phone, videoResponse);
               await saveOutgoingMessage(session.id, videoResponse);
             }
@@ -2521,11 +2536,10 @@ export async function handleWhatsAppWebhook(
 
             // Don't send automated response if AI is paused (human takeover)
             if (!session.ai_paused) {
+              const lang = getSessionLanguage(session);
               const supportPhone = business.customer_support_phone;
-              let docResponse = `I received your document! 📄\n\nI've notified our team to review it. They'll respond shortly!`;
-              if (supportPhone) {
-                docResponse += `\n\n📞 Need immediate help? Contact: ${supportPhone}`;
-              }
+              const support = supportPhone ? t('error.contactSupport', lang, { phone: supportPhone }) : '';
+              const docResponse = t('document.fallback', lang, { support });
               await sendWhatsAppMessage(phone, docResponse);
               await saveOutgoingMessage(session.id, docResponse);
             }
@@ -2562,6 +2576,8 @@ export async function handleWhatsAppWebhook(
               continue;
             }
 
+            const lang = getSessionLanguage(session);
+
             // Check if voice feature is enabled (premium feature)
             if (!isVoiceEnabled()) {
               logger.info('Voice feature disabled');
@@ -2572,7 +2588,7 @@ export async function handleWhatsAppWebhook(
                 audioMimeType,
                 { size: mediaResult?.fileSize }
               );
-              const notEnabledReply = "Oops! I'm not able to understand voice messages yet. 🙈\n\nCould you please type your message instead? I'd love to help you! 💬";
+              const notEnabledReply = t('voice.notEnabled', lang);
               await sendWhatsAppMessage(phone, notEnabledReply);
               await saveOutgoingMessage(session.id, notEnabledReply);
               continue;
@@ -2588,7 +2604,7 @@ export async function handleWhatsAppWebhook(
                 audioMimeType,
                 { size: mediaResult?.fileSize }
               );
-              const noSpeechReply = "I received your voice message! 🎤\n\nVoice transcription is not available right now. Could you please type your message instead? 😊";
+              const noSpeechReply = t('voice.noTranscription', lang);
               await sendWhatsAppMessage(phone, noSpeechReply);
               await saveOutgoingMessage(session.id, noSpeechReply);
               continue;
@@ -2616,7 +2632,7 @@ export async function handleWhatsAppWebhook(
 
               if (reply !== null) {
                 // Prepend transcription confirmation to the reply
-                const voiceReply = `🎤 _"${transcription}"_\n\n${reply}`;
+                const voiceReply = t('voice.transcriptionPrefix', lang, { transcription }) + reply;
                 await sendWhatsAppMessage(phone, voiceReply);
                 // Note: processMessage already saves outgoing message, so we update it
               }
@@ -2632,10 +2648,8 @@ export async function handleWhatsAppWebhook(
               );
 
               const supportPhone = business.customer_support_phone;
-              let errorReply = "Sorry, I couldn't understand your voice message. 🎤\n\nCould you please type your message instead?";
-              if (supportPhone) {
-                errorReply += `\n\n📞 Need help? Contact: ${supportPhone}`;
-              }
+              const support = supportPhone ? t('error.contactSupport', lang, { phone: supportPhone }) : '';
+              const errorReply = t('voice.processingFailed', lang, { support });
               await sendWhatsAppMessage(phone, errorReply);
               await saveOutgoingMessage(session.id, errorReply);
             }
@@ -2753,7 +2767,8 @@ export async function handleWhatsAppWebhook(
                   });
 
                   // Inform customer
-                  const beyondRadiusMsg = `📍 Location saved!\n\n⚠️ Your location appears to be beyond our regular delivery area (${(deliveryFeeResult.distance_meters / 1000).toFixed(1)}km).\n\nOur operations team will review and confirm if we can deliver to your location.\n\n_You'll receive a confirmation shortly. Thank you for your patience!_`;
+                  const lang = getSessionLanguage(session);
+                  const beyondRadiusMsg = t('fulfillment.beyondArea', lang, { distance: `${(deliveryFeeResult.distance_meters / 1000).toFixed(1)}km` });
                   await sendWhatsAppMessage(phone, beyondRadiusMsg);
                   await saveOutgoingMessage(session.id, beyondRadiusMsg);
                   logger.info(`[DEBUG-LOC] Beyond radius - pending approval set for session ${session.id}`);
@@ -2763,19 +2778,21 @@ export async function handleWhatsAppWebhook(
                 // Show date selection buttons instead of asking for time as text
                 if (!sessionWithItems.delivery_time) {
                   logger.info(`[DEBUG-LOC] Step 8: Sending date buttons...`);
-                  const datePrompt = `📍 Location saved!\n\nWhen would you like delivery?`;
+                  const lang = getSessionLanguage(session);
+                  const datePrompt = t('fulfillment.locationSavedThenAskDate', lang);
                   await saveOutgoingMessage(session.id, datePrompt);
                   await sendReplyButtons(phone, datePrompt, [
-                    { id: 'date_today_delivery', title: '📅 Today' },
-                    { id: 'date_tomorrow_delivery', title: '📅 Tomorrow' },
-                    { id: 'date_other_delivery', title: '📅 Other' },
+                    { id: 'date_today_delivery', title: `📅 ${t('buttons.today', lang)}` },
+                    { id: 'date_tomorrow_delivery', title: `📅 ${t('buttons.tomorrow', lang)}` },
+                    { id: 'date_other_delivery', title: `📅 ${t('buttons.other', lang)}` },
                   ]);
                   logger.info(`[DEBUG-LOC] Step 8 done`);
                 } else {
                   logger.info(`[DEBUG-LOC] Step 8b: Generating order summary...`);
+                  const lang = getSessionLanguage(session);
                   const locationSummary = await generateOrderSummary(session.id, {
                     includeCta: true,
-                    ctaMessage: '\n📍 Location saved! Reply *YES* to confirm your order.',
+                    ctaMessage: `\n${t('fulfillment.locationSaved', lang)}! ${t('orderSummary.reviewPrompt', lang)}`,
                     timezone: businessTimezone,
                     includeDeliveryFee: true
                   });
@@ -2795,7 +2812,8 @@ export async function handleWhatsAppWebhook(
                 });
                 logger.info(`[DEBUG-LOC] Step 9: Location saved (lat=${location.latitude}, long=${location.longitude}, addr=${displayAddress || 'NULL'})`);
 
-                const locationReply = "Thanks for sharing your location! 📍 We've saved it for your delivery.";
+                const lang = getSessionLanguage(session);
+                const locationReply = t('fulfillment.locationSavedForLater', lang);
                 await sendWhatsAppMessage(phone, locationReply);
                 await saveOutgoingMessage(session.id, locationReply);
                 logger.info(`[DEBUG-LOC] Step 9 done`);
@@ -2827,16 +2845,17 @@ export async function handleWhatsAppWebhook(
                 await updateSessionFulfillmentType(session.id, 'takeaway');
 
                 if (businessOutlets.length > 0) {
-                  await saveIncomingMessage(session.id, '[Selected: Takeaway]');
-                  const outletPrompt = 'Great! Please select your preferred pickup location:';
+                  const lang = getSessionLanguage(session);
+                  await saveIncomingMessage(session.id, `[Selected: ${t('fulfillment.takeawayBtn', lang)}]`);
+                  const outletPrompt = t('fulfillment.selectOutlet', lang);
                   await saveOutgoingMessage(session.id, outletPrompt);
                   await sendInteractiveListMessage(
                     phone,
-                    '📍 Pickup Locations',
+                    t('buttons.pickupLocations', lang),
                     outletPrompt,
-                    'Choose Location',
+                    t('buttons.chooseLocation', lang),
                     [{
-                      title: 'Available Outlets',
+                      title: t('buttons.availableOutlets', lang),
                       rows: businessOutlets.map(o => ({
                         id: o.id,
                         title: o.outlet_name,
@@ -2855,8 +2874,9 @@ export async function handleWhatsAppWebhook(
 
                 // Set fulfillment type to delivery (this will clear takeaway info in the handler)
                 await updateSessionFulfillmentType(session.id, 'delivery');
-                await saveIncomingMessage(session.id, '[Selected: Delivery]');
-                const deliveryPrompt = "Great! Let's set up your 📍 delivery.\n\nYou can either *share your location* or *type your address* with preferred time.\n\n_Examples: 'MG Road, tomorrow 5pm', 'Kottakkal, today 6pm'_";
+                const lang = getSessionLanguage(session);
+                await saveIncomingMessage(session.id, `[Selected: ${t('fulfillment.deliveryBtn', lang)}]`);
+                const deliveryPrompt = t('fulfillment.deliveryLocationPrompt', lang);
                 await saveOutgoingMessage(session.id, deliveryPrompt);
                 // Send location request with the prompt
                 await sendLocationRequest(phone, deliveryPrompt);
@@ -2896,14 +2916,15 @@ export async function handleWhatsAppWebhook(
                 const session = await findOrCreateSession(customer.id, business.id);
                 const isDelivery = buttonId.includes('_delivery');
                 const fulfillmentType = isDelivery ? 'delivery' : 'takeaway';
+                const lang = getSessionLanguage(session);
 
                 if (buttonId.includes('_today_')) {
                   // Store date selection and show time buttons
                   pendingDateSelectionMap.set(session.id, { date: 'today', fulfillmentType });
-                  await saveIncomingMessage(session.id, '[Selected: Today]');
+                  await saveIncomingMessage(session.id, `[Selected: ${t('buttons.today', lang)}]`);
 
                   // Different time options for delivery vs takeaway
-                  const timePrompt = `📅 *Today* - What time?`;
+                  const timePrompt = t('buttons.whatTime', lang, { date: `*${t('buttons.today', lang)}*` });
                   await saveOutgoingMessage(session.id, timePrompt);
 
                   if (isDelivery) {
@@ -2911,14 +2932,14 @@ export async function handleWhatsAppWebhook(
                     await sendReplyButtons(phone, timePrompt, [
                       { id: 'time_1hour', title: '🕐 In 1 hour' },
                       { id: 'time_1_5hour', title: '🕐 In 1.5 hours' },
-                      { id: 'time_other', title: '⏰ Other' },
+                      { id: 'time_other', title: `⏰ ${t('buttons.other', lang)}` },
                     ]);
                   } else {
                     // Takeaway: In 30 min, In 1 hour, Other
                     await sendReplyButtons(phone, timePrompt, [
                       { id: 'time_30min', title: '🕐 In 30 min' },
                       { id: 'time_1hour', title: '🕐 In 1 hour' },
-                      { id: 'time_other', title: '⏰ Other' },
+                      { id: 'time_other', title: `⏰ ${t('buttons.other', lang)}` },
                     ]);
                   }
                   continue;
@@ -2927,16 +2948,16 @@ export async function handleWhatsAppWebhook(
                 if (buttonId.includes('_tomorrow_')) {
                   // Store date selection and show time buttons for tomorrow
                   pendingDateSelectionMap.set(session.id, { date: 'tomorrow', fulfillmentType });
-                  await saveIncomingMessage(session.id, '[Selected: Tomorrow]');
+                  await saveIncomingMessage(session.id, `[Selected: ${t('buttons.tomorrow', lang)}]`);
 
-                  const timePrompt = `📅 *Tomorrow* - What time?`;
+                  const timePrompt = t('buttons.whatTime', lang, { date: `*${t('buttons.tomorrow', lang)}*` });
                   await saveOutgoingMessage(session.id, timePrompt);
 
                   // Tomorrow: Morning, Afternoon, Other
                   await sendReplyButtons(phone, timePrompt, [
                     { id: 'time_morning', title: '🌅 Morning (10 AM)' },
                     { id: 'time_afternoon', title: '🌞 Afternoon (2 PM)' },
-                    { id: 'time_other', title: '⏰ Other' },
+                    { id: 'time_other', title: `⏰ ${t('buttons.other', lang)}` },
                   ]);
                   continue;
                 }
@@ -2944,9 +2965,9 @@ export async function handleWhatsAppWebhook(
                 if (buttonId.includes('_other_')) {
                   // User wants to specify custom date/time - fall back to text input
                   pendingDateSelectionMap.delete(session.id);
-                  await saveIncomingMessage(session.id, '[Selected: Other date]');
+                  await saveIncomingMessage(session.id, `[Selected: ${t('buttons.other', lang)}]`);
 
-                  const customPrompt = `Please type your preferred date and time.\n\n_Examples: 'Monday 5pm', 'Dec 20 at 3pm', 'next week Tuesday morning'_`;
+                  const customPrompt = t('buttons.customTimePrompt', lang);
                   await sendWhatsAppMessage(phone, customPrompt);
                   await saveOutgoingMessage(session.id, customPrompt);
                   continue;
@@ -2959,14 +2980,15 @@ export async function handleWhatsAppWebhook(
                 const session = await findOrCreateSession(customer.id, business.id);
                 const sessionWithItems = await getSessionWithItems(session.id);
                 const pendingDate = pendingDateSelectionMap.get(session.id);
+                const lang = getSessionLanguage(session);
 
                 if (buttonId === 'time_other') {
                   // User wants custom time - fall back to text input
                   pendingDateSelectionMap.delete(session.id);
-                  await saveIncomingMessage(session.id, '[Selected: Other time]');
+                  await saveIncomingMessage(session.id, `[Selected: ${t('buttons.other', lang)}]`);
 
-                  const dateText = pendingDate?.date === 'tomorrow' ? 'tomorrow' : 'today';
-                  const customPrompt = `Please type your preferred time for ${dateText}.\n\n_Examples: '5pm', '3:30 PM', 'evening'_`;
+                  const dateText = pendingDate?.date === 'tomorrow' ? t('buttons.tomorrow', lang) : t('buttons.today', lang);
+                  const customPrompt = t('buttons.customTimePromptForDate', lang, { date: dateText });
                   await sendWhatsAppMessage(phone, customPrompt);
                   await saveOutgoingMessage(session.id, customPrompt);
                   continue;
@@ -2978,7 +3000,7 @@ export async function handleWhatsAppWebhook(
 
                 if (!calculatedTime) {
                   logger.error(`Failed to calculate time for: ${dateSelection} ${buttonId}`);
-                  await sendWhatsAppMessage(phone, "Sorry, there was an issue. Please type your preferred time.");
+                  await sendWhatsAppMessage(phone, t('time.calculationError', lang));
                   continue;
                 }
 
@@ -3034,9 +3056,10 @@ export async function handleWhatsAppWebhook(
                   pendingDateSelectionMap.delete(session.id);
 
                   // Tell customer to wait for confirmation
-                  const timeConfirmMsg = `⏰ We've noted your preferred ${fulfillmentTypeForQuote === 'delivery' ? 'delivery' : 'pickup'} time: *${calculatedTime}*\n\n` +
-                    `Since this is a custom designed cake, our team will confirm if we can ${fulfillmentTypeForQuote === 'delivery' ? 'deliver' : 'have it ready'} by this time.\n\n` +
-                    `_You'll receive a confirmation shortly. Thank you for your patience! 🙏_`;
+                  const timeConfirmMsg = t('customCake.timeConfirmRequest', lang, {
+                    type: fulfillmentTypeForQuote,
+                    time: calculatedTime,
+                  });
                   await sendWhatsAppMessage(phone, timeConfirmMsg);
                   await saveOutgoingMessage(session.id, timeConfirmMsg);
                   continue;
@@ -3061,7 +3084,7 @@ export async function handleWhatsAppWebhook(
                 // Show final invoice
                 const finalSummary = await generateOrderSummary(session.id, {
                   includeCta: true,
-                  ctaMessage: '\nPlease review your order. Reply *YES* to confirm.',
+                  ctaMessage: `\n${t('orderSummary.reviewPrompt', lang)}`,
                   timezone: businessTimezone,
                 });
                 await sendWhatsAppMessage(phone, finalSummary);
@@ -3135,8 +3158,9 @@ export async function handleWhatsAppWebhook(
                   // Check if item has multiple sizes
                   if (menuItem.sizes && menuItem.sizes.length > 1) {
                     // Show size selection buttons
+                    const lang = getSessionLanguage(session);
                     const sizeButtons = buildSizeButtons(menuItem);
-                    const sizePrompt = `*${menuItem.name}*\n\nSelect size:`;
+                    const sizePrompt = t('menu.selectSize', lang, { item: `*${menuItem.name}*` });
                     await saveOutgoingMessage(session.id, sizePrompt);
                     await sendReplyButtons(phone, sizePrompt, sizeButtons);
                     continue;
@@ -3151,9 +3175,9 @@ export async function handleWhatsAppWebhook(
                       size_or_weight: size
                     }, business.id);
 
-                    const addedMsg = size
-                      ? `Added *${menuItem.name}* (${size}) to your order. Anything else?`
-                      : `Added *${menuItem.name}* to your order. Anything else?`;
+                    const lang = getSessionLanguage(session);
+                    const itemIdentifier = size ? `*${menuItem.name}* (${size})` : `*${menuItem.name}*`;
+                    const addedMsg = `${t('cart.added', lang, { item: itemIdentifier })} ${t('cart.anythingElse', lang)}`;
                     await sendWhatsAppMessage(phone, addedMsg);
                     await saveOutgoingMessage(session.id, addedMsg);
                     continue;

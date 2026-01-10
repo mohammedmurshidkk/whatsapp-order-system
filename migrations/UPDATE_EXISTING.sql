@@ -485,5 +485,11 @@ ALTER TABLE cake_price_quotes ADD COLUMN IF NOT EXISTS time_confirmed_at TIMESTA
 ALTER TABLE business_amenities ADD COLUMN IF NOT EXISTS images TEXT[] DEFAULT '{}';
 
 -- ============================================
+-- i18n: Add language preference to sessions
+-- ============================================
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS language VARCHAR(5) DEFAULT 'ml';
+COMMENT ON COLUMN sessions.language IS 'Customer preferred language: ml (Malayalam), en (English)';
+
+-- ============================================
 -- DONE
 -- ============================================
