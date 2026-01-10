@@ -1,9 +1,12 @@
 import { supabase } from '../config/database';
+import { DEFAULT_LANGUAGE, SupportedLanguage, t } from '../i18n';
 import { SessionItem, Order, AIItemResponse, OrderItemData, MenuItem, MenuCategory, Business } from '../types';
 import {
   getSessionWithItems,
   completeSession,
   updateSessionItemCount,
+  getSessionLanguage,
+  findOrCreateSession,
 } from './sessionService';
 import { searchMenuItem, getBusinessById } from './menuService';
 import { formatDeliveryTime, formatDateForDisplay, calculateDistanceBasedDeliveryFee } from './fulfillmentService';
@@ -273,12 +276,19 @@ export async function generateOrderSummary(
   const timezone = options.timezone || 'Asia/Kolkata';
 
   const session = await getSessionWithItems(sessionId);
-
+  
+  // If session is null or empty, return early with default language for the error message
   if (!session || session.items.length === 0) {
-    return 'No items in your order yet.';
+    // We cannot determine the user's preferred language if there's no session
+    // Fallback to default language for this error message
+    return t('order.noItems', DEFAULT_LANGUAGE);
   }
 
-  let summary = '📋 *Order Summary*\n';
+  // Get language from the session, now that we know session is not null
+  const lang: SupportedLanguage = getSessionLanguage(session);
+
+
+  let summary = `${t('orderSummary.title', lang)}\n`;
   summary += '━━━━━━━━━━━━━━━━━━\n\n';
 
   let grandTotal = 0;
@@ -327,7 +337,7 @@ export async function generateOrderSummary(
             summary += ` - ₹${addon.unit_price}`;
           }
         } else {
-          summary += ' - FREE';
+          summary += t('order.addonFree', lang);
         }
 
         summary += '\n';
@@ -351,8 +361,8 @@ export async function generateOrderSummary(
   });
 
   summary += '━━━━━━━━━━━━━━━━━━\n';
-  summary += `📦 Total Items: ${session.items.length}\n`;
-  summary += `🛒 Subtotal: ₹${grandTotal}\n`;
+  summary += `${t('orderSummary.totalItems',  lang, { count: session.items.length || 0 })}\n`;
+  summary += `${t('orderSummary.subtotal', lang, { amount: grandTotal })}\n`;
 
   // Automatically calculate and display delivery fee for delivery orders with coordinates
   let deliveryFee = 0;
@@ -379,13 +389,13 @@ export async function generateOrderSummary(
 
   if (showDeliveryFee) {
     if (deliveryFee > 0) {
-      summary += `🚚 Delivery Fee: ₹${deliveryFee}\n`;
+      summary += `${t('orderSummary.deliveryFee', lang, { amount: deliveryFee })}\n`;
     } else {
-      summary += `🚚 Delivery Fee: FREE\n`;
+      summary += `${t('orderSummary.deliveryFeeFree', lang)}\n`;
     }
   }
 
-  summary += `💰 *Grand Total: ₹${grandTotal + deliveryFee}*\n`;
+  summary += `${t('orderSummary.grandTotal', lang, { amount: grandTotal + deliveryFee })}\n`;
 
   // Add fulfillment info if available
   if (session.fulfillment_type) {
@@ -393,19 +403,19 @@ export async function generateOrderSummary(
     if (session.fulfillment_type === 'delivery' && (session.delivery_address || session.delivery_latitude)) {
       // Show address if available, otherwise show coordinates (frontend can reverse geocode)
       if (session.delivery_address) {
-        summary += `🚚 Delivery to: ${session.delivery_address}\n`;
+        summary += `${t('orderSummary.deliveryTo', lang, { address: session.delivery_address })}\n`;
       } else if (session.delivery_latitude && session.delivery_longitude) {
-        summary += `🚚 Delivery Location (Lat: ${session.delivery_latitude}, Long: ${session.delivery_longitude})\n`;
+        summary += `${t('orderSummary.deliveryLocation', lang, { lat: session.delivery_latitude, lng: session.delivery_longitude })}\n`;
       }
       if (session.delivery_time) {
         // Format time using timezone-aware formatter
-        summary += `⏰ Time: ${formatDeliveryTime(session.delivery_time, timezone)}\n`;
+        summary += `${t('orderSummary.time', lang, { time: formatDeliveryTime(session.delivery_time, timezone) })}\n`;
       }
     } else if (session.fulfillment_type === 'takeaway' && session.pickup_outlet_id) {
-      summary += `📍 Pickup from outlet\n`;
+      summary += `${t('orderSummary.pickupFrom', lang)}\n`;
       if (session.pickup_time) {
         // Format time using timezone-aware formatter
-        summary += `⏰ Time: ${formatDeliveryTime(session.pickup_time, timezone)}\n`;
+        summary += `${t('orderSummary.time', lang, { time: formatDeliveryTime(session.pickup_time, timezone) })}\n`;
       }
     }
   }
@@ -421,11 +431,11 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
   const session = await getSessionWithItems(sessionId);
 
   if (!session) {
-    throw new Error('Session not found');
+    throw new Error('Failed to create order');
   }
 
   if (session.items.length === 0) {
-    throw new Error('No items in session');
+    throw new Error('Failed to create order');
   }
 
   // Fetch menu items with category custom_text_prompt for this business
@@ -696,7 +706,7 @@ export async function getCustomerActiveOrder(customerId: string, businessId: str
  * Get formatted status message for an active order
  * Used when customer asks "where's my order?" without specifying order number
  */
-export function getOrderStatusMessage(order: Order, timezone: string = 'Asia/Kolkata'): string {
+export function getOrderStatusMessage(order: Order, lang: SupportedLanguage, timezone: string = 'Asia/Kolkata'): string {
   const statusEmojis: Record<string, string> = {
     confirmed: '✅',
     processing: '👨‍🍳',
@@ -705,29 +715,29 @@ export function getOrderStatusMessage(order: Order, timezone: string = 'Asia/Kol
   };
 
   const statusMessages: Record<string, string> = {
-    confirmed: 'Your order is confirmed! We\'re getting it ready.',
-    processing: 'Your order is being prepared! 👨‍🍳',
-    completed: 'Your order has been delivered/picked up.',
-    cancelled: 'This order was cancelled.',
+    confirmed: t('order.status.confirmed', lang),
+    processing: t('order.status.processing', lang),
+    completed: t('order.status.completed', lang),
+    cancelled: t('order.status.cancelled', lang),
   };
 
-  let message = `📋 *Order #${order.order_number}*\n\n`;
-  message += `${statusEmojis[order.status] || '📦'} ${statusMessages[order.status] || 'Order in progress'}\n\n`;
-  message += `💰 Total: ₹${order.total_amount}\n`;
+  let message = `${t('order.statusTitle', lang, { orderNumber: order.order_number })}\n\n`;
+  message += `${statusEmojis[order.status] || '📦'} ${statusMessages[order.status] || t('order.status.inProgress', lang)}\n\n`;
+  message += `${t('order.total', lang, { amount: order.total_amount })}\n`;
 
   if (order.fulfillment_type === 'delivery' && order.delivery_address) {
-    message += `🚚 Delivery to: ${order.delivery_address}\n`;
+    message += `${t('order.deliveryTo', lang, { address: order.delivery_address })}\n`;
     if (order.delivery_time) {
-      message += `⏰ Time: ${formatDeliveryTime(order.delivery_time, timezone)}\n`;
+      message += `${t('order.time', lang, { time: formatDeliveryTime(order.delivery_time, timezone) })}\n`;
     }
   } else if (order.fulfillment_type === 'takeaway') {
-    message += `🏪 Takeaway\n`;
+    message += `${t('order.takeaway', lang)}\n`;
     if (order.pickup_time) {
-      message += `⏰ Time: ${formatDeliveryTime(order.pickup_time, timezone)}\n`;
+      message += `${t('order.time', lang, { time: formatDeliveryTime(order.pickup_time, timezone) })}\n`;
     }
   }
 
-  message += `\n_Need help? Just ask!_`;
+  message += t('order.needHelp', lang);
 
   return message;
 }
@@ -738,6 +748,11 @@ export async function cancelOrderById(
   customerId: string,
   businessId: string
 ): Promise<{ success: boolean; message: string; order?: Order }> {
+  // Get language from customer and business ID
+  // Note: findOrCreateSession won't create a new session if one already exists for the customer/business
+  const customerSession = await findOrCreateSession(customerId, businessId);
+  const lang: SupportedLanguage = getSessionLanguage(customerSession);
+
   // Search by order_number within the same business
   const { data: orders, error: fetchError } = await supabase
     .from('orders')
@@ -748,7 +763,7 @@ export async function cancelOrderById(
   if (fetchError || !orders || orders.length === 0) {
     return {
       success: false,
-      message: `Order #${orderNumber} not found. Please check the order number and try again.`,
+      message: t('order.cancel.notFound', lang, { orderNumber }),
     };
   }
 
@@ -758,7 +773,7 @@ export async function cancelOrderById(
   if (order.customer_id !== customerId) {
     return {
       success: false,
-      message: `Order #${orderNumber} not found. Please check the order number and try again.`,
+      message: t('order.cancel.notFound', lang, { orderNumber }),
     };
   }
 
@@ -766,14 +781,14 @@ export async function cancelOrderById(
   if (order.status === 'cancelled') {
     return {
       success: false,
-      message: `Order #${order.order_number} is already cancelled.`,
+      message: t('order.cancel.alreadyCancelled', lang, { orderNumber: order.order_number }),
     };
   }
 
   if (order.status === 'completed') {
     return {
       success: false,
-      message: `Order #${order.order_number} is already completed and cannot be cancelled.`,
+      message: t('order.cancel.alreadyCompleted', lang, { orderNumber: order.order_number }),
     };
   }
 
@@ -792,7 +807,7 @@ export async function cancelOrderById(
     logger.error('Failed to cancel order', updateError);
     return {
       success: false,
-      message: 'Failed to cancel order. Please try again or contact us.',
+      message: t('order.cancel.failed', lang),
     };
   }
 
@@ -801,7 +816,7 @@ export async function cancelOrderById(
     logger.error(`Order cancel update failed - status is still: ${updatedOrder?.status}`);
     return {
       success: false,
-      message: 'Failed to cancel order. Please try again or contact us.',
+      message: t('order.cancel.failed', lang),
     };
   }
 
@@ -809,7 +824,7 @@ export async function cancelOrderById(
 
   return {
     success: true,
-    message: `Order #${order.order_number} has been cancelled successfully.`,
+    message: t('order.cancel.success', lang, { orderNumber: order.order_number }),
     order: { ...order, status: 'cancelled' },
   };
 }
@@ -841,12 +856,16 @@ export async function getOrderStatus(
   businessId: string,
   timezone: string = 'Asia/Kolkata'
 ): Promise<{ success: boolean; message: string; order?: Order }> {
+  // Get language from customer and business ID
+  const customerSession = await findOrCreateSession(customerId, businessId);
+  const lang: SupportedLanguage = getSessionLanguage(customerSession);
+
   const order = await getOrderByOrderNumber(orderNumber, customerId, businessId);
 
   if (!order) {
     return {
       success: false,
-      message: `Order #${orderNumber} not found. Please check the order number and try again.`,
+      message: t('order.cancel.notFound', lang, { orderNumber }),
     };
   }
 
@@ -859,29 +878,29 @@ export async function getOrderStatus(
   };
 
   const statusText: Record<string, string> = {
-    confirmed: 'Order Confirmed - We are preparing your order',
-    processing: 'Being Prepared - Your order is being prepared',
-    completed: 'Completed - Your order has been delivered/picked up',
-    cancelled: 'Cancelled - This order was cancelled',
+    confirmed: t('order.statusText.confirmed', lang),
+    processing: t('order.statusText.processing', lang),
+    completed: t('order.statusText.completed', lang),
+    cancelled: t('order.statusText.cancelled', lang),
   };
 
-  let message = `📋 *Order Status: #${order.order_number}*\n\n`;
+  let message = `${t('order.statusDetailTitle', lang, { orderNumber: order.order_number })}\n\n`;
   message += `${statusEmoji[order.status] || '📦'} *${statusText[order.status] || order.status}*\n\n`;
-  message += `💰 Total: ₹${order.total_amount}\n`;
+  message += `${t('order.total', lang, { amount: order.total_amount })}\n`;
 
   if (order.fulfillment_type === 'delivery' && order.delivery_address) {
-    message += `🚚 Delivery to: ${order.delivery_address}\n`;
+    message += `${t('order.deliveryTo', lang, { address: order.delivery_address })}\n`;
     if (order.delivery_time) {
-      message += `⏰ Time: ${formatDeliveryTime(order.delivery_time, timezone)}\n`;
+      message += `${t('order.time', lang, { time: formatDeliveryTime(order.delivery_time, timezone) })}\n`;
     }
   } else if (order.fulfillment_type === 'takeaway') {
-    message += `🏪 Takeaway\n`;
+    message += `${t('order.takeaway', lang)}\n`;
     if (order.pickup_time) {
-      message += `⏰ Time: ${formatDeliveryTime(order.pickup_time, timezone)}\n`;
+      message += `${t('order.time', lang, { time: formatDeliveryTime(order.pickup_time, timezone) })}\n`;
     }
   }
 
-  message += `\n📅 Ordered: ${formatDeliveryTime(order.created_at, timezone)}`;
+  message += t('order.orderedDate', lang, { date: formatDeliveryTime(order.created_at, timezone) });
 
   return {
     success: true,

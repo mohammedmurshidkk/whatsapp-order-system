@@ -281,6 +281,9 @@ CREATE TABLE sessions (
   fulfillment_notes TEXT
 );
 
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS language VARCHAR(5) DEFAULT 'ml';
+COMMENT ON COLUMN sessions.language IS 'Customer preferred language: ml (Malayalam), en (English)';
+
 CREATE INDEX idx_sessions_customer ON sessions(customer_id);
 CREATE INDEX idx_sessions_status ON sessions(status, last_message_at);
 
