@@ -60,9 +60,9 @@ function generateMenuHtml(
                 </div>
                 <div class="item-prices">
                   ${sizeNames.map(sizeName => {
-                    const sizeData = item.sizes?.find(s => s.name === sizeName);
-                    return `<div class="item-price">${sizeData ? sizeData.price : '-'}</div>`;
-                  }).join('')}
+        const sizeData = item.sizes?.find(s => s.name === sizeName);
+        return `<div class="item-price">${sizeData ? sizeData.price : '-'}</div>`;
+      }).join('')}
                 </div>
               </div>
             `).join('')}
@@ -342,9 +342,11 @@ function generateMenuHtml(
 
 /**
  * Generate PDF from menu data using Puppeteer
+ * @param businessId - Business ID
+ * @param categoryIds - Optional array of category IDs to filter (if provided, only these categories are included)
  */
-export async function generateMenuPdf(businessId: string): Promise<Buffer> {
-  const [business, items, categories] = await Promise.all([
+export async function generateMenuPdf(businessId: string, categoryIds?: string[]): Promise<Buffer> {
+  const [business, allItems, allCategories] = await Promise.all([
     getBusinessById(businessId),
     getMenuItems(businessId),
     getMenuCategories(businessId),
@@ -354,8 +356,18 @@ export async function generateMenuPdf(businessId: string): Promise<Buffer> {
     throw new Error('Business not found');
   }
 
+  // Filter categories if categoryIds provided
+  const categories = categoryIds && categoryIds.length > 0
+    ? allCategories.filter(cat => categoryIds.includes(cat.id))
+    : allCategories;
+
+  // Filter items to only those in selected categories
+  const items = categoryIds && categoryIds.length > 0
+    ? allItems.filter(item => item.category_id && categoryIds.includes(item.category_id))
+    : allItems;
+
   if (items.length === 0) {
-    throw new Error('No menu items found');
+    throw new Error('No menu items found for selected categories');
   }
 
   const html = generateMenuHtml(business.name, categories, items);
@@ -409,6 +421,37 @@ export async function uploadMenuPdf(
     .getPublicUrl(filePath);
 
   return urlData.publicUrl;
+}
+
+/**
+ * Upload PDF to Supabase Storage with custom name (for category-filtered PDFs)
+ */
+export async function uploadMenuPdfWithName(
+  businessId: string,
+  pdfBuffer: Buffer,
+  slug: string
+): Promise<string> {
+  const filePath = `${businessId}/${slug}.pdf`;
+
+  // Upload (upsert) to Supabase storage
+  const { error } = await supabase.storage
+    .from(BUCKET_NAME)
+    .upload(filePath, pdfBuffer, {
+      contentType: 'application/pdf',
+      upsert: true,
+    });
+
+  if (error) {
+    logger.error(`Failed to upload PDF ${slug} to Supabase`, error);
+    throw new Error(`Failed to upload PDF: ${error.message}`);
+  }
+
+  // Get public URL
+  const { data: urlData } = supabase.storage
+    .from(BUCKET_NAME)
+    .getPublicUrl(filePath);
+
+  return `${urlData.publicUrl}?v=${Date.now()}`;
 }
 
 /**

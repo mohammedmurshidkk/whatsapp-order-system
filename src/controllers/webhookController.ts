@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { WhatsAppWebhookBody, TestMessageRequest, SessionItem, MenuAddon } from '../types';
+import { WhatsAppWebhookBody, TestMessageRequest, SessionItem, MenuAddon, Session } from '../types';
 import { findOrCreateCustomer } from '../services/customerService';
 import {
   findOrCreateSession,
@@ -100,7 +100,9 @@ import {
   getAcceptedQuoteForSession,
   updateQuoteTimeRequest,
   createQuoteRevision,
+  analyzeImageWithGemini,
 } from '../services/cakeQuoteService';
+import { getFullPricingConfig } from '../services/cakePricingService';
 import {
   isValidPhoneNumber,
   sanitizePhoneNumber,
@@ -108,7 +110,17 @@ import {
   sanitizeMessage,
 } from '../utils/validators';
 import { logger } from '../utils/logger';
+import { createIntervention } from '../services/interventionService';
+import { emitInterventionCreated } from '../services/socketService';
+import { getActiveMenuPdfConfigs, getMenuPdfConfigBySlug, getLocalizedMenuName } from '../services/menuPdfConfigService';
+import {
+  updateSessionCustomCakeContext,
+  clearSessionCustomCakeContext,
+  pauseAI
+} from '../services/sessionService';
 import { SupportedLanguage, detectLanguageRequest, t } from '../i18n';
+
+const CAKE_KEYWORDS = ['cake', 'birthday', 'anniversary', 'kg', 'flavor', 'chocolate', 'vanilla', 'fondant', 'design', 'custom'];
 
 // Track last added item per session for add-on attachment
 const lastAddedItemMap = new Map<string, string>(); // sessionId -> itemId
@@ -158,7 +170,7 @@ async function processDebouncedMessages(phone: string): Promise<void> {
     logger.error('Error processing debounced messages', error);
     try {
       const customer = await findOrCreateCustomer(phone, pending.businessId, pending.customerName);
-      const session = await findOrCreateSession(customer.id, pending.businessId);
+      const { session } = await findOrCreateSession(customer.id, pending.businessId);
       const lang: SupportedLanguage = getSessionLanguage(session);
       await sendWhatsAppMessage(phone, t('error.generic', lang));
     } catch (langError) {
@@ -235,6 +247,87 @@ function isItemDuplicate(
   });
 }
 
+// Validate if user input looks like a valid delivery address (not an order or question)
+function validateAddressInput(input: string): boolean {
+  const text = input.trim().toLowerCase();
+
+  // Too short to be a valid address
+  if (text.length < 8) {
+    return false;
+  }
+
+  // Ends with question mark - likely a question
+  if (text.endsWith('?')) {
+    return false;
+  }
+
+  // Starts with ordering keywords (English + Malayalam)
+  const orderingPatterns = [
+    /^(i\s*want|add|give\s*me|order|get\s*me|need|can\s*i\s*(have|get|order))/i,
+    /^(എനിക്ക്\s*വേണം|ഒരു|ഒന്ന്|കുറച്ച്|add|ചേർക്കൂ)/i, // Malayalam ordering words
+    /^(one|two|three|four|five|1|2|3|4|5)\s+(cake|item|piece)/i,
+  ];
+
+  for (const pattern of orderingPatterns) {
+    if (pattern.test(text)) {
+      return false;
+    }
+  }
+
+  // Contains menu item keywords - likely ordering
+  const menuKeywords = ['cake', 'pastry', 'bread', 'cookie', 'muffin', 'cupcake', 'brownie', 'kg', 'gram'];
+  const hasMenuKeyword = menuKeywords.some(kw => text.includes(kw));
+  if (hasMenuKeyword && text.length < 25) {
+    // Short message with menu keyword - probably an order
+    return false;
+  }
+
+  // Contains question words at start
+  const questionPatterns = [
+    /^(what|when|where|how|why|which|can|do|is|are|will|would|could)/i,
+    /^(എന്താണ്|എപ്പോൾ|എവിടെ|എങ്ങനെ)/i, // Malayalam question words
+  ];
+
+  for (const pattern of questionPatterns) {
+    if (pattern.test(text)) {
+      return false;
+    }
+  }
+
+  // Common cancel/no keywords
+  if (/^(no|nope|cancel|stop|nevermind|venda|വേണ്ട|അല്ല)$/i.test(text)) {
+    return false;
+  }
+
+  // Common yes/confirm keywords (not an address)
+  if (/^(yes|yeah|yep|ok|okay|sure|confirm|ശരി|അതെ)$/i.test(text)) {
+    return false;
+  }
+
+  // Looks like an address - contains address indicators OR is reasonably long
+  const addressIndicators = [
+    'road', 'street', 'lane', 'near', 'opposite', 'behind', 'beside', 'floor',
+    'house', 'building', 'apartment', 'flat', 'block', 'tower', 'complex',
+    'junction', 'circle', 'cross', 'main', 'bypass', 'highway', 'nagar',
+    'puram', 'vila', 'garden', 'colony', 'layout', 'extension', 'sector',
+    'phase', 'plot', 'door', 'no.', 'no:', 'number', 'po', 'p.o', 'pin',
+    // Malayalam address indicators
+    'റോഡ്', 'സ്ട്രീറ്റ്', 'ലൈൻ', 'സമീപം', 'അടുത്ത്', 'എതിർവശം', 'പിന്നിൽ',
+    'വീട്', 'ബിൽഡിംഗ്', 'അപ്പാർട്ട്മെന്റ്', 'ഫ്ലാറ്റ്', 'നഗർ', 'പുരം',
+  ];
+
+  const hasAddressIndicator = addressIndicators.some(indicator =>
+    text.includes(indicator.toLowerCase())
+  );
+
+  // If has address indicator or is long enough (likely descriptive address)
+  if (hasAddressIndicator || text.length >= 15) {
+    return true;
+  }
+
+  return false;
+}
+
 /**
  * Core message processing logic - shared between Meta and WebJS handlers
  * Exported as processMessageForWebJS for use by webjsHandler
@@ -281,7 +374,7 @@ export async function processMessage(
   const customer = await findOrCreateCustomer(phone, businessId, customerName);
 
   // Find or create active session for this business
-  const session = await findOrCreateSession(customer.id, businessId);
+  const { session, isNew: isNewSession } = await findOrCreateSession(customer.id, businessId);
 
   // Update session activity
   await updateSessionActivity(session.id);
@@ -294,6 +387,74 @@ export async function processMessage(
     logger.info(`Language switched to ${langRequest} for session ${session.id}`);
   }
   const lang: SupportedLanguage = getSessionLanguage(session);
+
+  // Send welcome message with menu button(s) for new sessions
+  if (isNewSession) {
+    const welcomeMsg = t('menu.aiWelcome', lang, { businessName: business?.name || 'our store' });
+
+    // Get active menu PDF configs for dynamic buttons
+    const menuConfigs = business?.id ? await getActiveMenuPdfConfigs(business.id) : [];
+
+    let menuButtons: Array<{ id: string; title: string }>;
+    if (menuConfigs.length > 0) {
+      // Dynamic buttons based on menu configs (max 3 buttons for WhatsApp)
+      // Add 📖 emoji prefix, limit title to 18 chars (20 - emoji - space)
+      menuButtons = menuConfigs.slice(0, 3).map(config => ({
+        id: `show_menu_${config.slug}`,
+        title: `📖 ${getLocalizedMenuName(config, lang).substring(0, 17)}`
+      }));
+    } else {
+      // Fallback to single generic button with emoji
+      menuButtons = [{ id: 'show_menu', title: `📖 ${t('menu.browseBtn', lang)}` }];
+    }
+
+    await sendReplyButtons(phone, welcomeMsg, menuButtons);
+    await saveOutgoingMessage(session.id, welcomeMsg);
+    return null; // Don't continue to AI - welcome sent
+  }
+
+  // ============================================
+  // CUSTOM CAKE: Delayed Clarification Check
+  // ============================================
+
+  // 1. Check if we need to ask for clarification (30s passed since image)
+  const sentClarification = await checkPendingImageClarification(session, phone, businessId);
+  if (sentClarification) {
+    return null; // Clarification message sent, stop processing
+  }
+
+  // 2. Check if user is responding to clarification ("Is this a cake?")
+  if (session.custom_cake_context?.awaiting_clarification) {
+    const isYes = /^(yes|yeah|yep|hai|aanu|ശരി|correct|ok|confirm)/i.test(normalizedMessage);
+    const isNo = /^(no|nope|illa|അല്ല|wrong|cancel)/i.test(normalizedMessage);
+    // Also check if text contains cake keywords (implicit yes)
+    const CAKE_KEYWORDS = ['cake', 'birthday', 'anniversary', 'kg', 'flavor', 'chocolate', 'vanilla', 'fondant', 'design', 'custom'];
+    const hasCakeKeywords = CAKE_KEYWORDS.some(k => normalizedMessage.toLowerCase().includes(k));
+
+    if (isYes || hasCakeKeywords) {
+      logger.info(`User confirmed image is for custom cake: "${messageText}"`);
+      if (session.custom_cake_context.image_url) {
+        // Save the confirmation message before processing
+        await saveIncomingMessage(session.id, originalMessage);
+
+        await processCustomCakeWithIntervention(
+          businessId,
+          session.id,
+          customer.id,
+          phone,
+          session.custom_cake_context.image_url
+        );
+        return null; // Handled by intervention
+      }
+    }
+
+    if (isNo) {
+      logger.info(`User said image is NOT for custom cake: "${messageText}"`);
+      await clearSessionCustomCakeContext(session.id);
+      // Message will be saved later in normal AI processing flow
+      // Continue to normal AI processing
+    }
+  }
 
   // Check for pending custom text question (e.g., "What to write on cake?")
   const pendingCustomText = pendingCustomTextMap.get(session.id);
@@ -409,8 +570,7 @@ export async function processMessage(
     const normalizedInput = messageText.toLowerCase().trim();
 
     // Check if user wants to skip addons
-    if (['no', 'no thanks', 'skip', 'none', 'nope', 'nothing'].some(s => normalizedInput === s || normalizedInput.startsWith(s + ' ')))
-     {
+    if (['no', 'no thanks', 'skip', 'none', 'nope', 'nothing'].some(s => normalizedInput === s || normalizedInput.startsWith(s + ' '))) {
       logger.info(`Customer declined addons for item ${pendingAddon.itemId}`);
       pendingAddonSelectionMap.delete(session.id);
 
@@ -525,8 +685,9 @@ export async function processMessage(
             if (selectedOutlet) {
               const validation = validateOperatingHours(parsedTime, selectedOutlet, businessTimezone);
               if (!validation.valid) {
-                logger.warn(`Pickup time ${parsedTime} rejected: ${validation.reason}`);
-                const errorMsg = t('time.outsideHours', lang, { reason: validation.reason });
+                const reason = t(`time.${validation.reasonKey}` as any, lang, validation.reasonValues);
+                logger.warn(`Pickup time ${parsedTime} rejected: ${reason}`);
+                const errorMsg = t('time.outsideHours', lang, { reason });
                 await saveOutgoingMessage(session.id, errorMsg);
                 return errorMsg;
               }
@@ -536,10 +697,64 @@ export async function processMessage(
             const primaryOutlet = outlets[0];
             const validation = validateOperatingHours(parsedTime, primaryOutlet, businessTimezone);
             if (!validation.valid) {
-              logger.warn(`Delivery time ${parsedTime} rejected: ${validation.reason}`);
-              const errorMsg = t('time.outsideHours', lang, { reason: validation.reason });
+              const reason = t(`time.${validation.reasonKey}` as any, lang, validation.reasonValues);
+              logger.warn(`Delivery time ${parsedTime} rejected: ${reason}`);
+              const errorMsg = t('time.outsideHours', lang, { reason });
               await saveOutgoingMessage(session.id, errorMsg);
               return errorMsg;
+            }
+          }
+
+          // ============================================ 
+          // URGENT ORDER CHECK (before custom cake)
+          // ============================================
+          // Check if time is within minimum_wait_minutes (urgent order requiring admin approval)
+          const minimumWaitMinutes = (business as any)?.minimum_wait_minutes;
+          if (minimumWaitMinutes && minimumWaitMinutes > 0) {
+            const requestedDate = new Date(parsedTime);
+            const now = new Date();
+            const diffMinutes = (requestedDate.getTime() - now.getTime()) / (1000 * 60);
+
+            // Only trigger for future times within minimum_wait_minutes
+            if (diffMinutes > 0 && diffMinutes < minimumWaitMinutes) {
+              const fulfillmentType = needsDeliveryTime ? 'delivery' : 'takeaway';
+              logger.info(`🚨 Urgent order detected: ${parsedTime} is ${Math.round(diffMinutes)} min away (min wait: ${minimumWaitMinutes})`);
+
+              // Skip if custom cake order (they have their own confirmation flow)
+              const acceptedQuoteForUrgent = await getAcceptedQuoteForSession(session.id);
+              if (!acceptedQuoteForUrgent) {
+                // Create urgent_delivery intervention
+                const urgentIntervention = await createIntervention(
+                  businessId,
+                  session.id,
+                  customer.id,
+                  'urgent_delivery',
+                  {
+                    requestedTime: parsedTime,
+                    fulfillmentType,
+                    minimumWaitMinutes,
+                    minutesUntilRequested: Math.round(diffMinutes),
+                    deliveryAddress: sessionForTimeCheck.delivery_address,
+                    outletId: sessionForTimeCheck.pickup_outlet_id,
+                    phone,
+                  }
+                );
+
+                if (urgentIntervention) {
+                  // Pause AI
+                  await pauseAI(session.id, 'Urgent order - awaiting admin confirmation');
+                  // Emit socket event
+                  emitInterventionCreated(businessId, urgentIntervention);
+
+                  // Format time for display
+                  const formattedTime = new Date(parsedTime).toLocaleString('en-IN', { timeZone: businessTimezone, dateStyle: 'medium', timeStyle: 'short' });
+                  const typeLabel = fulfillmentType === 'delivery' ? t('fulfillment.deliveryBtn', lang) : t('fulfillment.takeawayBtn', lang);
+
+                  const waitingMsg = t('urgentOrder.waitingConfirmation', lang, { type: typeLabel, time: formattedTime });
+                  await saveOutgoingMessage(session.id, waitingMsg);
+                  return waitingMsg;
+                }
+              }
             }
           }
 
@@ -568,6 +783,27 @@ export async function processMessage(
                 outlet_id: sessionForTimeCheck.pickup_outlet_id!,
                 time: parsedTime,
               });
+            }
+
+            // Create intervention for admin dashboard
+            const timeIntervention = await createIntervention(
+              businessId,
+              session.id,
+              customer.id,
+              'custom_cake_time_confirmation',
+              {
+                quoteId: acceptedQuote.id,
+                requestedTime: parsedTime,
+                fulfillmentType: fulfillmentType,
+                phone,
+              }
+            );
+
+            if (timeIntervention) {
+              // Pause AI for admin to handle
+              await pauseAI(session.id, 'Custom cake time confirmation pending');
+              // Emit WebSocket event for admin dashboard
+              emitInterventionCreated(businessId, timeIntervention);
             }
 
             // Notify admin about time confirmation request
@@ -629,7 +865,13 @@ export async function processMessage(
   const sessionWithItems = await getSessionWithItems(session.id);
   let existingItems = sessionWithItems?.items || [];
 
-  // ============================================ 
+  // Check for active order (customer may be asking about their order)
+  const activeOrder = await getCustomerActiveOrder(customer.id, businessId);
+  if (activeOrder) {
+    logger.info(`Customer ${phone} has active order: ${activeOrder.order_number} (status: ${activeOrder.status})`);
+  }
+
+  // ============================================
   // CUSTOM CAKE QUOTE ACCEPTANCE HANDLER
   // ============================================ 
   // Check if customer is accepting a sent quote (before AI processing)
@@ -648,7 +890,7 @@ export async function processMessage(
     // IMPORTANT: Skip quote acceptance if fulfillment is already complete
     // This means user is saying "Yes" to confirm their ORDER, not to accept a quote
     const fulfillmentComplete = sessionWithItems?.fulfillment_type &&
-        (sessionWithItems?.delivery_address || sessionWithItems?.pickup_outlet_id);
+      (sessionWithItems?.delivery_address || sessionWithItems?.pickup_outlet_id);
 
     if (fulfillmentComplete && existingItems.length > 0) {
       logger.info(`Quote acceptance skipped - fulfillment complete, this is order confirmation`);
@@ -659,70 +901,70 @@ export async function processMessage(
       logger.info(`Quote acceptance check - message: "${messageText}", sessionId: ${session.id}, sentQuote: ${sentQuote?.id || 'none'}`);
 
 
-    if (sentQuote) {
-      logger.info(`🎂 Customer accepting custom cake quote: ${sentQuote.id}`);
+      if (sentQuote) {
+        logger.info(`🎂 Customer accepting custom cake quote: ${sentQuote.id}`);
 
-      // Mark quote as accepted
-      const acceptedQuote = await markQuoteAsAccepted(sentQuote.id);
+        // Mark quote as accepted
+        const acceptedQuote = await markQuoteAsAccepted(sentQuote.id);
 
-      if (acceptedQuote) {
-        const finalPrice = acceptedQuote.admin_final_price ?? acceptedQuote.suggested_price ?? 0;
-        const cakeFlavor = acceptedQuote.ai_analysis?.detected_flavor || acceptedQuote.customer_flavor || 'Custom';
-        const cakeWeight = acceptedQuote.customer_weight ||
-          (acceptedQuote.ai_analysis?.detected_weight_grams ? `${acceptedQuote.ai_analysis.detected_weight_grams}g` : '1kg');
+        if (acceptedQuote) {
+          const finalPrice = acceptedQuote.admin_final_price ?? acceptedQuote.suggested_price ?? 0;
+          const cakeFlavor = acceptedQuote.ai_analysis?.detected_flavor || acceptedQuote.customer_flavor || 'Custom';
+          const cakeWeight = acceptedQuote.customer_weight ||
+            (acceptedQuote.ai_analysis?.detected_weight_grams ? `${acceptedQuote.ai_analysis.detected_weight_grams}g` : '1kg');
 
-        // Add custom cake to cart
-        const customCakeItem = await saveOrderItem(session.id, {
-          name: `Custom ${cakeFlavor} Cake`,
-          size_or_weight: cakeWeight,
-          quantity: 1,
-          notes: 'Custom designed cake (quote accepted)',
-        }, businessId);
+          // Add custom cake to cart
+          const customCakeItem = await saveOrderItem(session.id, {
+            name: `Custom ${cakeFlavor} Cake`,
+            size_or_weight: cakeWeight,
+            quantity: 1,
+            notes: 'Custom designed cake (quote accepted)',
+          }, businessId);
 
-        // Update the item with admin-confirmed price directly
-        const { supabase } = await import('../config/database');
-        await supabase
-          .from('session_items')
-          .update({ unit_price: finalPrice })
-          .eq('id', customCakeItem.id);
+          // Update the item with admin-confirmed price directly
+          const { supabase } = await import('../config/database');
+          await supabase
+            .from('session_items')
+            .update({ unit_price: finalPrice })
+            .eq('id', customCakeItem.id);
 
-        logger.info(`✅ Custom cake added to cart: ${customCakeItem.id}, price: ₹${finalPrice}`);
+          logger.info(`✅ Custom cake added to cart: ${customCakeItem.id}, price: ₹${finalPrice}`);
 
-        // Store last item for addons
-        lastAddedItemMap.set(session.id, customCakeItem.id);
+          // Store last item for addons
+          lastAddedItemMap.set(session.id, customCakeItem.id);
 
-        // Refresh existing items
-        const updatedSession = await getSessionWithItems(session.id);
-        existingItems = updatedSession?.items || [];
+          // Refresh existing items
+          const updatedSession = await getSessionWithItems(session.id);
+          existingItems = updatedSession?.items || [];
 
-        // Save incoming message
-        await saveIncomingMessage(session.id, originalMessage);
+          // Save incoming message
+          await saveIncomingMessage(session.id, originalMessage);
 
-        // Generate summary and ask for fulfillment
-        const summary = await generateOrderSummary(session.id, { includeCta: false, timezone: business?.timezone || 'Asia/Kolkata' });
+          // Generate summary and ask for fulfillment
+          const summary = await generateOrderSummary(session.id, { includeCta: false, timezone: business?.timezone || 'Asia/Kolkata' });
 
-        let quoteAcceptedReply: string;
-        if (business?.supports_delivery && business?.supports_takeaway) {
-          quoteAcceptedReply = t('customCake.addedThenAskFulfillment', lang, { summary });
-          await saveOutgoingMessage(session.id, quoteAcceptedReply);
-          await sendReplyButtons(phone, quoteAcceptedReply, [
-            { id: 'delivery', title: t('fulfillment.deliveryBtn', lang) },
-            { id: 'takeaway', title: t('fulfillment.takeawayBtn', lang) },
-          ]);
-          return null;
-        } else if (business?.supports_delivery) {
-          quoteAcceptedReply = t('customCake.addedThenAskDelivery', lang, { summary });
-        } else {
-          quoteAcceptedReply = t('customCake.addedThenAskPickup', lang, { summary });
-          if (outlets.length > 0) {
-            quoteAcceptedReply += '\n\n' + formatOutletsForCustomer(outlets);
+          let quoteAcceptedReply: string;
+          if (business?.supports_delivery && business?.supports_takeaway) {
+            quoteAcceptedReply = t('customCake.addedThenAskFulfillment', lang, { summary });
+            await saveOutgoingMessage(session.id, quoteAcceptedReply);
+            await sendReplyButtons(phone, quoteAcceptedReply, [
+              { id: 'delivery', title: t('fulfillment.deliveryBtn', lang) },
+              { id: 'takeaway', title: t('fulfillment.takeawayBtn', lang) },
+            ]);
+            return null;
+          } else if (business?.supports_delivery) {
+            quoteAcceptedReply = t('customCake.addedThenAskDelivery', lang, { summary });
+          } else {
+            quoteAcceptedReply = t('customCake.addedThenAskPickup', lang, { summary });
+            if (outlets.length > 0) {
+              quoteAcceptedReply += '\n\n' + formatOutletsForCustomer(outlets);
+            }
           }
-        }
 
-        await saveOutgoingMessage(session.id, quoteAcceptedReply);
-        return quoteAcceptedReply;
+          await saveOutgoingMessage(session.id, quoteAcceptedReply);
+          return quoteAcceptedReply;
+        }
       }
-    }
     } // Close else block for fulfillment check
   }
 
@@ -838,9 +1080,62 @@ export async function processMessage(
     sessionHasPickupInfo: !!latestSessionData.pickup_outlet_id,
     amenities,
     customerLanguage: lang, // i18n: Pass customer's preferred language to AI
+    // Active order context for post-order inquiries
+    activeOrder: activeOrder ? {
+      order_number: activeOrder.order_number,
+      status: activeOrder.status,
+      total_amount: activeOrder.total_amount,
+      fulfillment_type: activeOrder.fulfillment_type,
+      created_at: activeOrder.created_at,
+    } : null,
   };
 
   logger.debug(`AI context fulfillment: type=${latestSessionData.fulfillment_type}, addr=${latestSessionData.delivery_address}, outlet=${latestSessionData.pickup_outlet_id}`);
+
+  // ============================================
+  // HANDLE: Awaiting full address after WhatsApp location shared
+  // ============================================
+  // Check if session has lat/long but no address (waiting for full address input)
+  const isAwaitingFullAddress = latestSessionData.fulfillment_type === 'delivery' &&
+    latestSessionData.delivery_latitude &&
+    latestSessionData.delivery_longitude &&
+    !latestSessionData.delivery_address;
+
+  if (isAwaitingFullAddress) {
+    logger.info(`[ADDR] Session awaiting full address. Validating user input: "${messageText}"`);
+
+    // Validate if message looks like a valid address (not an order or question)
+    const sanitizedAddress = messageText.trim();
+    const isValidAddress = validateAddressInput(sanitizedAddress);
+
+    if (isValidAddress) {
+      logger.info(`[ADDR] Valid address detected: "${sanitizedAddress}"`);
+
+      // Save the address to session
+      await updateSessionDeliveryInfo(session.id, {
+        address: sanitizedAddress,
+        // Keep existing lat/long
+      });
+
+      // Save incoming message
+      await saveIncomingMessage(session.id, originalMessage);
+
+      // Ask for delivery date
+      const datePrompt = t('fulfillment.locationSavedThenAskDate', lang);
+      await saveOutgoingMessage(session.id, datePrompt);
+      await sendReplyButtons(phone, datePrompt, [
+        { id: 'date_today_delivery', title: `📅 ${t('buttons.today', lang)}` },
+        { id: 'date_tomorrow_delivery', title: `📅 ${t('buttons.tomorrow', lang)}` },
+        { id: 'date_other_delivery', title: `📅 ${t('buttons.other', lang)}` },
+      ]);
+
+      logger.info(`[ADDR] Address saved, asking for date`);
+      return null; // Early return - don't process with AI
+    } else {
+      logger.info(`[ADDR] Input doesn't look like address, proceeding to AI: "${sanitizedAddress}"`);
+      // Not a valid address - let AI process (could be order, question, etc.)
+    }
+  }
 
   // Process with AI
   const aiResponse = await processMessageWithAI(
@@ -875,7 +1170,7 @@ export async function processMessage(
   if (isYesMessage && existingItems.length > 0) {
     // Check if fulfillment is complete - if so, this should be confirm_order
     if (latestSessionData.fulfillment_type &&
-        (latestSessionData.delivery_address || latestSessionData.pickup_outlet_id)) {
+      (latestSessionData.delivery_address || latestSessionData.pickup_outlet_id)) {
       logger.info(`🔧 Override: User said YES with complete fulfillment - forcing confirm_order`);
       intentToProcess = 'confirm_order';
     }
@@ -1275,7 +1570,7 @@ export async function processMessage(
         // 2. Try to extract item name from user message
         // Patterns: "on Black Forest", "on the Rainbow cake", "for chocolate cake"
         const itemNameMatch = messageText.match(/(?:on|for|to)\s*(?:the\s*)?["']?([a-zA-Z\s]+?)["']?\s*(?:cake)?$/i) ||
-                              messageText.match(/["']?([a-zA-Z\s]+?)["']?\s*(?:cake)?\s*(?:text|message|writing)/i);
+          messageText.match(/["']?([a-zA-Z\s]+?)["']?\s*(?:cake)?\s*(?:text|message|writing)/i);
 
         if (itemNameMatch) {
           const mentionedItem = itemNameMatch[1].trim().toLowerCase();
@@ -1301,7 +1596,7 @@ export async function processMessage(
       const customizableItems = existingItems.filter(item => {
         const itemNameLower = item.item_name.toLowerCase();
         return itemNameLower.includes('cake') || itemNameLower.includes('pastry') ||
-               itemNameLower.includes('cupcake') || item.custom_text;
+          itemNameLower.includes('cupcake') || item.custom_text;
       });
 
       if (newCustomText) {
@@ -1378,40 +1673,125 @@ export async function processMessage(
       pendingCustomTextMap.delete(session.id);
       break;
 
+    case 'requires_intervention':
+      // Generic intervention triggers (urgent delivery, out or radius, etc.)
+      logger.info(`🚨 Intervention triggered: ${aiResponse.analysis?.reason || 'Unknown reason'}`);
+
+      // Create intervention request
+      const intervention = await createIntervention(
+        businessId,
+        session.id,
+        customer.id,
+        'other', // Could be refined based on analysis
+        {
+          message: messageText,
+          reason: aiResponse.analysis?.reason
+        },
+        aiResponse.analysis
+      );
+
+      if (intervention) {
+        // Pause AI to let admin handle it
+        await pauseAI(session.id, 'System Intervention');
+
+        // Notify admins via socket
+        emitInterventionCreated(businessId, intervention);
+
+        // Notify generic admin via notification service (push/email if configured)
+        await notifyBusinessAdmin(businessId, {
+          type: 'intervention_required',
+          customerId: customer.id,
+          phone,
+          message: `Admin intervention needed: ${aiResponse.analysis?.reason || messageText}`,
+        });
+
+        // Reply to customer
+        replyMessage = t('intervention.adminWillContact', lang); // Need to add this translation key or use hardcoded
+        if (!replyMessage || replyMessage.includes('intervention.')) {
+          replyMessage = "An admin will review your request and contact you shortly.";
+        }
+      } else {
+        replyMessage = t('error.generic', lang);
+      }
+      break;
+
     case 'custom_cake_inquiry':
       // Customer asking about custom/personalized cake design
-      // Check if custom cakes are enabled for this business
       if (business && (business as any).custom_cake_enabled) {
-        logger.info('Custom cake inquiry - custom cakes enabled');
-        // AI response should already ask for image/description and weight
-        // Just use the AI's reply
-      } else {
-        // Custom cakes not enabled - provide contact info
-        logger.info('Custom cake inquiry - custom cakes not enabled');
-        const supportPhone = business?.customer_support_phone;
-        if (supportPhone) {
-          replyMessage = t('customCake.contactSupport', lang, { phone: supportPhone });
-        } else {
-          replyMessage = aiResponse.reply; // Use AI's reply
+        logger.info('Custom cake inquiry - triggering intervention');
+
+        // Extract weight/flavor if present in message
+        const extractedWeight = messageText.match(/(\d+(?:\.\d+)?\s*(?:kg|g|lb|pound)s?)/i)?.[1];
+        const extractedFlavor = messageText.match(/(chocolate|vanilla|strawberry|red velvet|butterscotch|black forest|truffle)/i)?.[0];
+
+        // DON'T create intervention yet - wait for image
+        // DON'T pause AI - keep conversation flowing
+
+        // Set context flag
+        await updateSessionCustomCakeContext(session.id, {
+          awaiting_image: true,
+          inquiry_type: 'text_first',
+          weight: extractedWeight,
+          flavor: extractedFlavor,
+        });
+
+        // Ask for image
+        replyMessage = t('customCake.askForImage', lang);
+        if (!replyMessage || replyMessage.includes('customCake.')) {
+          replyMessage = "Yes! Please share an image of the design you'd like, and let us know the weight and flavor.";
         }
+
+
+      } else {
+        // Custom cakes not enabled
+        const supportPhone = business?.customer_support_phone;
+        replyMessage = supportPhone
+          ? t('customCake.contactSupport', lang, { phone: supportPhone })
+          : "Sorry, we don't do custom cakes at the moment.";
       }
       break;
 
     case 'show_menu':
-      // Send PDF menu if available, otherwise fallback to interactive/text
       if (business?.id) {
-        const pdfExists = await menuPdfExists(business.id);
-        if (pdfExists) {
-          const pdfUrl = getMenuPdfUrl(business.id);
-          const menuCaption = t('menu.pdfCaption', lang);
-          await saveOutgoingMessage(session.id, `[Menu PDF sent] ${menuCaption}`);
-          await sendDocument(
-            phone,
-            pdfUrl,
-            `${business.name || 'Menu'}.pdf`,
-            menuCaption
-          );
-          return null; // Don't send another message
+        const menuSlug = (aiResponse as any).menu_slug;
+
+        if (menuSlug) {
+          // Specific menu requested
+          const specificConfig = await getMenuPdfConfigBySlug(business.id, menuSlug);
+          if (specificConfig?.pdf_url) {
+            await sendDocument(phone, specificConfig.pdf_url, `${specificConfig.name}.pdf`, specificConfig.name);
+            await saveOutgoingMessage(session.id, `[Sent ${specificConfig.name} PDF]`);
+            return null; // Don't send another message
+          }
+        }
+
+        // Get all active menu PDF configs
+        const menuConfigs = await getActiveMenuPdfConfigs(business.id);
+
+        if (menuConfigs.length > 0) {
+          // Send all menu PDFs
+          for (const config of menuConfigs) {
+            if (config.pdf_url) {
+              await sendDocument(
+                phone,
+                config.pdf_url,
+                `${config.name}.pdf`,
+                config.name // Caption = menu name
+              );
+            }
+          }
+          await saveOutgoingMessage(session.id, `[Sent ${menuConfigs.length} menu PDF(s)]`);
+          return null;
+        } else {
+          // Fallback to full menu PDF if no configs
+          const pdfExists = await menuPdfExists(business.id);
+          if (pdfExists) {
+            const pdfUrl = getMenuPdfUrl(business.id);
+            const menuCaption = t('menu.pdfCaption', lang);
+            await sendDocument(phone, pdfUrl, `${business.name || 'Menu'}.pdf`, menuCaption);
+            await saveOutgoingMessage(session.id, `[Menu PDF sent] ${menuCaption}`);
+            return null;
+          }
         }
       }
       // Fallback: Send interactive category list for large menus, text for small menus
@@ -1447,6 +1827,19 @@ export async function processMessage(
         replyMessage = t('cart.empty', lang);
         break;
       }
+      // Check if fulfillment info is already complete (user added more items after providing address)
+      const hasFulfillmentInfo = session.fulfillment_type && (
+        (session.fulfillment_type === 'delivery' && session.delivery_address) ||
+        (session.fulfillment_type === 'takeaway' && session.pickup_outlet_id)
+      );
+
+      if (hasFulfillmentInfo) {
+        // Fulfillment already collected - show final summary and ask for confirmation
+        const finalSummary = await generateOrderSummary(session.id, { includeCta: true, timezone: businessTimezone });
+        replyMessage = finalSummary + '\n\n' + t('order.confirmPrompt', lang);
+        break;
+      }
+
       // Show summary and ask for delivery/takeaway directly (no separate item confirmation)
       const summary = await generateOrderSummary(session.id, { includeCta: false, timezone: businessTimezone });
       if (business?.supports_delivery && business?.supports_takeaway) {
@@ -1651,8 +2044,9 @@ export async function processMessage(
             if (pickupTime) {
               const validation = validateOperatingHours(pickupTime, selectedOutlet, businessTimezone);
               if (!validation.valid) {
-                logger.warn(`Pickup time ${pickupTime} rejected: ${validation.reason}`);
-                replyMessage = t('time.outsideHours', lang, { reason: validation.reason });
+                const reason = t(`time.${validation.reasonKey}` as any, lang, validation.reasonValues);
+                logger.warn(`Pickup time ${pickupTime} rejected: ${reason}`);
+                replyMessage = t('time.outsideHours', lang, { reason });
                 break;
               }
             }
@@ -1693,8 +2087,9 @@ export async function processMessage(
             if (selectedOutlet) {
               const validation = validateOperatingHours(pickupTime, selectedOutlet, businessTimezone);
               if (!validation.valid) {
-                logger.warn(`Pickup time ${pickupTime} rejected: ${validation.reason}`);
-                replyMessage = t('time.outsideHours', lang, { reason: validation.reason });
+                const reason = t(`time.${validation.reasonKey}` as any, lang, validation.reasonValues);
+                logger.warn(`Pickup time ${pickupTime} rejected: ${reason}`);
+                replyMessage = t('time.outsideHours', lang, { reason });
                 break;
               }
             }
@@ -1806,8 +2201,9 @@ export async function processMessage(
             const primaryOutlet = outlets[0];
             const validation = validateOperatingHours(deliveryTime, primaryOutlet, businessTimezone);
             if (!validation.valid) {
-              logger.warn(`Delivery time ${deliveryTime} rejected in confirm_order: ${validation.reason}`);
-              replyMessage = t('time.outsideHours', lang, { reason: validation.reason });
+              const reason = t(`time.${validation.reasonKey}` as any, lang, validation.reasonValues);
+              logger.warn(`Delivery time ${deliveryTime} rejected in confirm_order: ${reason}`);
+              replyMessage = t('time.outsideHours', lang, { reason });
               break;
             }
           }
@@ -1857,8 +2253,9 @@ export async function processMessage(
               if (selectedOutlet) {
                 const validation = validateOperatingHours(pickupTime, selectedOutlet, businessTimezone);
                 if (!validation.valid) {
-                  logger.warn(`Pickup time ${pickupTime} rejected in confirm_order: ${validation.reason}`);
-                  replyMessage = t('time.outsideHours', lang, { reason: validation.reason });
+                  const reason = t(`time.${validation.reasonKey}` as any, lang, validation.reasonValues);
+                  logger.warn(`Pickup time ${pickupTime} rejected in confirm_order: ${reason}`);
+                  replyMessage = t('time.outsideHours', lang, { reason });
                   break;
                 }
               }
@@ -1965,7 +2362,7 @@ export async function processMessage(
         if (latestSession.fulfillment_type === 'delivery') {
           confirmMsg += `\n\n${t('order.delivery', lang)}\n📍 ${latestSession.delivery_address}`;
           if (latestSession.delivery_time) {
-            confirmMsg += `\n${t('order.time', lang, { time: formatDeliveryTime(latestSession.delivery_time, businessTimezone) })}`;
+            confirmMsg += `\n${t('order.time', lang, { time: formatDeliveryTime(latestSession.delivery_time, businessTimezone, t('time.at', lang)) })}`;
           }
         } else if (latestSession.fulfillment_type === 'takeaway') {
           confirmMsg += `\n\n${t('order.takeaway', lang)}`;
@@ -1974,7 +2371,7 @@ export async function processMessage(
             confirmMsg += `\n📍 ${selectedOutlet.outlet_name}`;
           }
           if (latestSession.pickup_time) {
-            confirmMsg += `\n${t('order.time', lang, { time: formatDeliveryTime(latestSession.pickup_time, businessTimezone) })}`;
+            confirmMsg += `\n${t('order.time', lang, { time: formatDeliveryTime(latestSession.pickup_time, businessTimezone, t('time.at', lang)) })}`;
           }
         }
 
@@ -2257,7 +2654,7 @@ export async function handleWhatsAppWebhook(
 
           // Mark message as read immediately (shows blue checkmarks to sender)
           if (message.id) {
-            markAsRead(message.id).catch(() => {});
+            markAsRead(message.id).catch(() => { });
           }
 
           // Handle image messages (Feature 4)
@@ -2266,197 +2663,119 @@ export async function handleWhatsAppWebhook(
 
             // Find or create customer for notification
             const customer = await findOrCreateCustomer(phone, business.id, customerName);
-            const session = await findOrCreateSession(customer.id, business.id);
+            const { session } = await findOrCreateSession(customer.id, business.id);
 
             // Check if custom cake pricing is enabled for this business
             const customCakeEnabled = (business as any).custom_cake_enabled === true;
+            const imageMimeType = message.image.mime_type || 'image/jpeg';
+
+            // Download and save image to messages (ALWAYS, regardless of custom cake status)
+            // Include buffer if custom cake is enabled (for AI analysis)
+            const mediaResult = await processIncomingMedia(
+              message.image.id,
+              imageMimeType,
+              business.id,
+              undefined,
+              customCakeEnabled // Include buffer for AI analysis if custom cake enabled
+            );
+
+            const imageUrl = mediaResult?.mediaUrl || '';
+            const imageBuffer = mediaResult?.buffer;
+
+            await saveIncomingMediaMessage(
+              session.id,
+              'image',
+              imageUrl,
+              imageMimeType,
+              {
+                caption: message.image.caption,
+                size: mediaResult?.fileSize,
+                mediaId: message.image.id,
+              }
+            );
+
+            logger.info(`Image saved to messages: ${imageUrl ? 'with URL' : 'without URL'}`);
 
             if (customCakeEnabled) {
-              // Extract weight/flavor from recent session messages (customer input)
-              const recentMessages = await getRecentMessages(session.id, 10);
-              const inboundMessages = recentMessages.filter(m => m.direction === 'inbound');
+              // 1. Get current context
+              const context = session.custom_cake_context;
 
-              // ============================================
-              // CONTEXT CHECK: Is customer in custom cake flow?
-              // ============================================
-              // Check 1: Is there already a quote for this session (any status)?
-              const existingPendingQuote = await getPendingQuoteForSession(session.id);
-              const existingSentQuote = await getSentQuoteForSession(session.id);
-              const existingAcceptedQuote = await getAcceptedQuoteForSession(session.id);
-              const hasExistingQuote = existingPendingQuote || existingSentQuote || existingAcceptedQuote;
+              // CASE 1: Already awaiting image (text inquiry came first)
+              if (context?.awaiting_image) {
+                logger.info(`Processing image for awaiting context: session ${session.id}`);
 
-              // Check 2: Did conversation mention custom cake? (check BOTH customer AND AI messages)
-              const customCakeKeywords = [
-                // English keywords
-                'custom cake', 'customized cake', 'personalized cake', 'designer cake',
-                'custom design', 'cake design', 'special cake', 'photo cake', 'picture cake',
-                'birthday cake design', 'wedding cake design', 'theme cake',
-                'make a cake', 'design a cake', 'create a cake',
-                'share your cake', 'send a picture', 'send an image', 'share a photo',
-                'customized quote', 'cake image', 'design you want',
-                // Common English phrases
-                'like this', 'this design', 'this cake', 'same design', 'similar cake',
-                'can you make', 'want this', 'need this', 'order this',
-                'how much', 'what price', 'cost of this', 'price for this',
-                'make this', 'prepare this', 'bake this',
-                // Malayalam keywords
-                'ingane', 'ithupole', 'ee design', 'ee cake', 'custom',
-                'ethra', 'vila', 'price', 'cost',
-                'undakkam', 'undakkan', 'undakkumo', 'undakki tharumo',
-                'ith undakkam', 'ith pole', 'ingane oru',
-                'cake venam', 'cake vേണം', 'order cheyyam', 'order ചെയ്യാം',
-              ];
-              const caption = message.image.caption?.toLowerCase() || '';
-              // Check ALL messages (both inbound and outbound) for context
-              const allRecentText = recentMessages.map(m => m.content?.toLowerCase() || '').join(' ');
-              const hasCustomCakeContext = customCakeKeywords.some(keyword =>
-                allRecentText.includes(keyword) || caption.includes(keyword)
-              );
+                // Clear context before processing
+                await clearSessionCustomCakeContext(session.id);
 
-              // If no context, ask what the image is for
-              if (!hasExistingQuote && !hasCustomCakeContext) {
-                logger.info(`Image received without custom cake context - asking customer`);
-
-                // Save image message
-                const mediaResult = await processIncomingMedia(
-                  message.image.id,
-                  message.image.mime_type || 'image/jpeg',
-                  business.id
-                );
-                await saveIncomingMediaMessage(
+                await processCustomCakeWithIntervention(
+                  business.id,
                   session.id,
-                  'image',
-                  mediaResult?.mediaUrl || '',
-                  message.image.mime_type || 'image/jpeg',
-                  { caption: message.image.caption }
+                  customer.id,
+                  phone,
+                  imageUrl,
+                  context.weight,
+                  context.flavor,
+                  imageBuffer, // Pass buffer for AI analysis
+                  imageMimeType
                 );
-
-                // Ask for context
-                const lang = getSessionLanguage(session);
-                const contextMsg = t('image.askContext', lang);
-                await sendWhatsAppMessage(phone, contextMsg);
-                await saveOutgoingMessage(session.id, contextMsg);
                 continue;
               }
 
-              // Process as cake image for pricing
-              logger.info(`Processing cake image for business ${business.id}`);
+              // CASE 2: Check caption for cake keywords
+              const caption = message.image.caption?.toLowerCase() || '';
+              const hasCakeKeywordsInCaption = CAKE_KEYWORDS.some(k => caption.includes(k));
 
-              let customerWeight: string | undefined;
-              let customerFlavor: string | undefined;
-
-              const flavorKeywords = ['chocolate', 'vanilla', 'strawberry', 'red velvet', 'butterscotch', 'pineapple', 'mango', 'black forest'];
-
-              // Search through customer messages for weight and flavor
-              for (const msg of inboundMessages) {
-                const content = msg.content?.toLowerCase() || '';
-
-                // Look for weight (e.g., "2kg", "1.5 kg", "500g")
-                if (!customerWeight) {
-                  const weightMatch = content.match(/(\d+(?:\.\d+)?)\s*(?:kg|g)/i);
-                  if (weightMatch) {
-                    customerWeight = weightMatch[0];
-                  }
-                }
-
-                // Look for flavor
-                if (!customerFlavor) {
-                  customerFlavor = flavorKeywords.find(f => content.includes(f));
-                }
-
-                // Stop if both found
-                if (customerWeight && customerFlavor) break;
+              if (hasCakeKeywordsInCaption) {
+                logger.info(`Processing image with cake caption: "${caption}"`);
+                await processCustomCakeWithIntervention(
+                  business.id,
+                  session.id,
+                  customer.id,
+                  phone,
+                  imageUrl,
+                  undefined,
+                  undefined,
+                  imageBuffer, // Pass buffer for AI analysis
+                  imageMimeType
+                );
+                continue;
               }
 
-              // Also check image caption as fallback
-              // const caption = message.image.caption || '';
-              if (!customerWeight) {
-                const captionWeightMatch = caption.match(/(\d+(?:\.\d+)?)\s*(?:kg|g)/i);
-                if (captionWeightMatch) customerWeight = captionWeightMatch[0];
-              }
-              if (!customerFlavor) {
-                customerFlavor = flavorKeywords.find(f => caption.toLowerCase().includes(f));
-              }
+              // CASE 3: Check recent messages (simple check if no context)
+              // We skip this for now to rely on explicit confirmation if no context
 
-              logger.info(`Extracted from conversation - weight: ${customerWeight}, flavor: ${customerFlavor}`);
+              // CASE 4: No context - store pending and wait 30s
+              logger.info(`No context for image - storing pending state for session ${session.id}`);
 
-              const result = await processCakeImage(
-                business.id,
-                session.id,
-                customer.id,
-                phone,
-                message.image.id,
-                message.image.mime_type || 'image/jpeg',
-                undefined, // Let mediaService use env token
-                customerWeight,
-                customerFlavor
-              );
-
-              // Save message with media info
-              await saveIncomingMediaMessage(
-                session.id,
-                'image',
-                result.quote?.image_url || '',
-                message.image.mime_type || 'image/jpeg',
-                {
-                  caption: message.image.caption,
-                }
-              );
-
-              // Send response to customer
-              if (!session.ai_paused) {
-                await sendWhatsAppMessage(phone, result.holdingMessage);
-                await saveOutgoingMessage(session.id, result.holdingMessage);
-              }
-            } else {
-              // Standard image handling (no cake pricing)
-              // Download and store the image
-              const mediaResult = await processIncomingMedia(
-                message.image.id,
-                message.image.mime_type || 'image/jpeg',
-                business.id
-              );
-
-              // Save message with media info
-              await saveIncomingMediaMessage(
-                session.id,
-                'image',
-                mediaResult?.mediaUrl || '',
-                message.image.mime_type || 'image/jpeg',
-                {
-                  caption: message.image.caption,
-                  size: mediaResult?.fileSize,
-                }
-              );
-
-              // Notify business admin
-              await notifyBusinessAdmin(business.id, {
-                type: 'customer_image',
-                customerId: customer.id,
-                phone,
-                imageId: message.image.id,
-                message: `Customer sent image${message.image.caption ? ': ' + message.image.caption : ''}`,
+              // Store pending state with actual image URL
+              // Note: We store the buffer reference for later use when user confirms
+              await updateSessionCustomCakeContext(session.id, {
+                pending_image_id: message.image.id,
+                pending_image_timestamp: new Date().toISOString(),
+                image_url: imageUrl,
+                awaiting_clarification: false,
               });
 
-              // Don't send automated response if AI is paused (human takeover)
-              if (!session.ai_paused) {
-                const lang = getSessionLanguage(session);
-                const supportPhone = business.customer_support_phone;
-                const support = supportPhone ? t('error.contactSupport', lang, { phone: supportPhone }) : '';
-                const imageResponse = t('image.fallback', lang, { support });
-                await sendWhatsAppMessage(phone, imageResponse);
-                await saveOutgoingMessage(session.id, imageResponse);
-              }
+              // Don't reply yet - wait for follow-up (30s check in processMessage)
+              continue;
+
+            } else {
+              // Custom cakes disabled - image already saved to messages above
+              logger.info(`Custom cakes disabled for business, image saved to chat history`);
             }
-            continue;
           }
+
+          // Handle location messages
+
+
+          // }
 
           // Handle video messages
           if (message.type === 'video' && message.video) {
             logger.info(`Video received from ${phone}: ${message.video.id}`);
 
             const customer = await findOrCreateCustomer(phone, business.id, customerName);
-            const session = await findOrCreateSession(customer.id, business.id);
+            const { session } = await findOrCreateSession(customer.id, business.id);
 
             // Download and store the video
             const mediaResult = await processIncomingMedia(
@@ -2474,6 +2793,7 @@ export async function handleWhatsAppWebhook(
               {
                 caption: message.video.caption,
                 size: mediaResult?.fileSize,
+                mediaId: message.video.id,
               }
             );
 
@@ -2503,7 +2823,7 @@ export async function handleWhatsAppWebhook(
             logger.info(`Document received from ${phone}: ${message.document.id}`);
 
             const customer = await findOrCreateCustomer(phone, business.id, customerName);
-            const session = await findOrCreateSession(customer.id, business.id);
+            const { session } = await findOrCreateSession(customer.id, business.id);
 
             // Download and store the document
             const mediaResult = await processIncomingMedia(
@@ -2522,6 +2842,7 @@ export async function handleWhatsAppWebhook(
                 caption: message.document.caption,
                 filename: message.document.filename,
                 size: mediaResult?.fileSize,
+                mediaId: message.document.id,
               }
             );
 
@@ -2554,7 +2875,7 @@ export async function handleWhatsAppWebhook(
             logger.info(`Voice message received from ${phone}: ${audioId}`);
 
             const customer = await findOrCreateCustomer(phone, business.id, customerName);
-            const session = await findOrCreateSession(customer.id, business.id);
+            const { session } = await findOrCreateSession(customer.id, business.id);
 
             // Download and store the audio (so admin can listen to it)
             const mediaResult = await processIncomingMedia(
@@ -2571,7 +2892,7 @@ export async function handleWhatsAppWebhook(
                 'audio',
                 mediaResult?.mediaUrl || '',
                 audioMimeType,
-                { size: mediaResult?.fileSize }
+                { size: mediaResult?.fileSize, mediaId: audioId }
               );
               continue;
             }
@@ -2586,7 +2907,7 @@ export async function handleWhatsAppWebhook(
                 'audio',
                 mediaResult?.mediaUrl || '',
                 audioMimeType,
-                { size: mediaResult?.fileSize }
+                { size: mediaResult?.fileSize, mediaId: audioId }
               );
               const notEnabledReply = t('voice.notEnabled', lang);
               await sendWhatsAppMessage(phone, notEnabledReply);
@@ -2602,7 +2923,7 @@ export async function handleWhatsAppWebhook(
                 'audio',
                 mediaResult?.mediaUrl || '',
                 audioMimeType,
-                { size: mediaResult?.fileSize }
+                { size: mediaResult?.fileSize, mediaId: audioId }
               );
               const noSpeechReply = t('voice.noTranscription', lang);
               await sendWhatsAppMessage(phone, noSpeechReply);
@@ -2624,6 +2945,7 @@ export async function handleWhatsAppWebhook(
                 {
                   caption: transcription,
                   size: mediaResult?.fileSize,
+                  mediaId: audioId,
                 }
               );
 
@@ -2644,7 +2966,7 @@ export async function handleWhatsAppWebhook(
                 'audio',
                 mediaResult?.mediaUrl || '',
                 audioMimeType,
-                { size: mediaResult?.fileSize }
+                { size: mediaResult?.fileSize, mediaId: audioId }
               );
 
               const supportPhone = business.customer_support_phone;
@@ -2661,7 +2983,7 @@ export async function handleWhatsAppWebhook(
             logger.info(`Sticker received from ${phone}: ${message.sticker.id}`);
 
             const customer = await findOrCreateCustomer(phone, business.id, customerName);
-            const session = await findOrCreateSession(customer.id, business.id);
+            const { session } = await findOrCreateSession(customer.id, business.id);
 
             // Download and store the sticker
             const mediaResult = await processIncomingMedia(
@@ -2676,7 +2998,7 @@ export async function handleWhatsAppWebhook(
               'sticker',
               mediaResult?.mediaUrl || '',
               message.sticker.mime_type || 'image/webp',
-              { size: mediaResult?.fileSize }
+              { size: mediaResult?.fileSize, mediaId: message.sticker.id }
             );
 
             // No automated response for stickers - just save for admin visibility
@@ -2695,7 +3017,7 @@ export async function handleWhatsAppWebhook(
               logger.info(`[DEBUG-LOC] Step 2 done: customer.id=${customer.id}`);
 
               logger.info(`[DEBUG-LOC] Step 3: Finding/creating session...`);
-              const session = await findOrCreateSession(customer.id, business.id);
+              const { session } = await findOrCreateSession(customer.id, business.id);
               logger.info(`[DEBUG-LOC] Step 3 done: session.id=${session.id}`);
 
               logger.info(`[DEBUG-LOC] Step 4: Getting session with items...`);
@@ -2722,15 +3044,19 @@ export async function handleWhatsAppWebhook(
 
               const logAddress = displayAddress;
               logger.info(`[DEBUG-LOC] Step 6: Saving incoming message...`);
-              await saveIncomingMessage(session.id, `[Location: ${logAddress}]`);
+              await saveIncomingMessage(session.id, `[Location: ${logAddress}]`, {
+                messageType: 'location',
+                latitude: location.latitude,
+                longitude: location.longitude,
+              });
               logger.info(`[DEBUG-LOC] Step 6 done`);
 
               // If customer is in delivery flow and hasn't provided address yet
-              // Always save lat/long, address can be null (frontend will reverse geocode)
+              // Save lat/long only, ask for full address with landmark
               if (sessionWithItems?.fulfillment_type === 'delivery' && !sessionWithItems.delivery_address && !sessionWithItems.delivery_latitude) {
-                logger.info(`[DEBUG-LOC] Step 7: Updating delivery info (address=${displayAddress || 'NULL'})...`);
+                logger.info(`[DEBUG-LOC] Step 7: Saving lat/long only (address=NULL), will ask for full address...`);
                 await updateSessionDeliveryInfo(session.id, {
-                  address: displayAddress, // Can be null if geocoding failed
+                  address: null, // Don't save geocoded address - ask user for full address
                   latitude: location.latitude,
                   longitude: location.longitude,
                 });
@@ -2749,7 +3075,7 @@ export async function handleWhatsAppWebhook(
 
                   // Set session as pending approval
                   const { supabase } = await
-                   import('../config/database');
+                    import('../config/database');
                   await supabase
                     .from('sessions')
                     .update({
@@ -2775,31 +3101,13 @@ export async function handleWhatsAppWebhook(
                   continue;
                 }
 
-                // Show date selection buttons instead of asking for time as text
-                if (!sessionWithItems.delivery_time) {
-                  logger.info(`[DEBUG-LOC] Step 8: Sending date buttons...`);
-                  const lang = getSessionLanguage(session);
-                  const datePrompt = t('fulfillment.locationSavedThenAskDate', lang);
-                  await saveOutgoingMessage(session.id, datePrompt);
-                  await sendReplyButtons(phone, datePrompt, [
-                    { id: 'date_today_delivery', title: `📅 ${t('buttons.today', lang)}` },
-                    { id: 'date_tomorrow_delivery', title: `📅 ${t('buttons.tomorrow', lang)}` },
-                    { id: 'date_other_delivery', title: `📅 ${t('buttons.other', lang)}` },
-                  ]);
-                  logger.info(`[DEBUG-LOC] Step 8 done`);
-                } else {
-                  logger.info(`[DEBUG-LOC] Step 8b: Generating order summary...`);
-                  const lang = getSessionLanguage(session);
-                  const locationSummary = await generateOrderSummary(session.id, {
-                    includeCta: true,
-                    ctaMessage: `\n${t('fulfillment.locationSaved', lang)}! ${t('orderSummary.reviewPrompt', lang)}`,
-                    timezone: businessTimezone,
-                    includeDeliveryFee: true
-                  });
-                  await sendWhatsAppMessage(phone, locationSummary);
-                  await saveOutgoingMessage(session.id, locationSummary);
-                  logger.info(`[DEBUG-LOC] Step 8b done`);
-                }
+                // Ask for full address with landmark (lat/long saved, need human-readable address)
+                logger.info(`[DEBUG-LOC] Step 8: Asking for full address with landmark...`);
+                const lang = getSessionLanguage(session);
+                const askAddressPrompt = t('fulfillment.locationSavedAskFullAddress', lang);
+                await sendWhatsAppMessage(phone, askAddressPrompt);
+                await saveOutgoingMessage(session.id, askAddressPrompt);
+                logger.info(`[DEBUG-LOC] Step 8 done - waiting for full address`);
               } else {
                 // Not in delivery flow yet OR already has location - still save it for later use
                 logger.info(`[DEBUG-LOC] Step 9: Saving location for future use...`);
@@ -2838,7 +3146,7 @@ export async function handleWhatsAppWebhook(
               // Handle takeaway button - show interactive outlet list
               if (buttonId === 'takeaway') {
                 const customer = await findOrCreateCustomer(phone, business.id, customerName);
-                const session = await findOrCreateSession(customer.id, business.id);
+                const { session } = await findOrCreateSession(customer.id, business.id);
                 const businessOutlets = await getBusinessOutlets(business.id);
 
                 // Set fulfillment type to takeaway and CLEAR any previous delivery info
@@ -2870,7 +3178,7 @@ export async function handleWhatsAppWebhook(
               // Handle delivery button - set fulfillment type and CLEAR any previous takeaway info
               if (buttonId === 'delivery') {
                 const customer = await findOrCreateCustomer(phone, business.id, customerName);
-                const session = await findOrCreateSession(customer.id, business.id);
+                const { session } = await findOrCreateSession(customer.id, business.id);
 
                 // Set fulfillment type to delivery (this will clear takeaway info in the handler)
                 await updateSessionFulfillmentType(session.id, 'delivery');
@@ -2880,6 +3188,89 @@ export async function handleWhatsAppWebhook(
                 await saveOutgoingMessage(session.id, deliveryPrompt);
                 // Send location request with the prompt
                 await sendLocationRequest(phone, deliveryPrompt);
+                continue;
+              }
+
+              // Handle show_menu button from welcome message
+              if (buttonId === 'show_menu') {
+                const customer = await findOrCreateCustomer(phone, business.id, customerName);
+                const { session } = await findOrCreateSession(customer.id, business.id);
+                const lang = getSessionLanguage(session);
+                await saveIncomingMessage(session.id, `[Clicked: ${t('menu.browseBtn', lang)}]`);
+
+                // Send PDF menu if available, otherwise fallback to interactive menu
+                const menuConfigs = await getActiveMenuPdfConfigs(business.id);
+
+                if (menuConfigs.length > 0) {
+                  // Send all menu PDFs
+                  for (const config of menuConfigs) {
+                    if (config.pdf_url) {
+                      await sendDocument(
+                        phone,
+                        config.pdf_url,
+                        `${config.name}.pdf`,
+                        config.name // Caption = menu name
+                      );
+                    }
+                  }
+                  await saveOutgoingMessage(session.id, `[Sent ${menuConfigs.length} menu PDF(s)]`);
+                  continue;
+                } else {
+                  // Fallback to full menu PDF if no configs
+                  const pdfExists = await menuPdfExists(business.id);
+                  if (pdfExists) {
+                    const pdfUrl = await getMenuPdfUrl(business.id);
+                    if (pdfUrl) {
+                      const pdfCaption = t('menu.pdfCaption', lang);
+                      await sendDocument(phone, pdfUrl, `${business.name}_Menu.pdf`, pdfCaption);
+                      await saveOutgoingMessage(session.id, `[Menu PDF sent]`);
+                      continue;
+                    }
+                  }
+                }
+
+                // Fallback to interactive menu list
+                const menuCategories = await getMenuCategories(business.id);
+                const categorySections = buildCategoryListSections(menuCategories);
+                if (categorySections.length > 0 && categorySections[0].rows.length > 0) {
+                  await sendInteractiveListMessage(
+                    phone,
+                    t('menu.ourMenu', lang),
+                    t('menu.welcome', lang, { businessName: business.name }),
+                    t('menu.browseBtn', lang),
+                    categorySections
+                  );
+                  await saveOutgoingMessage(session.id, `[Interactive menu sent]`);
+                } else {
+                  await sendWhatsAppMessage(phone, t('menu.fallback', lang));
+                  await saveOutgoingMessage(session.id, t('menu.fallback', lang));
+                }
+                continue;
+              }
+
+              // Handle show_menu_<slug> buttons for specific menu PDFs
+              if (buttonId.startsWith('show_menu_')) {
+                const menuSlug = buttonId.replace('show_menu_', '');
+                const customer = await findOrCreateCustomer(phone, business.id, customerName);
+                const { session } = await findOrCreateSession(customer.id, business.id);
+                const lang = getSessionLanguage(session);
+
+                const menuConfig = await getMenuPdfConfigBySlug(business.id, menuSlug);
+                if (menuConfig?.pdf_url) {
+                  const localizedName = getLocalizedMenuName(menuConfig, lang);
+                  await saveIncomingMessage(session.id, `[Clicked: ${localizedName}]`);
+                  await sendDocument(
+                    phone,
+                    menuConfig.pdf_url,
+                    `${localizedName}.pdf`,
+                    localizedName // Caption in user's language
+                  );
+                  await saveOutgoingMessage(session.id, `[Sent ${localizedName} PDF]`);
+                } else {
+                  // Fallback if config not found
+                  await sendWhatsAppMessage(phone, t('menu.fallback', lang));
+                  await saveOutgoingMessage(session.id, t('menu.fallback', lang));
+                }
                 continue;
               }
 
@@ -2893,7 +3284,7 @@ export async function handleWhatsAppWebhook(
                   const menuItem = await getMenuItemById(itemId);
                   if (menuItem) {
                     const customer = await findOrCreateCustomer(phone, business.id, customerName);
-                    const session = await findOrCreateSession(customer.id, business.id);
+                    const { session } = await findOrCreateSession(customer.id, business.id);
 
                     await saveIncomingMessage(session.id, `[Selected size: ${sizeName}]`);
                     await saveOrderItem(session.id, {
@@ -2913,7 +3304,7 @@ export async function handleWhatsAppWebhook(
               // Handle DATE selection buttons (Today/Tomorrow/Other)
               if (buttonId.startsWith('date_')) {
                 const customer = await findOrCreateCustomer(phone, business.id, customerName);
-                const session = await findOrCreateSession(customer.id, business.id);
+                const { session } = await findOrCreateSession(customer.id, business.id);
                 const isDelivery = buttonId.includes('_delivery');
                 const fulfillmentType = isDelivery ? 'delivery' : 'takeaway';
                 const lang = getSessionLanguage(session);
@@ -2977,7 +3368,7 @@ export async function handleWhatsAppWebhook(
               // Handle TIME selection buttons
               if (buttonId.startsWith('time_')) {
                 const customer = await findOrCreateCustomer(phone, business.id, customerName);
-                const session = await findOrCreateSession(customer.id, business.id);
+                const { session } = await findOrCreateSession(customer.id, business.id);
                 const sessionWithItems = await getSessionWithItems(session.id);
                 const pendingDate = pendingDateSelectionMap.get(session.id);
                 const lang = getSessionLanguage(session);
@@ -3043,6 +3434,27 @@ export async function handleWhatsAppWebhook(
                     });
                   }
 
+                  // Create intervention for admin dashboard
+                  const timeInterventionBtn = await createIntervention(
+                    business.id,
+                    session.id,
+                    customer.id,
+                    'custom_cake_time_confirmation',
+                    {
+                      quoteId: acceptedQuoteForTime.id,
+                      requestedTime: calculatedTime,
+                      fulfillmentType: fulfillmentTypeForQuote,
+                      phone,
+                    }
+                  );
+
+                  if (timeInterventionBtn) {
+                    // Pause AI for admin to handle
+                    await pauseAI(session.id, 'Custom cake time confirmation pending');
+                    // Emit WebSocket event for admin dashboard
+                    emitInterventionCreated(business.id, timeInterventionBtn);
+                  }
+
                   // Notify admin about time confirmation request
                   await notifyBusinessAdmin(business.id, {
                     type: 'cake_time_confirmation',
@@ -3099,7 +3511,7 @@ export async function handleWhatsAppWebhook(
 
               // Handle outlet selection
               const customer = await findOrCreateCustomer(phone, business.id, customerName);
-              const session = await findOrCreateSession(customer.id, business.id);
+              const { session } = await findOrCreateSession(customer.id, business.id);
               const businessOutlets = await getBusinessOutlets(business.id);
 
               // Handle super group selection (first level: Food, Drinks, etc.)
@@ -3316,6 +3728,116 @@ export async function handleTestMessage(
       details: error instanceof Error ? error.message : 'Unknown error',
     });
   }
+}
+
+// ============================================
+// HELPERS
+// ============================================
+
+async function processCustomCakeWithIntervention(
+  businessId: string,
+  sessionId: string,
+  customerId: string,
+  phone: string,
+  imageUrl: string,
+  weight?: string,
+  flavor?: string,
+  imageBuffer?: Buffer,
+  mimeType?: string
+) {
+  // 1. Analyze image with Gemini if buffer is provided
+  let aiAnalysis: any = null;
+
+  if (imageBuffer && mimeType) {
+    try {
+      logger.info(`Analyzing cake image with Gemini for session ${sessionId}`);
+      const pricingConfig = await getFullPricingConfig(businessId);
+      const imageBase64 = imageBuffer.toString('base64');
+
+      const analysis = await analyzeImageWithGemini(
+        imageBase64,
+        mimeType,
+        pricingConfig,
+        weight,
+        flavor
+      );
+
+      if (analysis) {
+        aiAnalysis = analysis;
+        logger.info(`AI Analysis complete: ${analysis.complexity_level} complexity, ${analysis.detected_elements?.length || 0} elements detected`);
+      }
+    } catch (error) {
+      logger.error('Failed to analyze image with Gemini, continuing without AI analysis', error);
+      // Continue without AI analysis - admin can still review manually
+    }
+  }
+
+  // 2. Create intervention with AI analysis
+  const intervention = await createIntervention(
+    businessId,
+    sessionId,
+    customerId,
+    'custom_cake',
+    {
+      image_url: imageUrl,
+      customer_weight: weight,
+      customer_flavor: flavor,
+    },
+    aiAnalysis || undefined // Pass AI analysis if available
+  );
+
+  if (intervention) {
+    // 3. Pause AI
+    await pauseAI(sessionId, 'Custom Cake Inquiry');
+
+    // 4. Emit socket event to notify admin dashboard
+    emitInterventionCreated(businessId, intervention);
+    logger.info(`WebSocket: intervention_created emitted for business ${businessId}, intervention ${intervention.id}`);
+
+    // 5. Clear context flags
+    await clearSessionCustomCakeContext(sessionId);
+
+    // 6. Send holding message and save to chat history
+    const holdingMessage = "Thank you for sharing! Our team is preparing a customized quote for you.";
+    await saveOutgoingMessage(sessionId, holdingMessage);
+    await sendWhatsAppMessage(phone, holdingMessage);
+  } else {
+    logger.error(`Failed to create intervention for session ${sessionId}`);
+  }
+}
+
+async function checkPendingImageClarification(session: Session, phone: string, businessId: string): Promise<boolean> {
+  const context = session.custom_cake_context;
+
+  if (!context?.pending_image_timestamp) return false;
+
+  const pendingTime = new Date(context.pending_image_timestamp);
+  const elapsed = Date.now() - pendingTime.getTime();
+
+  // If 30s passed and not yet asked for clarification
+  // (We use 30s as per requirement)
+  if (elapsed > 30000 && !context.awaiting_clarification) {
+    logger.info(`30s elapsed for pending image - asking clarification for session ${session.id}`);
+
+    const lang = getSessionLanguage(session);
+    // Need a translation key for this, using hardcoded for now or generic fallback
+    const clarificationMsg = t('image.askCakeContext', lang);
+    const finalMsg = (!clarificationMsg || clarificationMsg.includes('image.'))
+      ? `I received your image! 📸\n\nCould you please let me know what this is for?\n• Is this a *cake design* you'd like us to create?\n• Or something else?`
+      : clarificationMsg;
+
+    await sendWhatsAppMessage(phone, finalMsg);
+    await saveOutgoingMessage(session.id, finalMsg);
+
+    // Update context to mark clarification sent
+    await updateSessionCustomCakeContext(session.id, {
+      awaiting_clarification: true,
+    });
+
+    return true; // Clarification sent
+  }
+
+  return false; // No clarification needed yet
 }
 
 /**

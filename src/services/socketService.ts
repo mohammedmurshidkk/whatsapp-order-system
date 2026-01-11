@@ -142,6 +142,8 @@ export function emitNewMessage(
     media_filename?: string | null;
     media_duration?: number | null;
     created_at: string;
+    latitude?: number;
+    longitude?: number
   }
 ): void {
   // Wrap in format frontend expects: { session_id, message }
@@ -174,4 +176,34 @@ export function emitMessageStatus(
   }
 ): void {
   emitToBusinessAdmins(businessId, 'message_status', data);
+}
+
+/**
+ * Emit intervention created event
+ */
+export function emitInterventionCreated(
+  businessId: string,
+  intervention: any
+): void {
+  emitToBusinessAdmins(businessId, 'intervention_created', intervention);
+}
+
+/**
+ * Emit intervention updated event
+ */
+export function emitInterventionUpdated(
+  businessId: string,
+  intervention: any
+): void {
+  emitToBusinessAdmins(businessId, 'intervention_updated', intervention);
+}
+
+/**
+ * Emit intervention resolved event
+ */
+export function emitInterventionResolved(
+  businessId: string,
+  intervention: any
+): void {
+  emitToBusinessAdmins(businessId, 'intervention_resolved', intervention);
 }

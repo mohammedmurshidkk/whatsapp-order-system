@@ -3,7 +3,6 @@ import { DEFAULT_LANGUAGE, SupportedLanguage, t } from '../i18n';
 import { SessionItem, Order, AIItemResponse, OrderItemData, MenuItem, MenuCategory, Business } from '../types';
 import {
   getSessionWithItems,
-  completeSession,
   updateSessionItemCount,
   getSessionLanguage,
   findOrCreateSession,
@@ -409,13 +408,13 @@ export async function generateOrderSummary(
       }
       if (session.delivery_time) {
         // Format time using timezone-aware formatter
-        summary += `${t('orderSummary.time', lang, { time: formatDeliveryTime(session.delivery_time, timezone) })}\n`;
+        summary += `${t('orderSummary.time', lang, { time: formatDeliveryTime(session.delivery_time, timezone, t('time.at', lang)) })}\n`;
       }
     } else if (session.fulfillment_type === 'takeaway' && session.pickup_outlet_id) {
       summary += `${t('orderSummary.pickupFrom', lang)}\n`;
       if (session.pickup_time) {
         // Format time using timezone-aware formatter
-        summary += `${t('orderSummary.time', lang, { time: formatDeliveryTime(session.pickup_time, timezone) })}\n`;
+        summary += `${t('orderSummary.time', lang, { time: formatDeliveryTime(session.pickup_time, timezone, t('time.at', lang)) })}\n`;
       }
     }
   }
@@ -561,8 +560,20 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
     throw new Error('Failed to create order');
   }
 
-  // Mark session as completed
-  await completeSession(sessionId);
+  // Note: Session stays active until admin marks order as completed/cancelled
+  // This allows customers to continue asking about their order
+
+  // Clear session items (order data is now in orders.items JSONB)
+  // This prevents showing old cart items when customer messages again
+  const { error: clearError } = await supabase
+    .from('session_items')
+    .delete()
+    .eq('session_id', sessionId);
+
+  if (clearError) {
+    logger.warn(`Failed to clear session items for session ${sessionId}:`, clearError);
+    // Don't fail the order - items are already stored in the order
+  }
 
   logger.info(`Order created: ${order.order_number} (ID: ${order.id}) - Total: ₹${grandTotal} (items: ₹${totalAmount}, delivery: ₹${deliveryFee})`);
 
@@ -677,7 +688,7 @@ export async function getCustomerOrders(customerId: string): Promise<Order[]> {
 
 /**
  * Get customer's most recent active order (for "where's my order?" without order number)
- * Active statuses: confirmed, processing (not completed/cancelled)
+ * Active statuses: confirmed, processing, out_for_delivery (not completed/cancelled)
  */
 export async function getCustomerActiveOrder(customerId: string, businessId: string): Promise<Order | null> {
   const { data, error } = await supabase
@@ -685,7 +696,7 @@ export async function getCustomerActiveOrder(customerId: string, businessId: str
     .select('*')
     .eq('customer_id', customerId)
     .eq('business_id', businessId)
-    .in('status', ['confirmed', 'processing'])
+    .in('status', ['confirmed', 'processing', 'out_for_delivery'])
     .order('created_at', { ascending: false })
     .limit(1)
     .single();
@@ -728,12 +739,12 @@ export function getOrderStatusMessage(order: Order, lang: SupportedLanguage, tim
   if (order.fulfillment_type === 'delivery' && order.delivery_address) {
     message += `${t('order.deliveryTo', lang, { address: order.delivery_address })}\n`;
     if (order.delivery_time) {
-      message += `${t('order.time', lang, { time: formatDeliveryTime(order.delivery_time, timezone) })}\n`;
+      message += `${t('order.time', lang, { time: formatDeliveryTime(order.delivery_time, timezone, t('time.at', lang)) })}\n`;
     }
   } else if (order.fulfillment_type === 'takeaway') {
     message += `${t('order.takeaway', lang)}\n`;
     if (order.pickup_time) {
-      message += `${t('order.time', lang, { time: formatDeliveryTime(order.pickup_time, timezone) })}\n`;
+      message += `${t('order.time', lang, { time: formatDeliveryTime(order.pickup_time, timezone, t('time.at', lang)) })}\n`;
     }
   }
 
@@ -751,7 +762,7 @@ export async function cancelOrderById(
   // Get language from customer and business ID
   // Note: findOrCreateSession won't create a new session if one already exists for the customer/business
   const customerSession = await findOrCreateSession(customerId, businessId);
-  const lang: SupportedLanguage = getSessionLanguage(customerSession);
+  const lang: SupportedLanguage = getSessionLanguage(customerSession.session);
 
   // Search by order_number within the same business
   const { data: orders, error: fetchError } = await supabase
@@ -858,7 +869,7 @@ export async function getOrderStatus(
 ): Promise<{ success: boolean; message: string; order?: Order }> {
   // Get language from customer and business ID
   const customerSession = await findOrCreateSession(customerId, businessId);
-  const lang: SupportedLanguage = getSessionLanguage(customerSession);
+  const lang: SupportedLanguage = getSessionLanguage(customerSession.session);
 
   const order = await getOrderByOrderNumber(orderNumber, customerId, businessId);
 
@@ -891,16 +902,16 @@ export async function getOrderStatus(
   if (order.fulfillment_type === 'delivery' && order.delivery_address) {
     message += `${t('order.deliveryTo', lang, { address: order.delivery_address })}\n`;
     if (order.delivery_time) {
-      message += `${t('order.time', lang, { time: formatDeliveryTime(order.delivery_time, timezone) })}\n`;
+      message += `${t('order.time', lang, { time: formatDeliveryTime(order.delivery_time, timezone, t('time.at', lang)) })}\n`;
     }
   } else if (order.fulfillment_type === 'takeaway') {
     message += `${t('order.takeaway', lang)}\n`;
     if (order.pickup_time) {
-      message += `${t('order.time', lang, { time: formatDeliveryTime(order.pickup_time, timezone) })}\n`;
+      message += `${t('order.time', lang, { time: formatDeliveryTime(order.pickup_time, timezone, t('time.at', lang)) })}\n`;
     }
   }
 
-  message += t('order.orderedDate', lang, { date: formatDeliveryTime(order.created_at, timezone) });
+  message += t('order.orderedDate', lang, { date: formatDeliveryTime(order.created_at, timezone, t('time.at', lang)) });
 
   return {
     success: true,

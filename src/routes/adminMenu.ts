@@ -12,6 +12,7 @@ import {
   syncMenuPdf,
   getMenuPdf,
 } from '../controllers/adminMenuController';
+import * as pdfConfigController from '../controllers/adminMenuPdfController';
 import { authMiddleware } from '../middleware/auth';
 
 const router: IRouter = Router();
@@ -35,8 +36,15 @@ const upload = multer({
 router.use(authMiddleware);
 
 // Menu PDF endpoints (before :itemId routes to avoid conflicts)
-router.post('/pdf/sync', syncMenuPdf);  // Generate and upload menu PDF
-router.get('/pdf', getMenuPdf);         // Get menu PDF URL
+router.post('/pdf/sync', syncMenuPdf);  // Generate and upload full menu PDF
+router.get('/pdf', getMenuPdf);         // Get full menu PDF URL
+
+// Menu PDF Config endpoints (category-filtered PDFs)
+router.post('/pdf-configs', pdfConfigController.createPdfConfig);
+router.get('/pdf-configs', pdfConfigController.listPdfConfigs);
+router.put('/pdf-configs/:id', pdfConfigController.updatePdfConfig);
+router.delete('/pdf-configs/:id', pdfConfigController.deletePdfConfig);
+router.post('/pdf-configs/:id/sync', pdfConfigController.syncPdfConfig);
 
 router.get('/', listMenuItems);
 router.get('/:itemId', getMenuItem);

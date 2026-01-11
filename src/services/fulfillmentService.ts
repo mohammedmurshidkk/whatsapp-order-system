@@ -1,3 +1,4 @@
+import { TranslationKeys } from '../i18n';
 import { supabase } from '../config/database';
 import { FulfillmentType, DeliveryFeeResult } from '../types';
 import { logger } from '../utils/logger';
@@ -471,7 +472,11 @@ export function extractAddressAndTime(message: string, timezone: string = 'Asia/
  * @param isoTime - ISO timestamp (stored in UTC)
  * @param timezone - IANA timezone (e.g., 'Asia/Kolkata'), defaults to 'Asia/Kolkata'
  */
-export function formatDeliveryTime(isoTime: string, timezone: string = 'Asia/Kolkata'): string {
+export function formatDeliveryTime(
+  isoTime: string,
+  timezone: string = 'Asia/Kolkata',
+  atTranslation: string = 'at'
+): string {
   // Ensure timestamp is treated as UTC - PostgreSQL TIMESTAMP without timezone
   // may return without 'Z' suffix, causing JS to interpret as local time
   const normalizedTime = isoTime.endsWith('Z') || isoTime.includes('+') ? isoTime : isoTime + 'Z';
@@ -498,7 +503,7 @@ export function formatDeliveryTime(isoTime: string, timezone: string = 'Asia/Kol
   const timeStr = timeFormatter.format(date);
 
   // Always show actual date in DD-MM-YYYY format
-  return `${dateInTz} at ${timeStr}`;
+  return `${dateInTz} ${atTranslation} ${timeStr}`.trim().replace(/ +/g, ' ');
 }
 
 /**
@@ -779,7 +784,7 @@ export function validateOperatingHours(
     opening_days?: string[] | null;
   },
   timezone: string = 'Asia/Kolkata'
-): { valid: true } | { valid: false; reason: string } {
+): { valid: true } | { valid: false; reasonKey: keyof TranslationKeys['time'], reasonValues: Record<string, any> } {
   const tz = timezone || 'Asia/Kolkata';
 
   // If no operating hours set, allow any time
@@ -806,7 +811,11 @@ export function validateOperatingHours(
     if (!normalizedOpeningDays.includes(requestedDayOfWeek)) {
       return {
         valid: false,
-        reason: `We're closed on ${requestedDayOfWeek.charAt(0).toUpperCase() + requestedDayOfWeek.slice(1)}. We're open on: ${outlet.opening_days.map(d => d.charAt(0).toUpperCase() + d.slice(1)).join(', ')}.`,
+        reasonKey: 'closedOnDay',
+        reasonValues: {
+          day: requestedDayOfWeek.charAt(0).toUpperCase() + requestedDayOfWeek.slice(1),
+          openDays: outlet.opening_days.map(d => d.charAt(0).toUpperCase() + d.slice(1)).join(', '),
+        },
       };
     }
   }
@@ -855,14 +864,19 @@ export function validateOperatingHours(
   if (requestedMinutes < earliestAllowed) {
     return {
       valid: false,
-      reason: `That time is too early. We can accept orders from ${formatTimeForDisplay(earliestAllowed)} onwards.`,
+      reasonKey: 'tooEarlySimple',
+      reasonValues: { time: formatTimeForDisplay(earliestAllowed) },
     };
   }
 
   if (requestedMinutes > latestAllowed) {
     return {
       valid: false,
-      reason: `That time is too late. We close at ${formatTimeForDisplay(closeHour * 60 + closeMin)}, so the latest we can accept orders is ${formatTimeForDisplay(latestAllowed)}.`,
+      reasonKey: 'tooLate',
+      reasonValues: {
+        closeTime: formatTimeForDisplay(closeHour * 60 + closeMin),
+        latestTime: formatTimeForDisplay(latestAllowed)
+      },
     };
   }
 

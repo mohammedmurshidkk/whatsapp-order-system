@@ -3,11 +3,8 @@ import { AuthRequest, getBusinessId } from '../middleware/auth';
 import { supabase } from '../config/database';
 import { logger } from '../utils/logger';
 import {
-  // getWeightPricings,
-  // createWeightPricing,
-  // updateWeightPricing,
-  // deleteWeightPricing,
   getFlavorPricings,
+  getFlavorPricingById,
   createFlavorPricing,
   updateFlavorPricing,
   deleteFlavorPricing,
@@ -18,7 +15,7 @@ import {
   seedStandardDesignElements,
   getFullPricingConfig,
 } from '../services/cakePricingService';
-import { CakeDesignPriceType } from '../types';
+import { CakeDesignPriceType, CakeFlavorSize } from '../types';
 
 // ============================================
 // WEIGHT PRICING
@@ -150,16 +147,32 @@ export async function createFlavor(req: AuthRequest, res: Response): Promise<voi
       return;
     }
 
-    const { flavor_name, additional_price = 0 } = req.body;
+    const { flavor_name, sizes } = req.body;
 
     if (!flavor_name) {
       res.status(400).json({ error: 'flavor_name is required' });
       return;
     }
 
-    const flavor = await createFlavorPricing(businessId, flavor_name, additional_price, 111);
-    throw new Error('####### hi - 22  - -- - ');
-    logger.info(`Flavor pricing created: ${flavor_name} = +₹${additional_price}`);
+    if (!sizes || !Array.isArray(sizes) || sizes.length === 0) {
+      res.status(400).json({ error: 'sizes array is required with at least one size' });
+      return;
+    }
+
+    // Validate each size
+    for (const size of sizes) {
+      if (!size.name || typeof size.name !== 'string') {
+        res.status(400).json({ error: 'Each size must have a name (e.g., "500g", "1kg")' });
+        return;
+      }
+      if (typeof size.price !== 'number' || size.price < 0) {
+        res.status(400).json({ error: 'Each size must have a valid price' });
+        return;
+      }
+    }
+
+    const flavor = await createFlavorPricing(businessId, flavor_name, sizes as CakeFlavorSize[]);
+    logger.info(`Flavor pricing created: ${flavor_name} with ${sizes.length} sizes`);
     res.status(201).json({ success: true, data: flavor });
   } catch (error) {
     logger.error('Failed to create flavor pricing', error);
@@ -176,11 +189,29 @@ export async function updateFlavor(req: AuthRequest, res: Response): Promise<voi
     }
 
     const { id } = req.params;
-    const { flavor_name, additional_price, is_active } = req.body;
+    const { flavor_name, sizes, is_active } = req.body;
+
+    // Validate sizes if provided
+    if (sizes !== undefined) {
+      if (!Array.isArray(sizes) || sizes.length === 0) {
+        res.status(400).json({ error: 'sizes must be an array with at least one size' });
+        return;
+      }
+      for (const size of sizes) {
+        if (!size.name || typeof size.name !== 'string') {
+          res.status(400).json({ error: 'Each size must have a name (e.g., "500g", "1kg")' });
+          return;
+        }
+        if (typeof size.price !== 'number' || size.price < 0) {
+          res.status(400).json({ error: 'Each size must have a valid price' });
+          return;
+        }
+      }
+    }
 
     const updates: Record<string, unknown> = {};
     if (flavor_name !== undefined) updates.flavor_name = flavor_name;
-    if (additional_price !== undefined) updates.additional_price = additional_price;
+    if (sizes !== undefined) updates.sizes = sizes as CakeFlavorSize[];
     if (is_active !== undefined) updates.is_active = is_active;
 
     const flavor = await updateFlavorPricing(id, updates);

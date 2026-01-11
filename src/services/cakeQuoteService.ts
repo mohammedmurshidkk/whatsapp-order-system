@@ -22,7 +22,7 @@ import { notifyBusinessAdmin } from './notificationService';
 // GEMINI VISION API FOR IMAGE ANALYSIS
 // ============================================
 
-async function analyzeImageWithGemini(
+export async function analyzeImageWithGemini(
   imageBase64: string,
   mimeType: string,
   pricingConfig: CakePricingConfig,
@@ -85,7 +85,8 @@ ${elementsText || 'No elements configured - estimate based on complexity.'}
 
 ## Price Calculation Rules:
 - base_price = price from flavor+weight combination
-- For custom weights (2kg, 3kg): calculate from 1kg price (e.g., 2kg = 1kg price × 2)
+- For custom weights, use the [BASE] size to calculate: (base_price / base_grams) × requested_grams
+- Example: If 1kg [BASE] = ₹900, then 2kg = ₹1800, 500g = ₹450
 - design_elements_total = sum of all detected element prices
 - grand_total = base_price + design_elements_total
 
@@ -564,6 +565,59 @@ export async function createQuoteRevision(
   }
 
   logger.info(`Quote revision created: ${data.id} (from ${existingQuote.id}, new weight: ${newWeight})`);
+  return data as CakePriceQuote;
+}
+
+/**
+ * Create a quote directly with 'sent' status (for intervention resolutions)
+ * Used when admin resolves a custom_cake intervention with a price
+ */
+export async function createSentQuoteFromIntervention(
+  businessId: string,
+  sessionId: string,
+  customerId: string,
+  adminId: string,
+  finalPrice: number,
+  finalMessage: string,
+  requestData: {
+    image_url?: string;
+    customer_weight?: string;
+    customer_flavor?: string;
+  },
+  aiAnalysis?: Record<string, unknown>
+): Promise<CakePriceQuote | null> {
+  const expiresAt = new Date();
+  expiresAt.setHours(expiresAt.getHours() + 24);
+
+  const { data, error } = await supabase
+    .from('cake_price_quotes')
+    .insert({
+      business_id: businessId,
+      session_id: sessionId,
+      customer_id: customerId,
+      image_url: requestData.image_url || null,
+      customer_weight: requestData.customer_weight || null,
+      customer_flavor: requestData.customer_flavor || null,
+      ai_analysis: aiAnalysis || null,
+      suggested_price: finalPrice,
+      admin_final_price: finalPrice,
+      admin_final_message: finalMessage,
+      suggested_message: finalMessage,
+      status: 'sent',
+      reviewed_by: adminId,
+      reviewed_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      expires_at: expiresAt.toISOString(),
+    })
+    .select()
+    .single();
+
+  if (error) {
+    logger.error('Failed to create sent quote from intervention', error);
+    return null;
+  }
+
+  logger.info(`Sent quote created from intervention: ${data.id}, price: ₹${finalPrice}`);
   return data as CakePriceQuote;
 }
 

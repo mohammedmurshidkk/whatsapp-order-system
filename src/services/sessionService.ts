@@ -1,10 +1,10 @@
 import { supabase } from '../config/database';
-import { Session, SessionWithItems, SessionItem } from '../types';
+import { Session, SessionWithItems, SessionItem, CustomCakeContext } from '../types';
 import { SESSION_TIMEOUT_HOURS } from '../config/constants';
 import { logger } from '../utils/logger';
 import type { SupportedLanguage } from '../i18n';
 
-export async function findOrCreateSession(customerId: string, businessId: string): Promise<Session> {
+export async function findOrCreateSession(customerId: string, businessId: string): Promise<{ session: Session; isNew: boolean }> {
   const timeoutThreshold = new Date();
   timeoutThreshold.setHours(timeoutThreshold.getHours() - SESSION_TIMEOUT_HOURS);
 
@@ -21,7 +21,7 @@ export async function findOrCreateSession(customerId: string, businessId: string
 
   if (existingSession && !findError) {
     logger.debug(`Active session found: ${existingSession.id}`);
-    return existingSession as Session;
+    return { session: existingSession as Session, isNew: false };
   }
 
   // Create new session
@@ -45,7 +45,7 @@ export async function findOrCreateSession(customerId: string, businessId: string
   }
 
   logger.info(`New session created: ${newSession.id} for business ${businessId}`);
-  return newSession as Session;
+  return { session: newSession as Session, isNew: true };
 }
 
 export async function updateSessionActivity(sessionId: string): Promise<void> {
@@ -78,7 +78,7 @@ export async function getSessionWithItems(
     .from('session_items')
     .select('*')
     .eq('session_id', sessionId)
-    .order('created_at', { ascending: true});
+    .order('created_at', { ascending: true });
 
   if (itemsError) {
     logger.error('Failed to fetch session items', itemsError);
@@ -202,6 +202,10 @@ export async function resumeAI(sessionId: string): Promise<void> {
   logger.info(`AI resumed for session ${sessionId}`);
 }
 
+export async function resumeSession(sessionId: string): Promise<void> {
+  return resumeAI(sessionId);
+}
+
 // Check if AI is paused for a session
 export async function isAIPaused(sessionId: string): Promise<boolean> {
   const { data, error } = await supabase
@@ -320,4 +324,38 @@ export async function updateSessionLanguage(
  */
 export function getSessionLanguage(session: Session): SupportedLanguage {
   return session.language || 'ml';
+}
+
+export async function updateSessionCustomCakeContext(
+  sessionId: string,
+  context: Partial<CustomCakeContext>
+): Promise<void> {
+  const { data: session } = await supabase
+    .from('sessions')
+    .select('custom_cake_context')
+    .eq('id', sessionId)
+    .single();
+
+  const currentContext = (session?.custom_cake_context || {}) as CustomCakeContext;
+  const merged = { ...currentContext, ...context };
+
+  const { error } = await supabase
+    .from('sessions')
+    .update({ custom_cake_context: merged })
+    .eq('id', sessionId);
+
+  if (error) {
+    logger.error('Failed to update session custom cake context', error);
+  }
+}
+
+export async function clearSessionCustomCakeContext(sessionId: string): Promise<void> {
+  const { error } = await supabase
+    .from('sessions')
+    .update({ custom_cake_context: null })
+    .eq('id', sessionId);
+
+  if (error) {
+    logger.error('Failed to clear session custom cake context', error);
+  }
 }

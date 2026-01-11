@@ -183,7 +183,7 @@ async function handleLocationMessage(
   logger.info(`[WebJS] Location from ${fromPhone}: ${location.latitude}, ${location.longitude}`);
 
   const customer = await findOrCreateCustomer(fromPhone, business.id);
-  const session = await findOrCreateSession(customer.id, business.id);
+  const {session} = await findOrCreateSession(customer.id, business.id);
   const sessionWithItems = await getSessionWithItems(session.id);
 
   const displayAddress = location.description || 'Pinned Location 📍';
@@ -230,7 +230,7 @@ async function handleVoiceMessage(
   logger.info(`[WebJS] Voice message from ${fromPhone}`);
 
   const customer = await findOrCreateCustomer(fromPhone, business.id);
-  const session = await findOrCreateSession(customer.id, business.id);
+  const {session} = await findOrCreateSession(customer.id, business.id);
 
   await saveIncomingMessage(session.id, '[Voice message received]');
 
@@ -256,7 +256,7 @@ async function handleImageMessage(
   logger.info(`[WebJS] Image from ${fromPhone}`);
 
   const customer = await findOrCreateCustomer(fromPhone, business.id);
-  const session = await findOrCreateSession(customer.id, business.id);
+  const {session} = await findOrCreateSession(customer.id, business.id);
 
   const caption = message.body || 'No caption';
   await saveIncomingMessage(session.id, `[Image: ${caption}]`);
@@ -291,7 +291,7 @@ async function handleStickerMessage(
   logger.info(`[WebJS] Sticker from ${fromPhone}`);
 
   const customer = await findOrCreateCustomer(fromPhone, business.id);
-  const session = await findOrCreateSession(customer.id, business.id);
+  const {session} = await findOrCreateSession(customer.id, business.id);
 
   // Save sticker as a message for admin to see
   await saveIncomingMessage(session.id, '[Sticker]');

@@ -282,8 +282,13 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_size INTEGER;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS whatsapp_message_id VARCHAR(100);
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'sent';
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_read BOOLEAN DEFAULT false;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS latitude DECIMAL(10, 8);
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS longitude DECIMAL(11, 8);
 
 CREATE INDEX IF NOT EXISTS idx_messages_whatsapp_id ON messages(whatsapp_message_id);
+
+-- Add index for location queries (optional, for performance)
+CREATE INDEX IF NOT EXISTS idx_messages_location ON messages (latitude, longitude) WHERE latitude IS NOT NULL AND longitude IS NOT NULL;
 
 -- ============================================
 -- MEDIA UPLOADS TABLE (for admin uploads before sending)
@@ -490,6 +495,165 @@ ALTER TABLE business_amenities ADD COLUMN IF NOT EXISTS images TEXT[] DEFAULT '{
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS language VARCHAR(5) DEFAULT 'ml';
 COMMENT ON COLUMN sessions.language IS 'Customer preferred language: ml (Malayalam), en (English)';
 
+-- Add custom_cake_context to sessions table
+ALTER TABLE sessions
+ADD COLUMN IF NOT EXISTS custom_cake_context JSONB DEFAULT NULL;
+
 -- ============================================
 -- DONE
 -- ============================================
+
+-- Create admin_intervention_requests table
+CREATE TABLE IF NOT EXISTS admin_intervention_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID NOT NULL REFERENCES businesses(id),
+  session_id UUID NOT NULL REFERENCES sessions(id),
+  customer_id UUID NOT NULL REFERENCES customers(id),
+
+  -- Intervention type
+  type VARCHAR(50) NOT NULL, -- 'custom_cake', 'urgent_delivery', 'out_of_radius', 'party_hall', 'other'
+
+  -- Status lifecycle
+  status VARCHAR(20) DEFAULT 'pending', -- 'pending', 'in_review', 'resolved', 'cancelled', 'expired'
+
+  -- Request details (flexible JSON for different types)
+  request_data JSONB NOT NULL,
+
+  -- AI extracted info (if applicable)
+  ai_analysis JSONB,
+
+  -- Admin response
+  admin_response JSONB,
+  resolved_by UUID, -- References admin_users(id) if it existed, but we'll leave it as UUID for now or check if we need to link to auth.users
+  resolved_at TIMESTAMPTZ,
+
+  -- Timestamps
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  expires_at TIMESTAMPTZ,
+
+  -- Indexes for quick lookup
+  CONSTRAINT fk_business FOREIGN KEY (business_id) REFERENCES businesses(id),
+  CONSTRAINT fk_session FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_intervention_business_status ON admin_intervention_requests(business_id, status);
+CREATE INDEX IF NOT EXISTS idx_intervention_session ON admin_intervention_requests(session_id);
+
+-- Migration from 005_update_cake_flavor_pricing_sizes.sql
+-- Migration: Update cake_flavor_pricing to use sizes JSONB array
+-- This combines weight_grams and base_price into a sizes array with is_base flag
+
+-- Step 1: Add sizes column
+ALTER TABLE cake_flavor_pricing
+ADD COLUMN IF NOT EXISTS sizes JSONB DEFAULT '[]'::jsonb;
+
+-- Step 2: Migrate existing data - group by flavor_name and create sizes array
+-- This creates a temporary function to help with migration
+DO $$
+DECLARE
+    flavor_record RECORD;
+    sizes_array JSONB;
+    first_id UUID;
+BEGIN
+    -- Get unique business_id + flavor_name combinations
+    FOR flavor_record IN
+        SELECT DISTINCT business_id, flavor_name
+        FROM cake_flavor_pricing
+        WHERE sizes = '[]'::jsonb OR sizes IS NULL
+    LOOP
+        -- Build sizes array for this flavor
+        SELECT jsonb_agg(
+            jsonb_build_object(
+                'name', weight_grams || 'g',
+                'price', base_price,
+                'is_base', CASE WHEN weight_grams = 1000 THEN true ELSE false END
+            ) ORDER BY weight_grams
+        )
+        INTO sizes_array
+        FROM cake_flavor_pricing
+        WHERE business_id = flavor_record.business_id
+          AND flavor_name = flavor_record.flavor_name;
+
+        -- Get the first (lowest weight) record ID to keep
+        SELECT id INTO first_id
+        FROM cake_flavor_pricing
+        WHERE business_id = flavor_record.business_id
+          AND flavor_name = flavor_record.flavor_name
+        ORDER BY weight_grams ASC
+        LIMIT 1;
+
+        -- Update the first record with the sizes array
+        UPDATE cake_flavor_pricing
+        SET sizes = COALESCE(sizes_array, '[]'::jsonb),
+            updated_at = NOW()
+        WHERE id = first_id;
+
+        -- Delete duplicate rows (keep only first_id)
+        DELETE FROM cake_flavor_pricing
+        WHERE business_id = flavor_record.business_id
+          AND flavor_name = flavor_record.flavor_name
+          AND id != first_id;
+    END LOOP;
+END $$;
+
+-- Step 3: Drop old columns (weight_grams, base_price)
+ALTER TABLE cake_flavor_pricing DROP COLUMN IF EXISTS weight_grams;
+ALTER TABLE cake_flavor_pricing DROP COLUMN IF EXISTS base_price;
+
+-- Step 4: Drop old unique constraint and indexes
+DROP INDEX IF EXISTS idx_cake_flavor_pricing_business;
+DROP INDEX IF EXISTS idx_cake_flavor_pricing_flavor;
+ALTER TABLE cake_flavor_pricing DROP CONSTRAINT IF EXISTS cake_flavor_pricing_business_id_flavor_name_weight_grams_key;
+
+-- Step 5: Add new unique constraint (one flavor per business)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'cake_flavor_pricing_business_flavor_unique') THEN
+    ALTER TABLE cake_flavor_pricing
+    ADD CONSTRAINT cake_flavor_pricing_business_flavor_unique UNIQUE(business_id, flavor_name);
+  END IF;
+END $$;
+
+-- Step 6: Recreate indexes
+CREATE INDEX idx_cake_flavor_pricing_business ON cake_flavor_pricing(business_id) WHERE is_active = true;
+CREATE INDEX idx_cake_flavor_pricing_flavor ON cake_flavor_pricing(business_id, flavor_name) WHERE is_active = true;
+
+-- Verify migration
+-- SELECT id, business_id, flavor_name, sizes, is_active FROM cake_flavor_pricing;
+
+-- Create menu_pdf_configs table for category-filtered PDF menus
+CREATE TABLE IF NOT EXISTS menu_pdf_configs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  name VARCHAR(100) NOT NULL,           -- e.g., "Cakes Menu", "Snacks Menu"
+  slug VARCHAR(100) NOT NULL,           -- e.g., "cakes-menu" (for file naming)
+  category_ids UUID[] NOT NULL,         -- Array of category IDs
+  pdf_url TEXT,                         -- Supabase Storage URL
+  is_active BOOLEAN DEFAULT true,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(business_id, slug)
+);
+
+CREATE INDEX IF NOT EXISTS idx_menu_pdf_configs_business ON menu_pdf_configs(business_id);
+
+-- Add multilingual name support to menu_pdf_configs
+-- name_en: English name (default/fallback)
+-- name_local: Local language name (could be Malayalam, Hindi, etc.)
+
+ALTER TABLE menu_pdf_configs
+ADD COLUMN IF NOT EXISTS name_en VARCHAR(100),
+ADD COLUMN IF NOT EXISTS name_local VARCHAR(100);
+
+-- Migrate existing 'name' values to name_en
+UPDATE menu_pdf_configs SET name_en = name WHERE name_en IS NULL;
+
+-- Add comment for clarity
+COMMENT ON COLUMN menu_pdf_configs.name_en IS 'Menu name in English';
+COMMENT ON COLUMN menu_pdf_configs.name_local IS 'Menu name in local language (e.g., Malayalam, Hindi)';
+
+-- Add media_id column to messages table for tracking original WhatsApp media IDs
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_id TEXT;
+
+-- Add index for faster lookups
+CREATE INDEX IF NOT EXISTS idx_messages_media_id ON messages(media_id) WHERE media_id IS NOT NULL;

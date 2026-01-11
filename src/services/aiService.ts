@@ -37,6 +37,14 @@ export interface AIContext {
   lastAddedItemId?: string; // NEW: Last added session item ID (for add-on flow)
   amenities?: BusinessAmenity[]; // Available amenities (party hall, etc.)
   customerLanguage?: 'en' | 'ml'; // i18n: Customer's preferred language
+  // Active order context for post-order inquiries
+  activeOrder?: {
+    order_number: string;
+    status: string;
+    total_amount: number;
+    fulfillment_type?: string | null;
+    created_at: string;
+  } | null;
 }
 
 // Format menu for AI - includes item names, sizes, AND PRICES
@@ -199,7 +207,7 @@ ${outletsSection}${amenitiesSection}
 VALID ITEMS: [${itemNamesList}]
 
 📋 JSON RESPONSE FORMAT:
-{"reply": "1-2 sentences", "intent": "add_item|ask_question|modify_order|ready_for_checkout|confirm_order|cancel|show_menu|item_not_available|modify_custom_text|remove_custom_text|cancel_existing_order|check_order_status|conversation_ended|amenity_inquiry|amenity_booking_request", "item": {"name": "exact menu name", "quantity": 1, "size_or_weight": "exact size", "notes": "per-item modifier"}, "items": [{"name": "item1", "quantity": 1, "notes": "modifier1"}, {"name": "item2", "quantity": 1, "notes": "modifier2"}], "fulfillment": {"fulfillment_type": "delivery|takeaway", "delivery_address": "", "delivery_time": ""}, "customText": "cake message", "order_id": "OKS-1", "amenity": {"amenity_slug": "party_hall"}}
+{"reply": "1-2 sentences", "intent": "add_item|ask_question|modify_order|ready_for_checkout|confirm_order|cancel|show_menu|item_not_available|modify_custom_text|remove_custom_text|cancel_existing_order|check_order_status|conversation_ended|amenity_inquiry|amenity_booking_request", "item": {"name": "exact menu name", "quantity": 1, "size_or_weight": "exact size", "notes": "per-item modifier"}, "items": [{"name": "item1", "quantity": 1, "notes": "modifier1"}, {"name": "item2", "quantity": 1, "notes": "modifier2"}], "fulfillment": {"fulfillment_type": "delivery|takeaway", "delivery_address": "", "delivery_time": ""}, "customText": "cake message", "order_id": "OKS-1", "amenity": {"amenity_slug": "party_hall"}, "menu_slug": "cakes-menu"}
 
 📝 ITEM NOTES (per-item modifiers):
 - When customer specifies different notes for items, use "items" array instead of "item"
@@ -225,9 +233,15 @@ INTENTS:
 - remove_addon: Remove addon (include addon.addon_name)
 - custom_cake_inquiry: Customer asking about custom/personalized cake design
 - cancel_existing_order/check_order_status: Include order_id (e.g., "OKS-1")
-- show_menu, item_not_available, cancel, conversation_ended
+- show_menu: Show menu. If customer asks for specific menu (e.g., "cakes menu", "snacks"), include menu_slug matching the config slug
 - amenity_inquiry: Customer asking about an amenity (party hall, etc.) - include amenity.amenity_slug
 - amenity_booking_request: Customer wants to book/reserve an amenity - notify admin
+- requires_intervention: Triggers admin support for urgent delivery, out of radius, or complex requests
+
+🚑 INTERVENTIONS:
+- Urgent Delivery (within 24h): Use "requires_intervention". Ask for date/time and reason.
+- Out of Radius (far distance): Use "requires_intervention". Ask for location details.
+- Special Events (large party): Use "amenity_inquiry" or "requires_intervention" if generic.
 
 🎂 CUSTOM CAKE INQUIRIES:
 When customer asks about custom cakes, personalized designs, "can you make this", "do you do custom cakes", "cake like this image":
@@ -254,10 +268,10 @@ STYLE: Friendly, short replies. Emojis sparingly. Prices as ₹150.
 
 🗣️ LANGUAGE:
 ${context.customerLanguage === 'en'
-  ? `- Respond in English. Customer has chosen English.
+      ? `- Respond in English. Customer has chosen English.
 - Understand both Malayalam and English input.
 - Common Malayalam words: oru=1, randu=2, mathi=enough, sheri=ok, venda=no, athe=yes, nale=tomorrow, innu=today.`
-  : `- DEFAULT: Always respond in Malayalam (മലയാളം). All replies must be in Malayalam.
+      : `- DEFAULT: Always respond in Malayalam (മലയാളം). All replies must be in Malayalam.
 - If customer writes in English or asks "English please"/"respond in English", switch to English.
 - Understand both Malayalam and English input, but RESPOND in Malayalam unless customer explicitly requests English.
 - Common words: oru=1, randu=2, mathi=enough, sheri=ok, venda=no, athe=yes, nale=tomorrow, innu=today.`}
@@ -309,13 +323,34 @@ ${context.customerLanguage === 'en'
     addonsSection = `\nADD-ONS AVAILABLE: ${context.availableAddons.map(a => `"${a.name}" (${a.price !== null ? `₹${a.price}` : 'FREE'})`).join(', ')}`;
   }
 
+  // Active order context for post-order inquiries
+  let activeOrderSection = '';
+  if (context.activeOrder) {
+    const statusMap: Record<string, string> = {
+      'confirmed': 'Order received',
+      'processing': 'Being prepared',
+      'out_for_delivery': 'Out for delivery',
+    };
+    const statusText = statusMap[context.activeOrder.status] || context.activeOrder.status;
+    activeOrderSection = `
+📋 CUSTOMER HAS ACTIVE ORDER:
+- Order #${context.activeOrder.order_number} (Status: ${statusText})
+- Total: ₹${context.activeOrder.total_amount}
+- Type: ${context.activeOrder.fulfillment_type || 'N/A'}
+
+IMPORTANT - ACTIVE ORDER HANDLING:
+- If customer asks about their order status ("where's my order", "order status", "ente order", etc.): Use intent "check_order_status"
+- If customer wants to place a NEW order (clear ordering intent like "I want to order..."): Use intent "add_item" as normal
+- If customer's message is AMBIGUOUS (e.g., "hi", "hello", "can you help"): ASK them politely: "I see you have an order in progress (#${context.activeOrder.order_number}). Would you like to check on your order, or place a new order?"`;
+  }
+
   // Dynamic context that changes per request
   const dynamicContext = `
 
 --- CURRENT SESSION STATE ---
 Date: ${today}, Time: ${currentTime}
 ${currentItemsSection}
-${fulfillmentStatus}${addonsSection}
+${fulfillmentStatus}${addonsSection}${activeOrderSection}
 ${hasItemsInCart ? 'Customer: "That\'s all" → {"reply": "Here\'s your summary.", "intent": "ready_for_checkout"}' : 'Customer: "That\'s all" → {"reply": "Cart is empty!", "intent": "ask_question"}'}`;
 
   return staticPrompt + dynamicContext;

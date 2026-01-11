@@ -1,6 +1,7 @@
 import { supabase } from '../config/database';
 import {
   CakeFlavorPricing,
+  CakeFlavorSize,
   CakeFlavorWithWeights,
   CakeDesignElement,
   STANDARD_CAKE_DESIGN_ELEMENTS,
@@ -13,7 +14,7 @@ import { logger } from '../utils/logger';
 
 /**
  * Get all flavor pricing entries for a business
- * Returns flat list of all flavor+weight combinations
+ * Each flavor has a sizes array with price and is_base flag
  */
 export async function getFlavorPricings(businessId: string): Promise<CakeFlavorPricing[]> {
   const { data, error } = await supabase
@@ -21,45 +22,36 @@ export async function getFlavorPricings(businessId: string): Promise<CakeFlavorP
     .select('*')
     .eq('business_id', businessId)
     .eq('is_active', true)
-    .order('flavor_name', { ascending: true })
-    .order('weight_grams', { ascending: true });
+    .order('flavor_name', { ascending: true });
 
   if (error) {
     logger.error('Failed to fetch flavor pricings', error);
     return [];
   }
 
-  return (data || []) as CakeFlavorPricing[];
+  // Ensure sizes is always an array
+  return (data || []).map(item => ({
+    ...item,
+    sizes: Array.isArray(item.sizes) ? item.sizes : [],
+  })) as CakeFlavorPricing[];
 }
 
 /**
  * Get flavor pricing grouped by flavor name
- * Returns: { flavor_name: "Vanilla", weights: [{ weight_grams: 500, base_price: 600 }, ...] }
+ * Converts sizes array to weights format for AI compatibility
+ * Returns: { flavor_name: "Vanilla", weights: [{ weight_grams: 500, base_price: 600, is_base: false }, ...] }
  */
 export async function getFlavorPricingsGrouped(businessId: string): Promise<CakeFlavorWithWeights[]> {
   const pricings = await getFlavorPricings(businessId);
 
-  const groupedMap = new Map<string, CakeFlavorWithWeights>();
-
-  for (const pricing of pricings) {
-    const existing = groupedMap.get(pricing.flavor_name);
-    if (existing) {
-      existing.weights.push({
-        weight_grams: pricing.weight_grams,
-        base_price: pricing.base_price,
-      });
-    } else {
-      groupedMap.set(pricing.flavor_name, {
-        flavor_name: pricing.flavor_name,
-        weights: [{
-          weight_grams: pricing.weight_grams,
-          base_price: pricing.base_price,
-        }],
-      });
-    }
-  }
-
-  return Array.from(groupedMap.values());
+  return pricings.map(pricing => ({
+    flavor_name: pricing.flavor_name,
+    weights: pricing.sizes.map(size => ({
+      weight_grams: parseWeightFromString(size.name) || 0,
+      base_price: size.price,
+      is_base: size.is_base,
+    })),
+  }));
 }
 
 /**
@@ -88,18 +80,22 @@ export async function getAvailableFlavors(businessId: string): Promise<string[]>
 export async function getWeightsForFlavor(businessId: string, flavorName: string): Promise<number[]> {
   const { data, error } = await supabase
     .from('cake_flavor_pricing')
-    .select('weight_grams')
+    .select('sizes')
     .eq('business_id', businessId)
-    .eq('flavor_name', flavorName)
+    .ilike('flavor_name', flavorName)
     .eq('is_active', true)
-    .order('weight_grams', { ascending: true });
+    .single();
 
-  if (error) {
+  if (error || !data) {
     logger.error('Failed to fetch weights for flavor', error);
     return [];
   }
 
-  return (data || []).map(d => d.weight_grams);
+  const sizes = Array.isArray(data.sizes) ? data.sizes : [];
+  return sizes
+    .map((s: CakeFlavorSize) => parseWeightFromString(s.name) || 0)
+    .filter((w: number) => w > 0)
+    .sort((a: number, b: number) => a - b);
 }
 
 export async function getFlavorPricingById(id: string): Promise<CakeFlavorPricing | null> {
@@ -113,23 +109,24 @@ export async function getFlavorPricingById(id: string): Promise<CakeFlavorPricin
     return null;
   }
 
-  return data as CakeFlavorPricing;
+  return {
+    ...data,
+    sizes: Array.isArray(data.sizes) ? data.sizes : [],
+  } as CakeFlavorPricing;
 }
 
 /**
- * Get specific pricing for a flavor+weight combination
+ * Get flavor pricing by name
  */
-export async function getFlavorWeightPricing(
+export async function getFlavorPricingByName(
   businessId: string,
-  flavorName: string,
-  weightGrams: number
+  flavorName: string
 ): Promise<CakeFlavorPricing | null> {
   const { data, error } = await supabase
     .from('cake_flavor_pricing')
     .select('*')
     .eq('business_id', businessId)
     .ilike('flavor_name', flavorName)
-    .eq('weight_grams', weightGrams)
     .eq('is_active', true)
     .single();
 
@@ -137,22 +134,37 @@ export async function getFlavorWeightPricing(
     return null;
   }
 
-  return data as CakeFlavorPricing;
+  return {
+    ...data,
+    sizes: Array.isArray(data.sizes) ? data.sizes : [],
+  } as CakeFlavorPricing;
 }
 
 export async function createFlavorPricing(
   businessId: string,
   flavorName: string,
-  weightGrams: number,
-  basePrice: number
+  sizes: CakeFlavorSize[]
 ): Promise<CakeFlavorPricing> {
+  // Validate sizes array
+  if (!sizes || sizes.length === 0) {
+    throw new Error('At least one size is required');
+  }
+
+  // Ensure exactly one is_base is true
+  const baseCount = sizes.filter(s => s.is_base).length;
+  if (baseCount === 0) {
+    // Default first size as base if none specified
+    sizes[0].is_base = true;
+  } else if (baseCount > 1) {
+    throw new Error('Only one size can be marked as base');
+  }
+
   const { data, error } = await supabase
     .from('cake_flavor_pricing')
     .insert({
       business_id: businessId,
       flavor_name: flavorName,
-      weight_grams: weightGrams,
-      base_price: basePrice,
+      sizes: sizes,
       is_active: true,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -165,13 +177,29 @@ export async function createFlavorPricing(
     throw new Error('Failed to create flavor pricing');
   }
 
-  return data as CakeFlavorPricing;
+  return {
+    ...data,
+    sizes: Array.isArray(data.sizes) ? data.sizes : [],
+  } as CakeFlavorPricing;
 }
 
 export async function updateFlavorPricing(
   id: string,
-  updates: Partial<Pick<CakeFlavorPricing, 'flavor_name' | 'weight_grams' | 'base_price' | 'is_active'>>
+  updates: Partial<Pick<CakeFlavorPricing, 'flavor_name' | 'sizes' | 'is_active'>>
 ): Promise<CakeFlavorPricing> {
+  // If sizes is being updated, validate it
+  if (updates.sizes) {
+    if (updates.sizes.length === 0) {
+      throw new Error('At least one size is required');
+    }
+    const baseCount = updates.sizes.filter(s => s.is_base).length;
+    if (baseCount === 0) {
+      updates.sizes[0].is_base = true;
+    } else if (baseCount > 1) {
+      throw new Error('Only one size can be marked as base');
+    }
+  }
+
   const { data, error } = await supabase
     .from('cake_flavor_pricing')
     .update({
@@ -187,7 +215,10 @@ export async function updateFlavorPricing(
     throw new Error('Failed to update flavor pricing');
   }
 
-  return data as CakeFlavorPricing;
+  return {
+    ...data,
+    sizes: Array.isArray(data.sizes) ? data.sizes : [],
+  } as CakeFlavorPricing;
 }
 
 export async function deleteFlavorPricing(id: string): Promise<boolean> {
@@ -205,23 +236,28 @@ export async function deleteFlavorPricing(id: string): Promise<boolean> {
 }
 
 /**
- * Bulk create flavor pricing entries
- * Useful for adding all weights for a new flavor at once
+ * Bulk create flavor pricings (multiple flavors at once)
+ * Each flavor object should have flavor_name and sizes array
  */
 export async function createFlavorPricingBulk(
   businessId: string,
-  flavorName: string,
-  weights: Array<{ weight_grams: number; base_price: number }>
+  flavors: Array<{ flavor_name: string; sizes: CakeFlavorSize[] }>
 ): Promise<CakeFlavorPricing[]> {
-  const records = weights.map(w => ({
-    business_id: businessId,
-    flavor_name: flavorName,
-    weight_grams: w.weight_grams,
-    base_price: w.base_price,
-    is_active: true,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  }));
+  const records = flavors.map(f => {
+    // Ensure one is_base per flavor
+    const baseCount = f.sizes.filter(s => s.is_base).length;
+    if (baseCount === 0 && f.sizes.length > 0) {
+      f.sizes[0].is_base = true;
+    }
+    return {
+      business_id: businessId,
+      flavor_name: f.flavor_name,
+      sizes: f.sizes,
+      is_active: true,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+  });
 
   const { data, error } = await supabase
     .from('cake_flavor_pricing')
@@ -233,7 +269,10 @@ export async function createFlavorPricingBulk(
     throw new Error('Failed to bulk create flavor pricing');
   }
 
-  return (data || []) as CakeFlavorPricing[];
+  return (data || []).map(item => ({
+    ...item,
+    sizes: Array.isArray(item.sizes) ? item.sizes : [],
+  })) as CakeFlavorPricing[];
 }
 
 // ============================================
@@ -414,30 +453,18 @@ export async function getFullPricingConfig(businessId: string): Promise<CakePric
 }
 
 /**
- * Group flat flavor pricings into grouped format
+ * Convert CakeFlavorPricing[] to CakeFlavorWithWeights[] format
+ * Used for AI prompt compatibility
  */
 function groupFlavorPricings(pricings: CakeFlavorPricing[]): CakeFlavorWithWeights[] {
-  const groupedMap = new Map<string, CakeFlavorWithWeights>();
-
-  for (const pricing of pricings) {
-    const existing = groupedMap.get(pricing.flavor_name);
-    if (existing) {
-      existing.weights.push({
-        weight_grams: pricing.weight_grams,
-        base_price: pricing.base_price,
-      });
-    } else {
-      groupedMap.set(pricing.flavor_name, {
-        flavor_name: pricing.flavor_name,
-        weights: [{
-          weight_grams: pricing.weight_grams,
-          base_price: pricing.base_price,
-        }],
-      });
-    }
-  }
-
-  return Array.from(groupedMap.values());
+  return pricings.map(pricing => ({
+    flavor_name: pricing.flavor_name,
+    weights: pricing.sizes.map(size => ({
+      weight_grams: parseWeightFromString(size.name) || 0,
+      base_price: size.price,
+      is_base: size.is_base,
+    })),
+  }));
 }
 
 // ============================================
@@ -445,20 +472,24 @@ function groupFlavorPricings(pricings: CakeFlavorPricing[]): CakeFlavorWithWeigh
 // ============================================
 
 /**
- * Calculate price for a custom weight based on 1kg price
- * Uses proportional calculation: (1kg_price / 1000) * requested_grams
+ * Calculate price for a custom weight based on base price
+ * Uses proportional calculation: (base_price / base_grams) * requested_grams
+ * @param basePrice - Price of the base size
+ * @param requestedGrams - Weight in grams that customer wants
+ * @param baseGrams - Weight in grams of the base size (defaults to 1000g/1kg)
  */
 export function calculateCustomWeightPrice(
-  oneKgPrice: number,
-  requestedGrams: number
+  basePrice: number,
+  requestedGrams: number,
+  baseGrams: number = 1000
 ): number {
-  const pricePerGram = oneKgPrice / 1000;
+  const pricePerGram = basePrice / baseGrams;
   return Math.round(pricePerGram * requestedGrams);
 }
 
 /**
  * Find pricing for a flavor and weight
- * If exact weight not found, calculates from 1kg price
+ * Uses is_base flag to determine which size to use for custom weight calculations
  */
 export function findFlavorWeightPrice(
   flavorName: string,
@@ -467,43 +498,52 @@ export function findFlavorWeightPrice(
 ): { price: number; isCalculated: boolean } | null {
   const normalizedFlavor = flavorName.toLowerCase().trim();
 
-  // Filter to this flavor
-  const flavorPricings = pricings.filter(
+  // Find the flavor (exact match first)
+  let flavorPricing = pricings.find(
     p => p.flavor_name.toLowerCase() === normalizedFlavor
   );
 
-  if (flavorPricings.length === 0) {
-    // Try partial match
-    const partialMatch = pricings.filter(
+  // Try partial match if no exact match
+  if (!flavorPricing) {
+    flavorPricing = pricings.find(
       p => p.flavor_name.toLowerCase().includes(normalizedFlavor) ||
            normalizedFlavor.includes(p.flavor_name.toLowerCase())
     );
-    if (partialMatch.length > 0) {
-      return findFlavorWeightPrice(partialMatch[0].flavor_name, weightGrams, pricings);
-    }
+  }
+
+  if (!flavorPricing || !flavorPricing.sizes || flavorPricing.sizes.length === 0) {
     return null;
   }
 
-  // 1. Exact weight match
-  const exactMatch = flavorPricings.find(p => p.weight_grams === weightGrams);
-  if (exactMatch) {
-    return { price: exactMatch.base_price, isCalculated: false };
+  const sizes = flavorPricing.sizes;
+
+  // 1. Exact weight match in sizes
+  for (const size of sizes) {
+    const sizeGrams = parseWeightFromString(size.name);
+    if (sizeGrams === weightGrams) {
+      return { price: size.price, isCalculated: false };
+    }
   }
 
-  // 2. Calculate from 1kg price (1000g)
-  const oneKgPricing = flavorPricings.find(p => p.weight_grams === 1000);
-  if (oneKgPricing) {
-    const calculatedPrice = calculateCustomWeightPrice(oneKgPricing.base_price, weightGrams);
+  // 2. Calculate from base size (is_base = true)
+  const baseSize = sizes.find(s => s.is_base);
+  if (baseSize) {
+    const baseGrams = parseWeightFromString(baseSize.name);
+    if (baseGrams && baseGrams > 0) {
+      const calculatedPrice = calculateCustomWeightPrice(baseSize.price, weightGrams, baseGrams);
+      return { price: calculatedPrice, isCalculated: true };
+    }
+  }
+
+  // 3. Fallback: calculate from first available size
+  const firstSize = sizes[0];
+  const firstGrams = parseWeightFromString(firstSize.name);
+  if (firstGrams && firstGrams > 0) {
+    const calculatedPrice = calculateCustomWeightPrice(firstSize.price, weightGrams, firstGrams);
     return { price: calculatedPrice, isCalculated: true };
   }
 
-  // 3. Fallback: calculate from highest available weight
-  const sorted = [...flavorPricings].sort((a, b) => b.weight_grams - a.weight_grams);
-  const highest = sorted[0];
-  const pricePerGram = highest.base_price / highest.weight_grams;
-  const calculatedPrice = Math.round(pricePerGram * weightGrams);
-
-  return { price: calculatedPrice, isCalculated: true };
+  return null;
 }
 
 /**
@@ -571,12 +611,16 @@ export function formatPricingConfigForAI(config: CakePricingConfig): string {
   } else {
     config.flavorsGrouped.forEach(f => {
       const weightPrices = f.weights
-        .map(w => `${w.weight_grams}g: ₹${w.base_price}`)
+        .map(w => {
+          const baseMarker = w.is_base ? ' [BASE]' : '';
+          return `${w.weight_grams}g: ₹${w.base_price}${baseMarker}`;
+        })
         .join(', ');
       text += `- ${f.flavor_name}: ${weightPrices}\n`;
     });
-    text += '\n💡 For custom weights (e.g., 2kg, 3kg), calculate from 1kg price:\n';
-    text += '   2kg = 1kg price × 2, 1.5kg = 1kg price × 1.5, etc.\n';
+    text += '\n💡 For custom weights, calculate from the [BASE] size price:\n';
+    text += '   Example: If 1kg [BASE] = ₹900, then 2kg = ₹1800, 1.5kg = ₹1350\n';
+    text += '   Formula: (base_price / base_weight) × requested_weight\n';
   }
 
   text += '\n### DESIGN ELEMENT PRICING:\n';

@@ -63,6 +63,7 @@ export const en = {
     locationSavedThenAskTime: "📍 Location saved!\n\n⏰ What time would you like delivery?\n_Examples: 'today 5pm', 'tomorrow 3pm', 'nale 4pm', 'innu evening'_",
     locationSavedThenAskDate: "📍 Location saved!\n\nWhen would you like delivery?",
     locationSavedForLater: "Thanks for sharing your location! 📍 We've saved it for your delivery.",
+    locationSavedAskFullAddress: "📍 Location received!\n\nPlease provide your *full delivery address* with landmark for our delivery person.\n\n_Example: 'House No. 12, Near Masjid, MG Road'_",
     pickupLocationConfirmedAskDate: "📍 Pickup at: *{{outlet}}*\n\nWhen would you like to pick up?",
   },
 
@@ -110,14 +111,14 @@ export const en = {
       cancelled: "This order was cancelled.",
       inProgress: "Order in progress",
     },
-    statusTitle: "📋 *Order #${orderNumber}*",
+    statusTitle: "📋 *Order #{{orderNumber}}*",
     needHelp: "\n_Need help? Just ask!_",
     cancel: {
-      notFound: "Order #${orderNumber} not found. Please check the order number and try again.",
-      alreadyCancelled: "Order #${orderNumber} is already cancelled.",
-      alreadyCompleted: "Order #${orderNumber} is already completed and cannot be cancelled.",
+      notFound: "Order #{{orderNumber}} not found. Please check the order number and try again.",
+      alreadyCancelled: "Order #{{orderNumber}} is already cancelled.",
+      alreadyCompleted: "Order #{{orderNumber}} is already completed and cannot be cancelled.",
       failed: "Failed to cancel order. Please try again or contact us.",
-      success: "Order #${orderNumber} has been cancelled successfully.",
+      success: "Order #{{orderNumber}} has been cancelled successfully.",
     },
     statusText: {
       confirmed: "Order Confirmed - We are preparing your order",
@@ -125,8 +126,9 @@ export const en = {
       completed: "Completed - Your order has been delivered/picked up",
       cancelled: "Cancelled - This order was cancelled",
     },
-    statusDetailTitle: "📋 *Order Status: #${orderNumber}*",
+    statusDetailTitle: "📋 *Order Status: #{{orderNumber}}*",
     orderedDate: "\n📅 Ordered: {{date}}",
+    confirmPrompt: "Please reply *YES* to confirm your order.",
   },
 
   // Time related
@@ -139,10 +141,15 @@ export const en = {
     pickupTime: "pickup",
     examples: "Examples: 'today 5pm', 'tomorrow 3pm', 'nale 4pm', 'innu evening'",
     calculationError: "Sorry, there was an issue. Please type your preferred time.",
+    at: "at",
+    closedOnDay: "We're closed on {{day}}. We're open on: {{openDays}}.",
+    tooEarlySimple: "That time is too early. We can accept orders from {{time}} onwards.",
+    tooLate: "That time is too late. We close at {{closeTime}}, so the latest we can accept orders is {{latestTime}}.",
   },
 
   // Menu
   menu: {
+    aiWelcome: "Hi there! I'm your friendly AI assistant for {{businessName}}, here to help you place your order.\n\nTap the button below to explore our menu!",
     welcome: "Welcome to {{businessName}}! Tap below to browse our menu.",
     browseBtn: "Browse Menu",
     ourMenu: "Our Menu",
@@ -195,7 +202,14 @@ export const en = {
     contactSupport: "For custom cake designs, please contact our team at {{phone}}. They'll help you with personalized cake orders!",
     timeConfirmRequestButton: "⏰ We've noted your preferred {{type}} time: *{{time}}*\n\nSince this is a custom designed cake, our team will confirm if we can {{action}} by this time.\n\n_You'll receive a confirmation shortly. Thank you for your patience! 🙏_",
   },
-  
+
+  // Urgent Order
+  urgentOrder: {
+    waitingConfirmation: "⏰ Your requested {{type}} time (*{{time}}*) is sooner than our usual preparation time.\n\nOur team is checking if we can accommodate this. Please wait for confirmation.\n\n_You'll hear back shortly! 🙏_",
+    approved: "✅ Great news! Your requested time has been confirmed.\n\nLet's continue with your order.",
+    rejected: "We're unable to fulfill your order by {{time}}.\n\nPlease choose a later time (minimum {{minWait}} minutes from now).",
+  },
+
   // Amenity
   amenity: {
     bookingRequestConfirmation: "Thank you for your interest in {{amenity}}! Our team has been notified and will contact you shortly to confirm your booking.",

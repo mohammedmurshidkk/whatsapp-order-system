@@ -17,6 +17,7 @@ DROP TABLE IF EXISTS business_outlets CASCADE;
 DROP TABLE IF EXISTS customers CASCADE;
 DROP TABLE IF EXISTS admin_users CASCADE;
 DROP TABLE IF EXISTS super_admins CASCADE;
+DROP TABLE IF EXISTS menu_pdf_configs CASCADE;
 DROP TABLE IF EXISTS businesses CASCADE;
 
 -- ============================================
@@ -284,6 +285,10 @@ CREATE TABLE sessions (
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS language VARCHAR(5) DEFAULT 'ml';
 COMMENT ON COLUMN sessions.language IS 'Customer preferred language: ml (Malayalam), en (English)';
 
+-- Add custom_cake_context to sessions table
+ALTER TABLE sessions
+ADD COLUMN IF NOT EXISTS custom_cake_context JSONB DEFAULT NULL;
+
 CREATE INDEX idx_sessions_customer ON sessions(customer_id);
 CREATE INDEX idx_sessions_status ON sessions(status, last_message_at);
 
@@ -344,11 +349,16 @@ CREATE TABLE messages (
   whatsapp_message_id VARCHAR(100),
   status VARCHAR(20) DEFAULT 'sent',
   is_read BOOLEAN DEFAULT false,
+  latitude DECIMAL(10, 8),
+  longitude DECIMAL(11, 8),
   created_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE INDEX idx_messages_session ON messages(session_id, created_at);
 CREATE INDEX idx_messages_whatsapp_id ON messages(whatsapp_message_id);
+
+-- Add index for location queries (optional, for performance)
+CREATE INDEX idx_messages_location ON messages (latitude, longitude) WHERE latitude IS NOT NULL AND longitude IS NOT NULL;
 
 -- ============================================
 -- MEDIA UPLOADS TABLE (for admin uploads before sending)
@@ -430,19 +440,18 @@ ALTER TABLE businesses ADD COLUMN IF NOT EXISTS custom_cake_enabled BOOLEAN DEFA
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS custom_cake_auto_send BOOLEAN DEFAULT false;
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS custom_cake_quote_expiry_hours INTEGER DEFAULT 24;
 
--- Combined Flavor + Weight pricing per business
--- Each flavor has its own price for each weight (e.g., Vanilla 500g: 600, Vanilla 1kg: 800, Chocolate 500g: 700)
--- For custom weights (2kg, 3kg), price is calculated proportionally from 1kg price
+-- Flavor pricing with sizes array (like menu_items)
+-- Each size has: { name: "500g", price: 600, is_base: false }
+-- The is_base=true size is used to calculate custom weights (e.g., 2kg = base_price * 2)
 CREATE TABLE cake_flavor_pricing (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
   flavor_name VARCHAR(100) NOT NULL,
-  weight_grams INTEGER NOT NULL,
-  base_price DECIMAL(10, 2) NOT NULL,
+  sizes JSONB DEFAULT '[]'::jsonb,  -- Array of { name: string, price: number, is_base: boolean }
   is_active BOOLEAN DEFAULT true,
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW(),
-  UNIQUE(business_id, flavor_name, weight_grams)
+  UNIQUE(business_id, flavor_name)
 );
 
 CREATE INDEX idx_cake_flavor_pricing_business ON cake_flavor_pricing(business_id) WHERE is_active = true;
@@ -516,5 +525,71 @@ CREATE INDEX idx_cake_price_quotes_pending ON cake_price_quotes(business_id) WHE
   CREATE INDEX idx_business_amenities_slug ON business_amenities(business_id, slug);
 
 -- ============================================
+-- MENU PDF CONFIGS TABLE
+-- ============================================
+CREATE TABLE menu_pdf_configs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  name VARCHAR(100) NOT NULL,           -- e.g., "Cakes Menu", "Snacks Menu"
+  name_en VARCHAR(100),
+  name_local VARCHAR(100),
+  slug VARCHAR(100) NOT NULL,           -- e.g., "cakes-menu" (for file naming)
+  category_ids UUID[] NOT NULL,         -- Array of category IDs
+  pdf_url TEXT,                         -- Supabase Storage URL
+  is_active BOOLEAN DEFAULT true,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(business_id, slug)
+);
+
+COMMENT ON COLUMN menu_pdf_configs.name_en IS 'Menu name in English';
+COMMENT ON COLUMN menu_pdf_configs.name_local IS 'Menu name in local language (e.g., Malayalam, Hindi)';
+
+CREATE INDEX idx_menu_pdf_configs_business ON menu_pdf_configs(business_id);
+
+-- ============================================
 -- DONE
 -- ============================================
+
+-- Create admin_intervention_requests table
+CREATE TABLE IF NOT EXISTS admin_intervention_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID NOT NULL REFERENCES businesses(id),
+  session_id UUID NOT NULL REFERENCES sessions(id),
+  customer_id UUID NOT NULL REFERENCES customers(id),
+
+  -- Intervention type
+  type VARCHAR(50) NOT NULL, -- 'custom_cake', 'urgent_delivery', 'out_of_radius', 'party_hall', 'other'
+
+  -- Status lifecycle
+  status VARCHAR(20) DEFAULT 'pending', -- 'pending', 'in_review', 'resolved', 'cancelled', 'expired'
+
+  -- Request details (flexible JSON for different types)
+  request_data JSONB NOT NULL,
+
+  -- AI extracted info (if applicable)
+  ai_analysis JSONB,
+
+  -- Admin response
+  admin_response JSONB,
+  resolved_by UUID, -- References admin_users(id) if it existed, but we'll leave it as UUID for now or check if we need to link to auth.users
+  resolved_at TIMESTAMPTZ,
+
+  -- Timestamps
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  expires_at TIMESTAMPTZ,
+
+  -- Indexes for quick lookup
+  CONSTRAINT fk_business FOREIGN KEY (business_id) REFERENCES businesses(id),
+  CONSTRAINT fk_session FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_intervention_business_status ON admin_intervention_requests(business_id, status);
+CREATE INDEX IF NOT EXISTS idx_intervention_session ON admin_intervention_requests(session_id);
+
+-- Add media_id column to messages table for tracking original WhatsApp media IDs
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_id TEXT;
+
+-- Add index for faster lookups
+CREATE INDEX IF NOT EXISTS idx_messages_media_id ON messages(media_id) WHERE media_id IS NOT NULL;
+

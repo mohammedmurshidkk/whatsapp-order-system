@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { supabase } from '../config/database';
 import { AuthRequest, getBusinessId } from '../middleware/auth';
 import { logger } from '../utils/logger';
+import { completeSession } from '../services/sessionService';
 
 // List orders with filters
 export async function listOrders(req: AuthRequest, res: Response): Promise<void> {
@@ -208,7 +209,7 @@ export async function updateOrderStatus(req: AuthRequest, res: Response): Promis
     const { orderId } = req.params;
     const { status } = req.body;
 
-    const validStatuses = ['confirmed', 'processing', 'completed', 'cancelled'];
+    const validStatuses = ['confirmed', 'processing', 'out_for_delivery', 'completed', 'cancelled'];
     if (!status || !validStatuses.includes(status)) {
       res.status(400).json({
         error: 'Invalid status. Must be one of: ' + validStatuses.join(', '),
@@ -242,6 +243,17 @@ export async function updateOrderStatus(req: AuthRequest, res: Response): Promis
     }
 
     logger.info(`Order ${orderId} status updated to ${status}`);
+
+    // Complete session when order is completed or cancelled
+    if ((status === 'completed' || status === 'cancelled') && order.session_id) {
+      try {
+        await completeSession(order.session_id);
+        logger.info(`Session ${order.session_id} completed (order ${status})`);
+      } catch (sessionError) {
+        logger.warn(`Failed to complete session ${order.session_id}:`, sessionError);
+        // Don't fail the request - order status was updated successfully
+      }
+    }
 
     res.status(200).json({ success: true, status });
   } catch (error) {

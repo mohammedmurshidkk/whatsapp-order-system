@@ -121,13 +121,15 @@ export async function storeMediaInSupabase(
 
 /**
  * Process incoming WhatsApp media: download and store
+ * @param includeBuffer - If true, also returns the raw buffer for AI analysis
  */
 export async function processIncomingMedia(
   mediaId: string,
   mimeType: string,
   businessId: string,
-  accessToken?: string
-): Promise<{ mediaUrl: string; fileSize: number } | null> {
+  accessToken?: string,
+  includeBuffer: boolean = false
+): Promise<{ mediaUrl: string; fileSize: number; buffer?: Buffer } | null> {
   try {
     // Download from WhatsApp
     const { buffer, size } = await downloadWhatsAppMedia(mediaId, accessToken);
@@ -140,6 +142,7 @@ export async function processIncomingMedia(
     return {
       mediaUrl: publicUrl,
       fileSize: size,
+      ...(includeBuffer && { buffer }), // Include buffer only if requested
     };
   } catch (error) {
     logger.error(`Failed to process incoming media: ${mediaId}`, error);
@@ -328,7 +331,7 @@ async function convertWebmToOgg(inputBuffer: Buffer): Promise<Buffer> {
       const fs = await import('fs');
       if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
       if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-    } catch {}
+    } catch { }
     logger.error('Failed to convert audio', error);
     throw new Error('Failed to convert audio format');
   }
@@ -495,6 +498,62 @@ export async function sendWhatsAppText(
     return response.data.messages?.[0]?.id || null;
   } catch (error) {
     logger.error('Failed to send WhatsApp text', error);
+    throw error;
+  }
+}
+
+/**
+ * Send location message via WhatsApp
+ */
+export async function sendWhatsAppLocation(
+  to: string,
+  latitude: number,
+  longitude: number,
+  name?: string,
+  address?: string,
+  phoneNumberId?: string,
+  accessToken?: string
+): Promise<string | null> {
+  const token = accessToken || process.env.WHATSAPP_ACCESS_TOKEN;
+  const numId = phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID;
+
+  if (!token || !numId) {
+    logger.info(`[WhatsApp Mock] Location to: ${to}, Lat: ${latitude}, Lng: ${longitude}`);
+    return null;
+  }
+
+  const payload: any = {
+    messaging_product: 'whatsapp',
+    to,
+    type: 'location',
+    location: {
+      latitude,
+      longitude,
+    },
+  };
+
+  if (name) {
+    payload.location.name = name;
+  }
+  if (address) {
+    payload.location.address = address;
+  }
+
+  try {
+    const response = await axios.post(
+      `${WHATSAPP_API_BASE}/${numId}/messages`,
+      payload,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+    logger.info(`WhatsApp location sent to ${to}: ${latitude}, ${longitude}`);
+    return response.data.messages?.[0]?.id || null;
+  } catch (error) {
+    logger.error('Failed to send WhatsApp location', error);
     throw error;
   }
 }

@@ -166,6 +166,7 @@ export interface Session {
   ai_paused: boolean;  // True when human has taken over
   paused_at: string | null;
   paused_by: string | null;  // Who paused (business owner name/id)
+  custom_cake_context?: CustomCakeContext | null; // Pending custom cake inquiry context
   fulfillment_type?: FulfillmentType | null;
   delivery_address?: string | null;
   delivery_latitude?: number | null;
@@ -212,17 +213,20 @@ export interface Message {
   content: string;
   created_at: string;
   // Media fields (for images, videos, audio, stickers, documents)
-  message_type?: 'text' | 'image' | 'video' | 'audio' | 'document' | 'sticker';
+  message_type?: 'text' | 'image' | 'video' | 'audio' | 'document' | 'sticker' | 'location';
   media_url?: string | null;
   media_mime_type?: string | null;
   media_caption?: string | null;
   media_filename?: string | null;
   media_duration?: number | null;
   media_size?: number | null;
+  // Location fields
+  latitude?: number | null;
+  longitude?: number | null;
 }
 
 // Order types
-export type OrderStatus = 'confirmed' | 'processing' | 'completed' | 'cancelled';
+export type OrderStatus = 'confirmed' | 'processing' | 'out_for_delivery' | 'completed' | 'cancelled';
 
 export interface Order {
   id: string;
@@ -302,7 +306,8 @@ export type AIIntent =
   | 'conversation_ended'
   | 'item_not_available'
   | 'amenity_inquiry'        // Customer asking about an amenity (party hall, etc.)
-  | 'amenity_booking_request'; // Customer wants to book/reserve an amenity
+  | 'amenity_booking_request' // Customer wants to book/reserve an amenity
+  | 'requires_intervention'; // Generic intervention needed (admin attention)
 
 export interface AIAddonResponse {
   addon_id?: string;
@@ -335,6 +340,7 @@ export interface AIAmenityResponse {
 }
 
 export interface AIResponse {
+  analysis?: Record<string, unknown> | undefined;
   reply: string;
   intent: AIIntent;
   item?: AIItemResponse;
@@ -445,25 +451,32 @@ export interface TestMessageRequest {
 // CUSTOM CAKE PRICING TYPES
 // ============================================
 
-// Combined Flavor + Weight pricing
-// Each flavor has its own price for each weight (e.g., Vanilla 500g: 600, Chocolate 1kg: 1200)
+// Cake flavor size (like MenuItem sizes)
+export interface CakeFlavorSize {
+  name: string;      // e.g., "500g", "1kg", "2kg"
+  price: number;     // price for this size
+  is_base: boolean;  // if true, used to calculate custom weights (e.g., 2kg = base * 2)
+}
+
+// Combined Flavor + Size pricing (like MenuItem with sizes)
 export interface CakeFlavorPricing {
   id: string;
   business_id: string;
   flavor_name: string;
-  weight_grams: number;
-  base_price: number;
+  sizes: CakeFlavorSize[];  // Array of size options with prices
   is_active: boolean;
   created_at: string;
   updated_at: string;
 }
 
 // Grouped format for display (flavor with all its weight options)
+// Kept for backward compatibility with AI prompt formatting
 export interface CakeFlavorWithWeights {
   flavor_name: string;
   weights: Array<{
     weight_grams: number;
     base_price: number;
+    is_base?: boolean;
   }>;
 }
 
@@ -560,24 +573,85 @@ export const STANDARD_CAKE_DESIGN_ELEMENTS: Array<{
   default_price: number;
   price_type: CakeDesignPriceType;
 }> = [
-  { element_key: 'extra_tier', element_label: 'Extra Tier', default_price: 500, price_type: 'fixed' },
-  { element_key: 'fondant_covering', element_label: 'Fondant Covering', default_price: 300, price_type: 'fixed' },
-  { element_key: 'buttercream_finish', element_label: 'Buttercream Finish', default_price: 0, price_type: 'fixed' },
-  { element_key: 'fondant_bow', element_label: 'Fondant Bow', default_price: 100, price_type: 'fixed' },
-  { element_key: 'crown_topper', element_label: 'Crown/Tiara Topper', default_price: 150, price_type: 'fixed' },
-  { element_key: 'doll_topper', element_label: 'Doll/Figurine Topper', default_price: 250, price_type: 'fixed' },
-  { element_key: 'number_topper', element_label: 'Number Topper', default_price: 80, price_type: 'fixed' },
-  { element_key: 'name_letters', element_label: 'Name Letters', default_price: 30, price_type: 'per_unit' },
-  { element_key: 'decorative_spheres', element_label: 'Decorative Spheres/Balls', default_price: 100, price_type: 'fixed' },
-  { element_key: 'edible_print', element_label: 'Edible Print', default_price: 200, price_type: 'fixed' },
-  { element_key: 'hand_painted', element_label: 'Hand-Painted Details', default_price: 400, price_type: 'fixed' },
-  { element_key: 'quilted_pattern', element_label: 'Quilted/Textured Pattern', default_price: 200, price_type: 'fixed' },
-  { element_key: 'gold_accents', element_label: 'Gold Accents', default_price: 150, price_type: 'fixed' },
-  { element_key: 'silver_accents', element_label: 'Silver Accents', default_price: 150, price_type: 'fixed' },
-  { element_key: 'fresh_flowers', element_label: 'Fresh Flowers', default_price: 300, price_type: 'fixed' },
-  { element_key: 'chocolate_drizzle', element_label: 'Chocolate Drizzle', default_price: 100, price_type: 'fixed' },
-  { element_key: 'macarons', element_label: 'Macarons', default_price: 50, price_type: 'per_unit' },
-  { element_key: 'meringue_kisses', element_label: 'Meringue Kisses', default_price: 30, price_type: 'per_unit' },
-  { element_key: 'butterfly_decor', element_label: 'Butterfly Decorations', default_price: 80, price_type: 'fixed' },
-  { element_key: 'theme_decorations', element_label: 'Theme Decorations', default_price: 200, price_type: 'fixed' },
-];
+    { element_key: 'extra_tier', element_label: 'Extra Tier', default_price: 500, price_type: 'fixed' },
+    { element_key: 'fondant_covering', element_label: 'Fondant Covering', default_price: 300, price_type: 'fixed' },
+    { element_key: 'buttercream_finish', element_label: 'Buttercream Finish', default_price: 0, price_type: 'fixed' },
+    { element_key: 'fondant_bow', element_label: 'Fondant Bow', default_price: 100, price_type: 'fixed' },
+    { element_key: 'crown_topper', element_label: 'Crown/Tiara Topper', default_price: 150, price_type: 'fixed' },
+    { element_key: 'doll_topper', element_label: 'Doll/Figurine Topper', default_price: 250, price_type: 'fixed' },
+    { element_key: 'number_topper', element_label: 'Number Topper', default_price: 80, price_type: 'fixed' },
+    { element_key: 'name_letters', element_label: 'Name Letters', default_price: 30, price_type: 'per_unit' },
+    { element_key: 'decorative_spheres', element_label: 'Decorative Spheres/Balls', default_price: 100, price_type: 'fixed' },
+    { element_key: 'edible_print', element_label: 'Edible Print', default_price: 200, price_type: 'fixed' },
+    { element_key: 'hand_painted', element_label: 'Hand-Painted Details', default_price: 400, price_type: 'fixed' },
+    { element_key: 'quilted_pattern', element_label: 'Quilted/Textured Pattern', default_price: 200, price_type: 'fixed' },
+    { element_key: 'gold_accents', element_label: 'Gold Accents', default_price: 150, price_type: 'fixed' },
+    { element_key: 'silver_accents', element_label: 'Silver Accents', default_price: 150, price_type: 'fixed' },
+    { element_key: 'fresh_flowers', element_label: 'Fresh Flowers', default_price: 300, price_type: 'fixed' },
+    { element_key: 'chocolate_drizzle', element_label: 'Chocolate Drizzle', default_price: 100, price_type: 'fixed' },
+    { element_key: 'macarons', element_label: 'Macarons', default_price: 50, price_type: 'per_unit' },
+    { element_key: 'meringue_kisses', element_label: 'Meringue Kisses', default_price: 30, price_type: 'per_unit' },
+    { element_key: 'butterfly_decor', element_label: 'Butterfly Decorations', default_price: 80, price_type: 'fixed' },
+    { element_key: 'theme_decorations', element_label: 'Theme Decorations', default_price: 200, price_type: 'fixed' },
+  ];
+
+// ============================================
+// CUSTOM CAKE CONTEXT
+// ============================================
+
+export interface CustomCakeContext {
+  awaiting_image?: boolean;
+  pending_image_id?: string;
+  pending_image_timestamp?: string;
+  image_url?: string;
+  weight?: string;
+  flavor?: string;
+  inquiry_type?: 'text_first' | 'image_first';
+  awaiting_clarification?: boolean;
+}
+
+// ============================================
+// MENU PDF CONFIG
+// ============================================
+
+export interface MenuPdfConfig {
+  id: string;
+  business_id: string;
+  name: string;
+  slug: string;
+  category_ids: string[];
+  pdf_url: string | null;
+  is_active: boolean;
+  name_en: string | null;
+  name_local: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ============================================
+// INTERVENTION TYPES
+// ============================================
+
+export type InterventionType = 'custom_cake' | 'custom_cake_time_confirmation' | 'urgent_delivery' | 'out_of_radius' | 'party_hall' | 'other';
+export type InterventionStatus = 'pending' | 'in_review' | 'resolved' | 'cancelled' | 'expired';
+
+export interface InterventionRequest {
+  id: string;
+  business_id: string;
+  session_id: string;
+  customer_id: string;
+  type: InterventionType;
+  status: InterventionStatus;
+  request_data: Record<string, unknown>;
+  ai_analysis?: Record<string, unknown>;
+  admin_response?: {
+    approved: boolean;
+    price?: number;
+    message?: string;
+    notes?: string;
+  };
+  resolved_by?: string;
+  resolved_at?: string;
+  created_at: string;
+  expires_at?: string;
+}

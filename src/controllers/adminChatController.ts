@@ -12,6 +12,7 @@ import {
   saveMediaUpload,
   getMediaUpload,
   validateMediaFile,
+  sendWhatsAppLocation,
   getMediaTypeFromMimeType,
   MediaType,
 } from '../services/mediaService';
@@ -224,7 +225,7 @@ export async function sendReply(req: AuthRequest, res: Response): Promise<void> 
     const businessId = getBusinessId(req);
     const adminId = req.user?.id;
     const { sessionId } = req.params;
-    const { type, content, media_id, caption, filename, quote_id, quote_price } = req.body;
+    const { type, content, media_id, media_url: directMediaUrl, media_mime_type, caption, filename, quote_id, quote_price } = req.body;
 
     if (!businessId) {
       res.status(401).json({ success: false, error: 'Unauthorized' });
@@ -242,8 +243,8 @@ export async function sendReply(req: AuthRequest, res: Response): Promise<void> 
       return;
     }
 
-    if (['image', 'video', 'audio', 'document'].includes(type) && !media_id) {
-      res.status(400).json({ success: false, error: 'Media ID is required for media messages' });
+    if (['image', 'video', 'audio', 'document'].includes(type) && !media_id && !directMediaUrl) {
+      res.status(400).json({ success: false, error: 'Media ID or Media URL is required for media messages' });
       return;
     }
 
@@ -291,36 +292,65 @@ export async function sendReply(req: AuthRequest, res: Response): Promise<void> 
       case 'video':
       case 'audio':
       case 'document':
-        // Get media upload
-        const media = await getMediaUpload(media_id);
-        if (!media) {
-          res.status(400).json({ success: false, error: 'Media not found' });
+        // Option 1: Direct media_url provided (forwarding existing media)
+        // Option 2: media_id provided (fresh upload from media_uploads table)
+        if (directMediaUrl) {
+          // Forwarding existing media - use URL directly
+          mediaUrl = directMediaUrl;
+          mediaMimeType = media_mime_type || null;
+          mediaFilename = filename || null;
+        } else if (media_id) {
+          // Fresh upload - lookup in media_uploads table
+          const media = await getMediaUpload(media_id);
+          if (!media) {
+            res.status(400).json({ success: false, error: 'Media not found' });
+            return;
+          }
+          mediaUrl = media.file_url;
+          mediaMimeType = media.mime_type;
+          mediaDuration = media.duration || null;
+          mediaFilename = filename || media.original_filename || null;
+        }
+
+        if (!mediaUrl) {
+          res.status(400).json({ success: false, error: 'Media URL could not be resolved' });
           return;
         }
 
-        mediaUrl = media.file_url;
-        mediaMimeType = media.mime_type;
-        mediaDuration = media.duration || null;
-        mediaFilename = filename || media.original_filename || null;
-
         if (type === 'image') {
           messageContent = caption || '[Image]';
-          whatsappMessageId = await sendWhatsAppImage(customerPhone, media.file_url, caption);
+          whatsappMessageId = await sendWhatsAppImage(customerPhone, mediaUrl, caption);
         } else if (type === 'video') {
           messageContent = caption || '[Video]';
-          whatsappMessageId = await sendWhatsAppVideo(customerPhone, media.file_url, caption);
+          whatsappMessageId = await sendWhatsAppVideo(customerPhone, mediaUrl, caption);
         } else if (type === 'audio') {
           messageContent = '[Voice Message]';
-          whatsappMessageId = await sendWhatsAppAudio(customerPhone, media.file_url);
+          whatsappMessageId = await sendWhatsAppAudio(customerPhone, mediaUrl);
         } else if (type === 'document') {
           messageContent = mediaFilename || '[Document]';
           whatsappMessageId = await sendWhatsAppDocument(
             customerPhone,
-            media.file_url,
+            mediaUrl,
             mediaFilename || 'document',
             caption
           );
         }
+        break;
+
+      case 'location':
+        const { latitude, longitude, location_name, location_address } = req.body;
+        if (!latitude || !longitude) {
+          res.status(400).json({ success: false, error: 'Latitude and longitude are required for location messages' });
+          return;
+        }
+        messageContent = location_name || location_address || `[Location: ${latitude}, ${longitude}]`;
+        whatsappMessageId = await sendWhatsAppLocation(
+          customerPhone,
+          parseFloat(latitude),
+          parseFloat(longitude),
+          location_name,
+          location_address
+        );
         break;
 
       default:
@@ -343,6 +373,8 @@ export async function sendReply(req: AuthRequest, res: Response): Promise<void> 
         media_duration: mediaDuration,
         whatsapp_message_id: whatsappMessageId,
         status: whatsappMessageId ? 'sent' : 'failed',
+        latitude: type === 'location' ? parseFloat(req.body.latitude) : null,
+        longitude: type === 'location' ? parseFloat(req.body.longitude) : null,
       })
       .select()
       .single();

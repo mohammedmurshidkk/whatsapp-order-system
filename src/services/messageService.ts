@@ -32,7 +32,10 @@ export interface SaveMessageOptions {
   mediaFilename?: string | null;
   mediaDuration?: number | null;
   mediaSize?: number | null;
+  mediaId?: string | null;
   whatsappMessageId?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
 }
 
 export async function saveMessage(
@@ -55,7 +58,10 @@ export async function saveMessage(
       media_filename: options?.mediaFilename || null,
       media_duration: options?.mediaDuration || null,
       media_size: options?.mediaSize || null,
+      media_id: options?.mediaId || null,
       whatsapp_message_id: options?.whatsappMessageId || null,
+      latitude: options?.latitude || null,
+      longitude: options?.longitude || null,
       created_at: new Date().toISOString(),
     })
     .select()
@@ -89,6 +95,8 @@ export async function saveMessage(
         media_caption: (savedMessage as any).media_caption,
         media_filename: (savedMessage as any).media_filename,
         media_duration: (savedMessage as any).media_duration,
+        latitude: (savedMessage as any).latitude,
+        longitude: (savedMessage as any).longitude,
         created_at: savedMessage.created_at,
       });
     }
@@ -126,6 +134,7 @@ export async function saveIncomingMediaMessage(
     filename?: string;
     duration?: number;
     size?: number;
+    mediaId?: string;
   }
 ): Promise<Message> {
   const content = options?.caption || `[${messageType.charAt(0).toUpperCase() + messageType.slice(1)}]`;
@@ -138,6 +147,7 @@ export async function saveIncomingMediaMessage(
     mediaFilename: options?.filename || null,
     mediaDuration: options?.duration || null,
     mediaSize: options?.size || null,
+    mediaId: options?.mediaId || null,
   });
 }
 

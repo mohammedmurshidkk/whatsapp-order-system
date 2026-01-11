@@ -22,6 +22,7 @@ import whatsappAuthRoutes from './routes/whatsappAuth';
 import adminCakePricingRoutes from './routes/adminCakePricing';
 import adminCakeQuotesRoutes from './routes/adminCakeQuotes';
 import adminAmenityRoutes from './routes/adminAmenities';
+import adminInterventionRoutes from './routes/adminInterventions';
 import { WHATSAPP_PROVIDER } from './config/constants';
 import { logger } from './utils/logger';
 import { handleTestMessage } from './controllers/webhookController';
@@ -81,6 +82,9 @@ app.use('/api/admin/chat', adminChatRoutes);
 app.use('/api/admin/cake-pricing', adminCakePricingRoutes);
 app.use('/api/admin/cake-quotes', adminCakeQuotesRoutes);
 app.use('/api/admin/amenities', adminAmenityRoutes);
+app.use('/api/admin/cake-quotes', adminCakeQuotesRoutes);
+app.use('/api/admin/amenities', adminAmenityRoutes);
+app.use('/api/admin/interventions', adminInterventionRoutes);
 app.use('/api/superadmin', superadminRoutes);
 
 // WhatsApp authentication routes (for QR code, status)
