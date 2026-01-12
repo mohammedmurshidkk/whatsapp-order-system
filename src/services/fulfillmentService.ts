@@ -303,6 +303,52 @@ export function parseDeliveryTime(timeText: string, timezone: string = 'Asia/Kol
   const todayWords = ['today', 'innu', 'ഇന്ന്', 'இன்று'];
   const tomorrowWords = ['tomorrow', 'tomorow', 'tommorow', 'tmrw', 'tmr', 'nale', 'നാളെ', 'நாளை', 'kal'];
 
+  // ============================================
+  // Handle DD/MM/YY or DD/MM/YYYY date formats (e.g., "14/01/26", "14-01-2026", "14/01/26 11am")
+  // ============================================
+  const dateMatch = normalizedTime.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+  if (dateMatch) {
+    const day = parseInt(dateMatch[1], 10);
+    const month = parseInt(dateMatch[2], 10) - 1; // JS months are 0-indexed
+    let year = parseInt(dateMatch[3], 10);
+
+    // Handle 2-digit year (26 -> 2026)
+    if (year < 100) {
+      year += 2000;
+    }
+
+    // Validate date is in the future
+    const targetDate = new Date(year, month, day);
+    if (targetDate < nowInTz) {
+      // Date is in the past - try to extract time anyway for error context
+      logger.warn(`Date ${day}/${month + 1}/${year} is in the past`);
+    }
+
+    // Try to extract time from the same input (e.g., "14/01/26 11am")
+    // Remove the date part and check for time
+    const timePartMatch = normalizedTime.replace(dateMatch[0], '').trim();
+    const timeMatch = timePartMatch.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+
+    let hours = 12; // Default noon if no time specified
+    let minutes = 0;
+
+    if (timeMatch) {
+      hours = parseInt(timeMatch[1], 10);
+      minutes = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
+
+      if (timeMatch[3]?.toLowerCase() === 'pm' && hours !== 12) {
+        hours += 12;
+      } else if (timeMatch[3]?.toLowerCase() === 'am' && hours === 12) {
+        hours = 0;
+      } else if (!timeMatch[3] && hours >= 1 && hours <= 6) {
+        hours += 12; // Assume PM for business hours
+      }
+    }
+
+    logger.info(`Parsed DD/MM/YY date: ${day}/${month + 1}/${year} ${hours}:${minutes.toString().padStart(2, '0')}`);
+    return localToUTC(year, month, day, hours, minutes, tz);
+  }
+
   // Helper to extract hours and minutes from time text
   function extractTime(text: string): { hours: number; minutes: number } | null {
     const timeMatch = text.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
@@ -582,13 +628,38 @@ export async function calculateDistanceBasedDeliveryFee(
 
   logger.info(`Distance calculated: ${(distanceMeters / 1000).toFixed(2)}km from outlet to customer`);
 
-  // Check if beyond max radius
+  // Get pricing config with defaults
+  const freeRadius = business.free_radius_meters || 3500; // 3.5km default
+  const minimumCharge = business.minimum_delivery_charge || 30;
+  const minimumChargeDistance = business.minimum_charge_distance_meters || 3000; // 3km billable distance for min charge
+  const incrementPerKm = business.increment_per_km || 10;
   const maxRadius = business.max_delivery_radius_meters || 15000;
-  if (distanceMeters > maxRadius) {
+
+  // Calculate billable distance (distance beyond free radius)
+  const billableDistance = Math.max(0, distanceMeters - freeRadius);
+
+  // Calculate fee using standard formula (for all distances)
+  let calculatedFee = 0;
+  if (billableDistance <= 0) {
+    calculatedFee = 0; // Within free radius
+  } else if (billableDistance <= minimumChargeDistance) {
+    calculatedFee = minimumCharge;
+  } else {
+    const additionalDistanceMeters = billableDistance - minimumChargeDistance;
+    const additionalDistanceKm = additionalDistanceMeters / 1000;
+    const additionalCharge = Math.floor(additionalDistanceKm) * incrementPerKm;
+    calculatedFee = minimumCharge + additionalCharge;
+  }
+
+  // Check if beyond max radius
+  const isBeyondMaxRadius = distanceMeters > maxRadius;
+  if (isBeyondMaxRadius) {
+    logger.info(`Beyond max radius (${(distanceMeters / 1000).toFixed(2)}km > ${maxRadius / 1000}km). Suggested fee: ₹${calculatedFee}`);
     return {
-      fee: 0, // Will be determined manually by operations team
+      fee: 0, // No automatic fee - requires admin approval
       distance_meters: distanceMeters,
       is_beyond_max_radius: true,
+      suggested_fee: calculatedFee, // Admin can use this as auto-fill
     };
   }
 
@@ -601,45 +672,15 @@ export async function calculateDistanceBasedDeliveryFee(
     };
   }
 
-  // Get pricing config with defaults
-  const freeRadius = business.free_radius_meters || 3500; // 3.5km default
-  const minimumCharge = business.minimum_delivery_charge || 30;
-  const minimumChargeDistance = business.minimum_charge_distance_meters || 3000; // 3km billable distance for min charge
-  const incrementPerKm = business.increment_per_km || 10;
-
-  // Calculate billable distance (distance beyond free radius)
-  const billableDistance = Math.max(0, distanceMeters - freeRadius);
-
-  // If within free radius
+  // Within radius - return calculated fee
   if (billableDistance <= 0) {
     logger.info(`Delivery within free radius (${freeRadius}m), no charge`);
-    return {
-      fee: 0,
-      distance_meters: distanceMeters,
-      is_beyond_max_radius: false,
-    };
+  } else {
+    logger.info(`Delivery fee calculated: ${calculatedFee} (distance: ${(distanceMeters / 1000).toFixed(2)}km)`);
   }
-
-  // If billable distance is within minimum charge distance
-  if (billableDistance <= minimumChargeDistance) {
-    logger.info(`Delivery within minimum charge distance, fee: ${minimumCharge}`);
-    return {
-      fee: minimumCharge,
-      distance_meters: distanceMeters,
-      is_beyond_max_radius: false,
-    };
-  }
-
-  // Calculate additional charge beyond minimum distance
-  const additionalDistanceMeters = billableDistance - minimumChargeDistance;
-  const additionalDistanceKm = additionalDistanceMeters / 1000;
-  const additionalCharge = Math.floor(additionalDistanceKm) * incrementPerKm;
-  const totalFee = minimumCharge + additionalCharge;
-
-  logger.info(`Delivery fee calculated: ${totalFee} (base: ${minimumCharge}, extra: ${additionalCharge} for ${additionalDistanceKm.toFixed(1)}km)`);
 
   return {
-    fee: totalFee,
+    fee: calculatedFee,
     distance_meters: distanceMeters,
     is_beyond_max_radius: false,
   };

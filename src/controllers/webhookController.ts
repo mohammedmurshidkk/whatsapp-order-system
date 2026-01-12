@@ -134,6 +134,44 @@ const pendingAddonSelectionMap = new Map<string, { itemId: string; addons: MenuA
 // Track pending date selection for time button flow (date selected, waiting for time)
 const pendingDateSelectionMap = new Map<string, { date: 'today' | 'tomorrow'; fulfillmentType: 'delivery' | 'takeaway' }>(); // sessionId -> { date, fulfillmentType }
 
+// Track pending custom date when user sends date and time separately (e.g., "14/01/26" then "11am")
+const pendingCustomDateMap = new Map<string, { year: number; month: number; day: number; fulfillmentType?: 'delivery' | 'takeaway' }>(); // sessionId -> { year, month, day }
+
+// Helper: Check if text is date-only (DD/MM/YY or DD/MM/YYYY without time)
+function isDateOnly(text: string): { year: number; month: number; day: number } | null {
+  const normalized = text.toLowerCase().trim();
+  const dateMatch = normalized.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if (!dateMatch) return null;
+
+  const day = parseInt(dateMatch[1], 10);
+  const month = parseInt(dateMatch[2], 10) - 1; // JS months are 0-indexed
+  let year = parseInt(dateMatch[3], 10);
+  if (year < 100) year += 2000;
+
+  return { year, month, day };
+}
+
+// Helper: Check if text is time-only (e.g., "11am", "3:30pm", "evening")
+function isTimeOnly(text: string): boolean {
+  const normalized = text.toLowerCase().trim();
+  // Exclude if it has a date pattern
+  if (/\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/.test(normalized)) return false;
+  // Check for time patterns
+  const timePatterns = [
+    /^\d{1,2}(?::\d{2})?\s*(am|pm)$/i,  // 11am, 3:30pm
+    /^(morning|evening|afternoon|ravile|vaikunneram|uchakku)$/i,  // Time words
+    /^\d{1,2}:\d{2}$/,  // 14:30
+  ];
+  return timePatterns.some(p => p.test(normalized));
+}
+
+// Helper: Combine pending date with time-only input
+function combineDateAndTime(pendingDate: { year: number; month: number; day: number }, timeText: string, timezone: string): string | null {
+  // Convert to DD/MM/YYYY format and append time
+  const combinedText = `${pendingDate.day}/${pendingDate.month + 1}/${pendingDate.year} ${timeText}`;
+  return parseDeliveryTime(combinedText, timezone);
+}
+
 // Message debounce buffer - waits for user to finish typing before processing
 interface PendingMessage {
   messages: string[];
@@ -669,12 +707,39 @@ export async function processMessage(
       sessionForTimeCheck.pickup_outlet_id && !sessionForTimeCheck.pickup_time;
 
     if (needsDeliveryTime || needsPickupTime) {
+      // Check if message is a date-only input (e.g., "14/1/26") - store for combining with time later
+      const dateOnlyInputEarly = isDateOnly(messageText);
+      if (dateOnlyInputEarly) {
+        pendingCustomDateMap.set(session.id, {
+          ...dateOnlyInputEarly,
+          fulfillmentType: sessionForTimeCheck.fulfillment_type || undefined,
+        });
+        logger.info(`📅 Stored pending custom date (early): ${dateOnlyInputEarly.day}/${dateOnlyInputEarly.month + 1}/${dateOnlyInputEarly.year} for session ${session.id}`);
+        // Save message and ask for time
+        await saveIncomingMessage(session.id, originalMessage);
+        const timePromptMsg = t('fulfillment.askTime', lang);
+        await saveOutgoingMessage(session.id, timePromptMsg);
+        return timePromptMsg;
+      }
+
       // Check if message looks like a time input
-      const looksLikeTime = /\d{1,2}(?:[:\d]{2})?\s*(?:am|pm)|morning|evening|afternoon|today|tomorrow|nale|innu/i.test(messageText);
+      const looksLikeTime = /\d{1,2}(?:[:\d]{2})?\s*(?:am|pm)|morning|evening|afternoon|today|tomorrow|nale|innu|in\s+\d+(?:\.\d+)?\s*(?:hour|hr|minute|min)/i.test(messageText);
 
       if (looksLikeTime) {
         logger.info(`Session needs time, parsing: "${messageText}"`);
-        const parsedTime = parseDeliveryTime(messageText, businessTimezone);
+
+        // Check if there's a pending custom date (user sent date and time separately)
+        const pendingCustomDate = pendingCustomDateMap.get(session.id);
+        let parsedTime: string | null = null;
+
+        if (pendingCustomDate && isTimeOnly(messageText)) {
+          // Combine pending date with time-only input
+          parsedTime = combineDateAndTime(pendingCustomDate, messageText, businessTimezone);
+          logger.info(`📅 Combined pending date with time: ${messageText} -> ${parsedTime}`);
+          pendingCustomDateMap.delete(session.id);
+        } else {
+          parsedTime = parseDeliveryTime(messageText, businessTimezone);
+        }
 
         if (parsedTime) {
           await saveIncomingMessage(session.id, originalMessage);
@@ -1150,6 +1215,39 @@ export async function processMessage(
 
   let replyMessage = aiResponse.reply;
   let intentToProcess = aiResponse.intent;
+
+  // ============================================
+  // HANDLE: Date-only and time-only inputs sent separately
+  // E.g., user sends "14/01/26" then "11am" as separate messages
+  // ============================================
+  const dateOnlyInput = isDateOnly(messageText);
+  if (dateOnlyInput) {
+    // Store the date for combining with time in next message
+    pendingCustomDateMap.set(session.id, {
+      ...dateOnlyInput,
+      fulfillmentType: latestSessionData.fulfillment_type || undefined,
+    });
+    logger.info(`📅 Stored pending custom date: ${dateOnlyInput.day}/${dateOnlyInput.month + 1}/${dateOnlyInput.year} for session ${session.id}`);
+    // Continue with AI response (likely asks "what time?")
+  }
+
+  // Check if user sent time-only and we have a pending custom date
+  const pendingCustomDate = pendingCustomDateMap.get(session.id);
+  if (pendingCustomDate && isTimeOnly(messageText)) {
+    // Combine pending date with time
+    const combinedTime = combineDateAndTime(pendingCustomDate, messageText, businessTimezone);
+    if (combinedTime) {
+      logger.info(`📅 Combined pending date with time: ${messageText} -> ${combinedTime}`);
+      // Update AI response's delivery_time with combined datetime
+      if (aiResponse.fulfillment) {
+        aiResponse.fulfillment.delivery_time = combinedTime;
+      } else {
+        aiResponse.fulfillment = { delivery_time: combinedTime };
+      }
+    }
+    // Clear pending date after use
+    pendingCustomDateMap.delete(session.id);
+  }
 
   // SERVER-SIDE: Detect custom text change requests (e.g., "change text to Happy Birthday")
   const customTextChangeMatch = messageText.match(/(?:change|update|make it|write)\s*(?:the\s*)?(?:text|message|writing)?\s*(?:to|into|as)?\s*["']?(.+?)["']?\s*$/i);
@@ -1960,6 +2058,53 @@ export async function processMessage(
             }
 
             if (deliveryTime && !sessionData?.delivery_time) {
+              // ============================================
+              // URGENT DELIVERY CHECK (collect_delivery_info with location)
+              // ============================================
+              const minimumWaitMinutes = (business as any)?.minimum_wait_minutes;
+              if (minimumWaitMinutes && minimumWaitMinutes > 0) {
+                const requestedDate = new Date(deliveryTime);
+                const now = new Date();
+                const diffMinutes = (requestedDate.getTime() - now.getTime()) / (1000 * 60);
+
+                if (diffMinutes > 0 && diffMinutes < minimumWaitMinutes) {
+                  logger.info(`🚨 Urgent delivery detected (collect_delivery_info): ${deliveryTime} is ${Math.round(diffMinutes)} min away (min wait: ${minimumWaitMinutes})`);
+
+                  // Save time first
+                  await updateSessionDeliveryInfo(session.id, { time: deliveryTime });
+
+                  // Create urgent_delivery intervention
+                  const urgentIntervention = await createIntervention(
+                    businessId,
+                    session.id,
+                    customer.id,
+                    'urgent_delivery',
+                    {
+                      requestedTime: deliveryTime,
+                      fulfillmentType: 'delivery',
+                      minimumWaitMinutes,
+                      minutesUntilRequested: Math.round(diffMinutes),
+                      deliveryAddress: sessionData?.delivery_address,
+                      phone,
+                    }
+                  );
+
+                  if (urgentIntervention) {
+                    await pauseAI(session.id, 'Urgent order - awaiting admin confirmation');
+                    emitInterventionCreated(businessId, urgentIntervention);
+
+                    const formattedTime = new Date(deliveryTime).toLocaleString('en-IN', {
+                      timeZone: businessTimezone,
+                      dateStyle: 'medium',
+                      timeStyle: 'short',
+                    });
+                    const typeLabel = t('fulfillment.deliveryBtn', lang);
+                    replyMessage = t('urgentOrder.waitingConfirmation', lang, { type: typeLabel, time: formattedTime });
+                    break; // Exit the switch case
+                  }
+                }
+              }
+
               await updateSessionDeliveryInfo(session.id, { time: deliveryTime });
               logger.info(`Delivery time saved (preserving location): ${deliveryTime}`);
 
@@ -1999,6 +2144,50 @@ export async function processMessage(
             if (!deliveryTime) {
               replyMessage = t('fulfillment.gotAddress', lang, { address: addressFromAI });
             } else {
+              // ============================================
+              // URGENT DELIVERY CHECK (collect_delivery_info with AI address)
+              // ============================================
+              const minimumWaitMinutesAddr = (business as any)?.minimum_wait_minutes;
+              if (minimumWaitMinutesAddr && minimumWaitMinutesAddr > 0) {
+                const requestedDateAddr = new Date(deliveryTime);
+                const nowAddr = new Date();
+                const diffMinutesAddr = (requestedDateAddr.getTime() - nowAddr.getTime()) / (1000 * 60);
+
+                if (diffMinutesAddr > 0 && diffMinutesAddr < minimumWaitMinutesAddr) {
+                  logger.info(`🚨 Urgent delivery detected (collect_delivery_info w/address): ${deliveryTime} is ${Math.round(diffMinutesAddr)} min away (min wait: ${minimumWaitMinutesAddr})`);
+
+                  // Create urgent_delivery intervention
+                  const urgentInterventionAddr = await createIntervention(
+                    businessId,
+                    session.id,
+                    customer.id,
+                    'urgent_delivery',
+                    {
+                      requestedTime: deliveryTime,
+                      fulfillmentType: 'delivery',
+                      minimumWaitMinutes: minimumWaitMinutesAddr,
+                      minutesUntilRequested: Math.round(diffMinutesAddr),
+                      deliveryAddress: addressFromAI,
+                      phone,
+                    }
+                  );
+
+                  if (urgentInterventionAddr) {
+                    await pauseAI(session.id, 'Urgent order - awaiting admin confirmation');
+                    emitInterventionCreated(businessId, urgentInterventionAddr);
+
+                    const formattedTimeAddr = new Date(deliveryTime).toLocaleString('en-IN', {
+                      timeZone: businessTimezone,
+                      dateStyle: 'medium',
+                      timeStyle: 'short',
+                    });
+                    const typeLabelAddr = t('fulfillment.deliveryBtn', lang);
+                    replyMessage = t('urgentOrder.waitingConfirmation', lang, { type: typeLabelAddr, time: formattedTimeAddr });
+                    break; // Exit the switch case
+                  }
+                }
+              }
+
               // Show final invoice with delivery details and ask for confirmation
               const deliverySummary = await generateOrderSummary(session.id, {
                 includeCta: true,
@@ -2220,6 +2409,56 @@ export async function processMessage(
               time: deliveryTime || undefined,
             });
           }
+
+          // ============================================
+          // URGENT DELIVERY CHECK (confirm_order intent)
+          // ============================================
+          if (deliveryTime) {
+            const minimumWaitMinutesConfirm = (business as any)?.minimum_wait_minutes;
+            if (minimumWaitMinutesConfirm && minimumWaitMinutesConfirm > 0) {
+              const requestedDateConfirm = new Date(deliveryTime);
+              const nowConfirm = new Date();
+              const diffMinutesConfirm = (requestedDateConfirm.getTime() - nowConfirm.getTime()) / (1000 * 60);
+
+              if (diffMinutesConfirm > 0 && diffMinutesConfirm < minimumWaitMinutesConfirm) {
+                logger.info(`🚨 Urgent delivery detected (confirm_order): ${deliveryTime} is ${Math.round(diffMinutesConfirm)} min away (min wait: ${minimumWaitMinutesConfirm})`);
+
+                // Get latest session data for address
+                const sessionForUrgent = await getSessionWithItems(session.id);
+                const urgentAddress = sessionForUrgent?.delivery_address || addressFromAI || 'Location shared';
+
+                // Create urgent_delivery intervention
+                const urgentInterventionConfirm = await createIntervention(
+                  businessId,
+                  session.id,
+                  customer.id,
+                  'urgent_delivery',
+                  {
+                    requestedTime: deliveryTime,
+                    fulfillmentType: 'delivery',
+                    minimumWaitMinutes: minimumWaitMinutesConfirm,
+                    minutesUntilRequested: Math.round(diffMinutesConfirm),
+                    deliveryAddress: urgentAddress,
+                    phone,
+                  }
+                );
+
+                if (urgentInterventionConfirm) {
+                  await pauseAI(session.id, 'Urgent order - awaiting admin confirmation');
+                  emitInterventionCreated(businessId, urgentInterventionConfirm);
+
+                  const formattedTimeConfirm = new Date(deliveryTime).toLocaleString('en-IN', {
+                    timeZone: businessTimezone,
+                    dateStyle: 'medium',
+                    timeStyle: 'short',
+                  });
+                  const typeLabelConfirm = t('fulfillment.deliveryBtn', lang);
+                  replyMessage = t('urgentOrder.waitingConfirmation', lang, { type: typeLabelConfirm, time: formattedTimeConfirm });
+                  break; // Exit the switch case - don't proceed to invoice/order creation
+                }
+              }
+            }
+          }
         }
 
         // Save pickup info
@@ -2360,7 +2599,14 @@ export async function processMessage(
         let confirmMsg = `${t('order.confirmed', lang)}\n\n📋 ${t('order.orderNumber', lang)}: *${order.order_number}*\n${t('order.total', lang, { amount: order.total_amount })}`;
 
         if (latestSession.fulfillment_type === 'delivery') {
-          confirmMsg += `\n\n${t('order.delivery', lang)}\n📍 ${latestSession.delivery_address}`;
+          confirmMsg += `\n\n${t('order.delivery', lang)}`;
+          // Show address if available, otherwise show coordinates (for WhatsApp location shares)
+          if (latestSession.delivery_address) {
+            confirmMsg += `\n📍 ${latestSession.delivery_address}`;
+          } else if (latestSession.delivery_latitude && latestSession.delivery_longitude) {
+            // Use simple coordinate format when address text is not available
+            confirmMsg += `\n📍 Location (${latestSession.delivery_latitude.toFixed(6)}, ${latestSession.delivery_longitude.toFixed(6)})`;
+          }
           if (latestSession.delivery_time) {
             confirmMsg += `\n${t('order.time', lang, { time: formatDeliveryTime(latestSession.delivery_time, businessTimezone, t('time.at', lang)) })}`;
           }
@@ -2572,6 +2818,132 @@ export async function processMessage(
         });
 
         replyMessage = aiResponse.reply || t('amenity.bookingRequestConfirmation', lang, { amenity: amenityName });
+      }
+      break;
+
+    case 'show_photos':
+      // Customer wants to see photos of menu items
+      if (business) {
+        const photoRequest = aiResponse.photoRequest;
+
+        // Case 1: Specific item photo request
+        if (photoRequest?.item_name) {
+          const menuItems = await getMenuItems(business.id);
+          // Find item (case-insensitive) - prioritize exact match, then best partial match
+          const requestedName = photoRequest.item_name.toLowerCase().trim();
+
+          // 1. Exact match first
+          let matchedItem = menuItems.find(
+            item => item.name.toLowerCase() === requestedName
+          );
+
+          // 2. If no exact match, find best partial match (longest item name that matches)
+          if (!matchedItem) {
+            const partialMatches = menuItems.filter(
+              item => item.name.toLowerCase().includes(requestedName) ||
+                      requestedName.includes(item.name.toLowerCase())
+            );
+            // Sort by name length descending - prefer more specific matches
+            if (partialMatches.length > 0) {
+              matchedItem = partialMatches.sort((a, b) => b.name.length - a.name.length)[0];
+            }
+          }
+
+          if (matchedItem && matchedItem.image_url) {
+            // Build price string
+            let priceStr = '';
+            if (matchedItem.sizes && matchedItem.sizes.length > 0) {
+              priceStr = matchedItem.sizes.map(s => `${s.name}: ₹${s.price}`).join(' | ');
+            } else if (matchedItem.price) {
+              priceStr = `₹${matchedItem.price}`;
+            }
+
+            const caption = `${matchedItem.name}\n💰 ${priceStr}\n\nReply with the name to order!`;
+            await sendImage(phone, matchedItem.image_url, caption);
+            await saveOutgoingMessage(session.id, `[Sent ${matchedItem.name} photo]`);
+            return null;
+          } else if (matchedItem && !matchedItem.image_url) {
+            replyMessage = lang === 'ml'
+              ? `ക്ഷമിക്കണം, ${matchedItem.name}-ന്റെ ഫോട്ടോ ഇപ്പോൾ ലഭ്യമല്ല.`
+              : `Sorry, no photo available for ${matchedItem.name} at the moment.`;
+          } else {
+            replyMessage = lang === 'ml'
+              ? `ക്ഷമിക്കണം, "${photoRequest.item_name}" കണ്ടെത്തിയില്ല.`
+              : `Sorry, couldn't find "${photoRequest.item_name}" in our menu.`;
+          }
+        }
+        // Case 2: Category photo request
+        else if (photoRequest?.category) {
+          const requestedCategory = photoRequest.category;
+
+          // Find matching category (case-insensitive)
+          const categories = await getMenuCategories(business.id);
+          const matchedCategory = categories.find(
+            c => c.name.toLowerCase() === requestedCategory.toLowerCase()
+          );
+
+          if (matchedCategory) {
+            // Get items in this category
+            const categoryItems = await getMenuItemsByCategory(business.id, matchedCategory.id);
+
+            // Filter items that have images
+            const itemsWithImages = categoryItems.filter(item => item.image_url);
+
+            if (itemsWithImages.length === 0) {
+              replyMessage = lang === 'ml'
+                ? `ക്ഷമിക്കണം, ${matchedCategory.name} വിഭാഗത്തിൽ ഇപ്പോൾ ഫോട്ടോകൾ ലഭ്യമല്ല.`
+                : `Sorry, no photos available for ${matchedCategory.name} at the moment.`;
+            } else {
+              const MAX_PHOTOS = 5;
+              const photosToSend = itemsWithImages.slice(0, MAX_PHOTOS);
+              const hasMore = itemsWithImages.length > MAX_PHOTOS;
+
+              // Send intro message
+              const introMsg = lang === 'ml'
+                ? `ഇതാ ഞങ്ങളുടെ ${matchedCategory.name} ഫോട്ടോകൾ:`
+                : `Here are our ${matchedCategory.name} photos:`;
+              await sendWhatsAppMessage(phone, introMsg);
+
+              // Send each image with caption (name + price)
+              for (const item of photosToSend) {
+                // Build price string
+                let priceStr = '';
+                if (item.sizes && item.sizes.length > 0) {
+                  priceStr = item.sizes.map(s => `${s.name}: ₹${s.price}`).join(' | ');
+                } else if (item.price) {
+                  priceStr = `₹${item.price}`;
+                }
+
+                const caption = `${item.name}\n💰 ${priceStr}\n\nReply with the name to order!`;
+                await sendImage(phone, item.image_url!, caption);
+              }
+
+              // If more items available, ask if they want to see more
+              if (hasMore) {
+                const moreMsg = lang === 'ml'
+                  ? `${itemsWithImages.length - MAX_PHOTOS} കൂടി ഐറ്റങ്ങൾ ഉണ്ട്. "കൂടുതൽ കാണിക്കുക" എന്ന് പറയുക അല്ലെങ്കിൽ നിങ്ങളുടെ ഇഷ്ടം പറയുക (ഉദാ: chocolate, fruit).`
+                  : `${itemsWithImages.length - MAX_PHOTOS} more items available. Say "show more" or tell me your preference (e.g., chocolate, fruit).`;
+                await sendWhatsAppMessage(phone, moreMsg);
+              }
+
+              await saveOutgoingMessage(session.id, `[Sent ${photosToSend.length} ${matchedCategory.name} photos]`);
+              return null; // Don't send another message
+            }
+          } else {
+            // Category not found
+            const availableCategories = categories.map(c => c.name).join(', ');
+            replyMessage = lang === 'ml'
+              ? `ക്ഷമിക്കണം, "${requestedCategory}" കാറ്റഗറി കണ്ടെത്തിയില്ല. ലഭ്യമായവ: ${availableCategories}`
+              : `Sorry, couldn't find "${requestedCategory}" category. Available: ${availableCategories}`;
+          }
+        } else {
+          // No category or item specified, ask which category
+          const categories = await getMenuCategories(business.id);
+          const categoryNames = categories.map(c => c.name).join(', ');
+          replyMessage = lang === 'ml'
+            ? `ഏത് കാറ്റഗറിയുടെ ഫോട്ടോകൾ കാണണം? ലഭ്യമായവ: ${categoryNames}`
+            : `Which category photos would you like to see? Available: ${categoryNames}`;
+        }
       }
       break;
 
@@ -3092,6 +3464,23 @@ export async function handleWhatsAppWebhook(
                     message: `Customer location is ${(deliveryFeeResult.distance_meters / 1000).toFixed(1)}km away - beyond max delivery radius. Session: ${session.id}. Address: ${displayAddress || 'Location shared'}`,
                   });
 
+                  // Create intervention for admin dashboard
+                  const { createIntervention } = await import('../services/interventionService');
+                  await createIntervention(
+                    business.id,
+                    session.id,
+                    customer.id,
+                    'out_of_radius',
+                    {
+                      phone: phone,
+                      distance_km: (deliveryFeeResult.distance_meters / 1000).toFixed(1),
+                      address: displayAddress || 'Location shared',
+                      latitude: location.latitude,
+                      longitude: location.longitude,
+                      suggested_fee: deliveryFeeResult.suggested_fee || 0, // Auto-fill for admin
+                    }
+                  );
+
                   // Inform customer
                   const lang = getSessionLanguage(session);
                   const beyondRadiusMsg = t('fulfillment.beyondArea', lang, { distance: `${(deliveryFeeResult.distance_meters / 1000).toFixed(1)}km` });
@@ -3475,6 +3864,67 @@ export async function handleWhatsAppWebhook(
                   await sendWhatsAppMessage(phone, timeConfirmMsg);
                   await saveOutgoingMessage(session.id, timeConfirmMsg);
                   continue;
+                }
+
+                // ============================================
+                // URGENT ORDER CHECK (BUTTON FLOW)
+                // ============================================
+                const minimumWaitMinutes = (business as any)?.minimum_wait_minutes;
+                if (minimumWaitMinutes && minimumWaitMinutes > 0) {
+                  const requestedDate = new Date(calculatedTime);
+                  const now = new Date();
+                  const diffMinutes = (requestedDate.getTime() - now.getTime()) / (1000 * 60);
+
+                  // Only trigger for future times within minimum_wait_minutes
+                  if (diffMinutes > 0 && diffMinutes < minimumWaitMinutes) {
+                    const fulfillmentTypeForUrgent = fulfillmentType || 'takeaway';
+                    logger.info(`🚨 Urgent order detected (button): ${calculatedTime} is ${Math.round(diffMinutes)} min away (min wait: ${minimumWaitMinutes})`);
+
+                    // Skip if custom cake order (already handled above)
+                    if (!acceptedQuoteForTime) {
+                      // Create urgent_delivery intervention
+                      const urgentIntervention = await createIntervention(
+                        business.id,
+                        session.id,
+                        customer.id,
+                        'urgent_delivery',
+                        {
+                          requestedTime: calculatedTime,
+                          fulfillmentType: fulfillmentTypeForUrgent,
+                          minimumWaitMinutes,
+                          minutesUntilRequested: Math.round(diffMinutes),
+                          deliveryAddress: sessionWithItems?.delivery_address,
+                          outletId: sessionWithItems?.pickup_outlet_id,
+                          phone,
+                        }
+                      );
+
+                      if (urgentIntervention) {
+                        // Pause AI
+                        await pauseAI(session.id, 'Urgent order - awaiting admin confirmation');
+                        // Emit socket event
+                        emitInterventionCreated(business.id, urgentIntervention);
+
+                        // Format time for display
+                        const formattedTime = new Date(calculatedTime).toLocaleString('en-IN', {
+                          timeZone: businessTimezone,
+                          dateStyle: 'medium',
+                          timeStyle: 'short',
+                        });
+                        const typeLabel = fulfillmentTypeForUrgent === 'delivery'
+                          ? t('fulfillment.deliveryBtn', lang)
+                          : t('fulfillment.takeawayBtn', lang);
+
+                        const waitingMsg = t('urgentOrder.waitingConfirmation', lang, { type: typeLabel, time: formattedTime });
+                        await sendWhatsAppMessage(phone, waitingMsg);
+                        await saveOutgoingMessage(session.id, waitingMsg);
+
+                        // Clear pending date selection
+                        pendingDateSelectionMap.delete(session.id);
+                        continue;
+                      }
+                    }
+                  }
                 }
 
                 // Normal flow - save time and show final invoice

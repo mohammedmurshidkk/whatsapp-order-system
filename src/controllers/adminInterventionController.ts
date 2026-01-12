@@ -200,6 +200,46 @@ export const resolveIntervention = async (req: AuthRequest, res: Response) => {
                             } else if (!approved) {
                                 logger.info(`⏭️ Urgent order time rejected for session ${updated.session_id}, customer can choose new time`);
                             }
+                        } else if (updated.type === 'out_of_radius') {
+                            // Handle out-of-radius delivery approval
+                            const outOfRadiusData = updated.request_data as {
+                                phone?: string;
+                                distance_km?: string;
+                                address?: string;
+                                latitude?: number;
+                                longitude?: number;
+                                suggested_fee?: number; // Auto-calculated fee for admin to accept/modify
+                            };
+
+                            // Sync with session flags - clear pending approval status
+                            const { supabase } = await import('../config/database');
+                            const updateData: Record<string, unknown> = {
+                                delivery_pending_approval: false,
+                                delivery_approval_status: approved ? 'approved' : 'rejected',
+                            };
+
+                            // Save delivery fee - use admin's price or fallback to suggested_fee
+                            if (approved) {
+                                const deliveryFee = price ?? outOfRadiusData.suggested_fee ?? 0;
+                                updateData.custom_delivery_fee = Number(deliveryFee);
+                                logger.info(`✅ Out-of-radius approved with delivery fee: ₹${deliveryFee} (admin: ${price ?? 'N/A'}, suggested: ${outOfRadiusData.suggested_fee ?? 'N/A'})`);
+                            }
+
+                            // If rejected, clear delivery info so customer can choose again
+                            if (!approved) {
+                                updateData.delivery_address = null;
+                                updateData.delivery_latitude = null;
+                                updateData.delivery_longitude = null;
+                                updateData.fulfillment_type = null;
+                                logger.info(`❌ Out-of-radius rejected for session ${updated.session_id}`);
+                            } else {
+                                logger.info(`✅ Out-of-radius approved for session ${updated.session_id} (${outOfRadiusData.distance_km}km)`);
+                            }
+
+                            await supabase
+                                .from('sessions')
+                                .update(updateData)
+                                .eq('id', updated.session_id);
                         } else {
                             logger.info(`⏭️ Skipping quote creation: approved=${approved}, price=${price}, type=${updated.type}`);
                         }

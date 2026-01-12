@@ -374,15 +374,22 @@ export async function generateOrderSummary(
     session.business_id
   ) {
     showDeliveryFee = true;
-    const feeResult = await calculateDistanceBasedDeliveryFee(
-      session.business_id,
-      grandTotal,
-      session.delivery_latitude,
-      session.delivery_longitude
-    );
-    // Only show fee if not beyond max radius (beyond radius is handled separately)
-    if (!feeResult.is_beyond_max_radius) {
-      deliveryFee = feeResult.fee;
+
+    // Check if admin set a custom delivery fee (for out-of-radius deliveries)
+    if ((session as any).custom_delivery_fee !== null && (session as any).custom_delivery_fee !== undefined) {
+      deliveryFee = (session as any).custom_delivery_fee;
+      logger.info(`Using custom delivery fee: ₹${deliveryFee} (admin-approved out-of-radius)`);
+    } else {
+      const feeResult = await calculateDistanceBasedDeliveryFee(
+        session.business_id,
+        grandTotal,
+        session.delivery_latitude,
+        session.delivery_longitude
+      );
+      // Only show fee if not beyond max radius (beyond radius is handled separately)
+      if (!feeResult.is_beyond_max_radius) {
+        deliveryFee = feeResult.fee;
+      }
     }
   }
 
@@ -498,14 +505,20 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
     session.delivery_longitude &&
     session.business_id
   ) {
-    const feeResult = await calculateDistanceBasedDeliveryFee(
-      session.business_id,
-      totalAmount,
-      session.delivery_latitude,
-      session.delivery_longitude
-    );
-    deliveryFee = feeResult.fee;
-    logger.info(`[DELIVERY-FEE] Calculated: ₹${deliveryFee} (distance: ${(feeResult.distance_meters / 1000).toFixed(2)}km, beyond_max: ${feeResult.is_beyond_max_radius})`);
+    // Check if admin set a custom delivery fee (for out-of-radius deliveries)
+    if ((session as any).custom_delivery_fee !== null && (session as any).custom_delivery_fee !== undefined) {
+      deliveryFee = (session as any).custom_delivery_fee;
+      logger.info(`[DELIVERY-FEE] Using custom fee: ₹${deliveryFee} (admin-approved out-of-radius)`);
+    } else {
+      const feeResult = await calculateDistanceBasedDeliveryFee(
+        session.business_id,
+        totalAmount,
+        session.delivery_latitude,
+        session.delivery_longitude
+      );
+      deliveryFee = feeResult.fee;
+      logger.info(`[DELIVERY-FEE] Calculated: ₹${deliveryFee} (distance: ${(feeResult.distance_meters / 1000).toFixed(2)}km, beyond_max: ${feeResult.is_beyond_max_radius})`);
+    }
   } else {
     logger.info(`[DELIVERY-FEE] Skipped: Missing required fields for delivery fee calculation`);
   }
@@ -737,7 +750,7 @@ export function getOrderStatusMessage(order: Order, lang: SupportedLanguage, tim
   message += `${t('order.total', lang, { amount: order.total_amount })}\n`;
 
   if (order.fulfillment_type === 'delivery' && order.delivery_address) {
-    message += `${t('order.deliveryTo', lang, { address: order.delivery_address })}\n`;
+    message += `${t('orderSummary.deliveryTo', lang, { address: order.delivery_address })}\n`;
     if (order.delivery_time) {
       message += `${t('order.time', lang, { time: formatDeliveryTime(order.delivery_time, timezone, t('time.at', lang)) })}\n`;
     }
@@ -884,6 +897,7 @@ export async function getOrderStatus(
   const statusEmoji: Record<string, string> = {
     confirmed: '✅',
     processing: '🔄',
+    out_for_delivery: '🚚',
     completed: '🎉',
     cancelled: '❌',
   };
@@ -891,6 +905,7 @@ export async function getOrderStatus(
   const statusText: Record<string, string> = {
     confirmed: t('order.statusText.confirmed', lang),
     processing: t('order.statusText.processing', lang),
+    out_for_delivery: t('order.statusText.out_for_delivery', lang),
     completed: t('order.statusText.completed', lang),
     cancelled: t('order.statusText.cancelled', lang),
   };
@@ -900,7 +915,7 @@ export async function getOrderStatus(
   message += `${t('order.total', lang, { amount: order.total_amount })}\n`;
 
   if (order.fulfillment_type === 'delivery' && order.delivery_address) {
-    message += `${t('order.deliveryTo', lang, { address: order.delivery_address })}\n`;
+    message += `${t('orderSummary.deliveryTo', lang, { address: order.delivery_address })}\n`;
     if (order.delivery_time) {
       message += `${t('order.time', lang, { time: formatDeliveryTime(order.delivery_time, timezone, t('time.at', lang)) })}\n`;
     }

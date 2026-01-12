@@ -123,6 +123,7 @@ export const en = {
     statusText: {
       confirmed: "Order Confirmed - We are preparing your order",
       processing: "Being Prepared - Your order is being prepared",
+      out_for_delivery: "Out for Delivery - Your order is on the way",
       completed: "Completed - Your order has been delivered/picked up",
       cancelled: "Cancelled - This order was cancelled",
     },

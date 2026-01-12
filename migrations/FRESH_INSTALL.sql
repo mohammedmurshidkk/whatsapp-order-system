@@ -279,7 +279,8 @@ CREATE TABLE sessions (
   delivery_time TIMESTAMP,
   pickup_outlet_id UUID REFERENCES business_outlets(id),
   pickup_time TIMESTAMP,
-  fulfillment_notes TEXT
+  fulfillment_notes TEXT,
+  custom_delivery_fee NUMERIC
 );
 
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS language VARCHAR(5) DEFAULT 'ml';

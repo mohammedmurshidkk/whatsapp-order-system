@@ -138,6 +138,7 @@ export interface MenuItem {
   price: number | null;
   sizes: MenuItemSize[] | null;
   is_available: boolean;
+  image_url?: string | null;  // Menu item photo URL
   created_at: string;
   category?: MenuCategory;
 }
@@ -178,6 +179,7 @@ export interface Session {
   // Beyond radius approval
   delivery_pending_approval?: boolean;
   delivery_approval_status?: 'pending' | 'approved' | 'rejected' | null;
+  custom_delivery_fee?: number | null; // Admin-set delivery fee for out-of-radius deliveries
   // i18n: Customer preferred language (ml=Malayalam, en=English)
   language?: 'en' | 'ml';
 }
@@ -258,6 +260,7 @@ export interface DeliveryFeeResult {
   fee: number;
   distance_meters: number;
   is_beyond_max_radius: boolean;
+  suggested_fee?: number; // Calculated fee for beyond-radius (auto-fill for admin)
 }
 
 export interface OrderItemData {
@@ -307,7 +310,8 @@ export type AIIntent =
   | 'item_not_available'
   | 'amenity_inquiry'        // Customer asking about an amenity (party hall, etc.)
   | 'amenity_booking_request' // Customer wants to book/reserve an amenity
-  | 'requires_intervention'; // Generic intervention needed (admin attention)
+  | 'requires_intervention' // Generic intervention needed (admin attention)
+  | 'show_photos';          // Customer wants to see photos of menu items/category
 
 export interface AIAddonResponse {
   addon_id?: string;
@@ -351,6 +355,10 @@ export interface AIResponse {
   suggested_addons?: string[]; // NEW: List of addon IDs to suggest
   customText?: string; // For save_custom_text intent (e.g., cake message)
   amenity?: AIAmenityResponse; // For amenity inquiry/booking intents
+  photoRequest?: {
+    category?: string;    // Category name to show photos for
+    item_name?: string;   // Specific item name (optional)
+  };
 }
 
 // Notification types (for admin alerts)

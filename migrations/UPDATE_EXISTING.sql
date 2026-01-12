@@ -495,9 +495,7 @@ ALTER TABLE business_amenities ADD COLUMN IF NOT EXISTS images TEXT[] DEFAULT '{
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS language VARCHAR(5) DEFAULT 'ml';
 COMMENT ON COLUMN sessions.language IS 'Customer preferred language: ml (Malayalam), en (English)';
 
--- Add custom_cake_context to sessions table
-ALTER TABLE sessions
-ADD COLUMN IF NOT EXISTS custom_cake_context JSONB DEFAULT NULL;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS custom_delivery_fee NUMERIC;
 
 -- ============================================
 -- DONE

@@ -207,7 +207,7 @@ ${outletsSection}${amenitiesSection}
 VALID ITEMS: [${itemNamesList}]
 
 📋 JSON RESPONSE FORMAT:
-{"reply": "1-2 sentences", "intent": "add_item|ask_question|modify_order|ready_for_checkout|confirm_order|cancel|show_menu|item_not_available|modify_custom_text|remove_custom_text|cancel_existing_order|check_order_status|conversation_ended|amenity_inquiry|amenity_booking_request", "item": {"name": "exact menu name", "quantity": 1, "size_or_weight": "exact size", "notes": "per-item modifier"}, "items": [{"name": "item1", "quantity": 1, "notes": "modifier1"}, {"name": "item2", "quantity": 1, "notes": "modifier2"}], "fulfillment": {"fulfillment_type": "delivery|takeaway", "delivery_address": "", "delivery_time": ""}, "customText": "cake message", "order_id": "OKS-1", "amenity": {"amenity_slug": "party_hall"}, "menu_slug": "cakes-menu"}
+{"reply": "1-2 sentences", "intent": "add_item|ask_question|modify_order|ready_for_checkout|confirm_order|cancel|show_menu|item_not_available|modify_custom_text|remove_custom_text|cancel_existing_order|check_order_status|conversation_ended|amenity_inquiry|amenity_booking_request|show_photos", "item": {"name": "exact menu name", "quantity": 1, "size_or_weight": "exact size", "notes": "per-item modifier"}, "items": [{"name": "item1", "quantity": 1, "notes": "modifier1"}, {"name": "item2", "quantity": 1, "notes": "modifier2"}], "fulfillment": {"fulfillment_type": "delivery|takeaway", "delivery_address": "", "delivery_time": ""}, "customText": "cake message", "order_id": "OKS-1", "amenity": {"amenity_slug": "party_hall"}, "menu_slug": "cakes-menu", "photoRequest": {"category": "category name"}}
 
 📝 ITEM NOTES (per-item modifiers):
 - When customer specifies different notes for items, use "items" array instead of "item"
@@ -219,7 +219,7 @@ VALID ITEMS: [${itemNamesList}]
 1. ADD ITEMS: Check menu → if size in message use "add_item" directly ("Rainbow 1kg" → add_item with size). Ask size only if not specified. Never checkout with empty cart.
 2. CHECKOUT: "that's all"/"done" → "ready_for_checkout" (only if cart has items)
 3. FULFILLMENT: delivery/takeaway → ask for address+time together. One type per order.
-4. TIME REQUIRED: "innu"=today, "nale"=tomorrow. Reject past times. Min wait ${minWait}min.
+4. TIME REQUIRED: "innu"=today, "nale"=tomorrow. Reject past times. If time is within ${minWait}min from now, use "requires_intervention" (admin approval needed for urgent orders).
 5. CONFIRM: After address+time collected → "confirm_order". One YES confirms order.
 
 INTENTS:
@@ -234,6 +234,11 @@ INTENTS:
 - custom_cake_inquiry: Customer asking about custom/personalized cake design
 - cancel_existing_order/check_order_status: Include order_id (e.g., "OKS-1")
 - show_menu: Show menu. If customer asks for specific menu (e.g., "cakes menu", "snacks"), include menu_slug matching the config slug
+- show_photos: Customer wants to see photos/images/pics of items. Detect ANY photo request pattern:
+  • Item photo: "X photo", "X pic", "X send photo", "send X photo", "picture of X", "X photo undo" → photoRequest.item_name
+  • Category photo: "cake photos", "send picture of cake", "cakes pic" → photoRequest.category
+  • Keywords: photo, pic, image, picture, send, show, ചിത്രം, ഫോട്ടോ, kaanikyoo
+  Match item_name/category from menu. If unclear, use ask_question.
 - amenity_inquiry: Customer asking about an amenity (party hall, etc.) - include amenity.amenity_slug
 - amenity_booking_request: Customer wants to book/reserve an amenity - notify admin
 - requires_intervention: Triggers admin support for urgent delivery, out of radius, or complex requests
@@ -263,6 +268,15 @@ Customer: "Change text to Happy Birthday" → {"reply": "Updated!", "intent": "m
 Customer: "Cancel OKS-1" → {"reply": "Cancelling OKS-1.", "intent": "cancel_existing_order", "order_id": "OKS-1"}
 Customer: "Do you have party hall?" → {"reply": "Yes! Let me share our party hall details.", "intent": "amenity_inquiry", "amenity": {"amenity_slug": "party_hall"}}
 Customer: "I want to book the party hall" → {"reply": "I'll notify our team about your booking request!", "intent": "amenity_booking_request", "amenity": {"amenity_slug": "party_hall"}}
+Customer: "Show me cake photos" → {"reply": "ഇതാ!", "intent": "show_photos", "photoRequest": {"category": "Cakes"}}
+Customer: "Premium cake pics" → {"reply": "ഇതാ!", "intent": "show_photos", "photoRequest": {"category": "Premium Cakes"}}
+Customer: "Blueberry Mousse photo" → {"reply": "ഇതാ!", "intent": "show_photos", "photoRequest": {"item_name": "Blueberry Mousse"}}
+Customer: "Honey Almond send photo" → {"reply": "ഇതാ!", "intent": "show_photos", "photoRequest": {"item_name": "Honey Almond"}}
+Customer: "send photo of Rainbow" → {"reply": "ഇതാ!", "intent": "show_photos", "photoRequest": {"item_name": "Rainbow"}}
+Customer: "Could you please send picture of the cake" → {"reply": "ഇതാ!", "intent": "show_photos", "photoRequest": {"category": "Cakes"}}
+Customer: "Blueberry Mousse photo undo" → {"reply": "ഇതാ!", "intent": "show_photos", "photoRequest": {"item_name": "Blueberry Mousse"}}
+Customer: "Rainbow nte photo kanikku" → {"reply": "ഇതാ!", "intent": "show_photos", "photoRequest": {"item_name": "Rainbow"}}
+Customer: "I want to see photos" → {"reply": "Which item/category?", "intent": "ask_question"}
 
 STYLE: Friendly, short replies. Emojis sparingly. Prices as ₹150.
 
@@ -428,6 +442,7 @@ function parseAIResponse(responseText: string): AIResponse {
       addon: parsed.addon,  // For remove_addon/add_addon intents
       customText: parsed.customText,  // For modify_custom_text intent
       amenity: parsed.amenity,  // For amenity_inquiry/amenity_booking_request intents
+      photoRequest: parsed.photoRequest,  // For show_photos intent
     };
   } catch (error) {
     logger.warn('Failed to parse AI response as JSON', { error, responseText });

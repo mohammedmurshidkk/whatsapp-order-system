@@ -358,13 +358,21 @@ export async function approveDelivery(req: AuthRequest, res: Response): Promise<
       return;
     }
 
-    // Update session - mark as approved
+    // Update session - mark as approved and save custom delivery fee if provided
+    const updateData: Record<string, unknown> = {
+      delivery_pending_approval: false,
+      delivery_approval_status: 'approved',
+    };
+
+    // Save custom delivery fee if admin specified one for out-of-radius delivery
+    if (customDeliveryFee !== undefined && customDeliveryFee !== null) {
+      updateData.custom_delivery_fee = Number(customDeliveryFee);
+      logger.info(`Custom delivery fee set: ₹${customDeliveryFee} for session ${sessionId}`);
+    }
+
     await supabase
       .from('sessions')
-      .update({
-        delivery_pending_approval: false,
-        delivery_approval_status: 'approved',
-      })
+      .update(updateData)
       .eq('id', sessionId);
 
     // Get business for timezone
