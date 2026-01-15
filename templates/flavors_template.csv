@@ -1,0 +1,8 @@
+flavor_name,sizes,is_active
+Vanilla,500g:400:true|1kg:750:false|2kg:1400:false,true
+Chocolate Truffle,500g:450:true|1kg:850:false|2kg:1600:false,true
+Black Forest,500g:400:true|1kg:750:false|2kg:1400:false,true
+Butterscotch,500g:400:true|1kg:750:false|2kg:1400:false,true
+Red Velvet,500g:500:true|1kg:950:false|2kg:1800:false,true
+Pineapple,500g:400:true|1kg:750:false|2kg:1400:false,true
+Mango,500g:450:true|1kg:850:false|2kg:1600:false,true

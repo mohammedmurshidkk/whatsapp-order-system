@@ -594,3 +594,29 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_id TEXT;
 -- Add index for faster lookups
 CREATE INDEX IF NOT EXISTS idx_messages_media_id ON messages(media_id) WHERE media_id IS NOT NULL;
 
+  -- Create delivery_boys table
+  CREATE TABLE delivery_boys (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    phone VARCHAR(50) NOT NULL,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+  );
+
+  -- Index for business lookup
+  CREATE INDEX idx_delivery_boys_business ON delivery_boys(business_id);
+
+  -- Unique phone per business
+  CREATE UNIQUE INDEX idx_delivery_boys_phone_business ON delivery_boys(business_id, phone);
+
+  -- Add delivery assignment columns to orders table
+  ALTER TABLE orders
+  ADD COLUMN IF NOT EXISTS delivery_boy_id UUID REFERENCES delivery_boys(id),
+  ADD COLUMN IF NOT EXISTS delivery_assigned_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS delivery_assigned_by VARCHAR(255),
+  ADD COLUMN IF NOT EXISTS delivery_admin_note TEXT;
+
+  -- Index for delivery boy orders
+  CREATE INDEX idx_orders_delivery_boy ON orders(delivery_boy_id);

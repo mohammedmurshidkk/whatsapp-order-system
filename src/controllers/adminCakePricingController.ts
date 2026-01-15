@@ -2,6 +2,8 @@ import { Response } from 'express';
 import { AuthRequest, getBusinessId } from '../middleware/auth';
 import { supabase } from '../config/database';
 import { logger } from '../utils/logger';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   getFlavorPricings,
   getFlavorPricingById,
@@ -15,6 +17,10 @@ import {
   seedStandardDesignElements,
   getFullPricingConfig,
 } from '../services/cakePricingService';
+import {
+  importFlavorsFromCSV,
+  exportFlavorsToCSV,
+} from '../services/flavorImportService';
 import { CakeDesignPriceType, CakeFlavorSize } from '../types';
 
 // ============================================
@@ -479,5 +485,127 @@ export async function updateConfig(req: AuthRequest, res: Response): Promise<voi
   } catch (error) {
     logger.error('Failed to update pricing config', error);
     res.status(500).json({ error: 'Failed to update pricing config' });
+  }
+}
+
+// ============================================
+// FLAVOR CSV IMPORT / EXPORT
+// ============================================
+
+/**
+ * Import flavors from CSV content passed in body
+ */
+export async function importFlavors(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const { csv, replace } = req.body;
+
+    if (!csv) {
+      res.status(400).json({ error: 'CSV content is required in request body' });
+      return;
+    }
+
+    const result = await importFlavorsFromCSV(businessId, csv, replace === true);
+
+    if (result.success) {
+      res.status(200).json({
+        message: 'Flavors imported successfully',
+        ...result,
+      });
+    } else {
+      res.status(207).json({
+        message: 'Flavors imported with some errors',
+        ...result,
+      });
+    }
+  } catch (error) {
+    logger.error('Failed to import flavors', error);
+    res.status(500).json({ error: 'Failed to import flavors' });
+  }
+}
+
+/**
+ * Import flavors from uploaded CSV file
+ */
+export async function importFlavorsFile(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    if (!req.file) {
+      res.status(400).json({ error: 'No CSV file uploaded. Use form field name "flavors"' });
+      return;
+    }
+
+    const replace = req.query.replace === 'true';
+    const csv = req.file.buffer.toString('utf-8');
+
+    const result = await importFlavorsFromCSV(businessId, csv, replace);
+
+    res.status(200).json({
+      message: result.success ? 'Flavors imported successfully' : 'Flavors imported with errors',
+      fileName: req.file.originalname,
+      ...result,
+    });
+  } catch (error) {
+    logger.error('Failed to upload flavors file', error);
+    res.status(500).json({ error: 'Failed to import flavors' });
+  }
+}
+
+/**
+ * Export flavors to CSV
+ */
+export async function exportFlavors(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const csv = await exportFlavorsToCSV(businessId);
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename=flavors_${businessId}.csv`);
+    res.status(200).send(csv);
+  } catch (error) {
+    logger.error('Failed to export flavors', error);
+    res.status(500).json({ error: 'Failed to export flavors' });
+  }
+}
+
+/**
+ * Download blank flavor template
+ */
+export async function downloadFlavorTemplate(_req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const templatePath = path.join(__dirname, '../../templates/flavors_template.csv');
+
+    if (fs.existsSync(templatePath)) {
+      const template = fs.readFileSync(templatePath, 'utf-8');
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename=flavors_template.csv');
+      res.status(200).send(template);
+    } else {
+      const defaultTemplate = `flavor_name,sizes,is_active
+Vanilla,500g:400:true|1kg:750:false,true
+Chocolate Truffle,500g:450:true|1kg:850:false,true`;
+
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename=flavors_template.csv');
+      res.status(200).send(defaultTemplate);
+    }
+  } catch (error) {
+    logger.error('Failed to send flavor template', error);
+    res.status(500).json({ error: 'Failed to download flavor template' });
   }
 }

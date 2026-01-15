@@ -253,6 +253,11 @@ export interface Order {
   fulfillment_notes?: string | null;
   delivery_fee?: number;
   updated_at?: string;
+  // Delivery boy assignment
+  delivery_boy_id?: string | null;
+  delivery_assigned_at?: string | null;
+  delivery_assigned_by?: string | null;
+  delivery_admin_note?: string | null;
 }
 
 // Delivery fee calculation result
@@ -453,6 +458,25 @@ export interface WhatsAppWebhookBody {
 export interface TestMessageRequest {
   phone: string;
   message: string;
+}
+
+// Delivery Boy types
+export interface DeliveryBoy {
+  id: string;
+  business_id: string;
+  name: string;
+  phone: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at?: string;
+}
+
+// Delivery assignment on orders
+export interface DeliveryAssignment {
+  delivery_boy_id: string;
+  assigned_at: string;
+  assigned_by?: string;
+  admin_note?: string;
 }
 
 // ============================================
