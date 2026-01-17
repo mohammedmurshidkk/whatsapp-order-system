@@ -11,6 +11,8 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "test:scenarios": "jest --testPathPattern=orderFlow",
+    "test:integration": "ts-node tests/integration/testRunner.ts",
+    "test:generate-scenarios": "ts-node tests/integration/generateFromMessages.ts",
     "test:parse-chats": "ts-node tests/utils/chatParser.ts tests/chats",
     "test:add-scenario": "ts-node tests/utils/addScenario.ts",
     "test:list-scenarios": "ts-node tests/utils/addScenario.ts list",

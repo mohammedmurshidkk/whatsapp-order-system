@@ -813,3 +813,154 @@ export async function processMessageWithAI(
     };
   }
 }
+
+// ============================================
+// IMAGE CLASSIFICATION (Gemini Vision)
+// ============================================
+
+export type ImageClassification =
+  | 'cake_design'      // A cake photo/design for customization
+  | 'menu_screenshot'  // Screenshot of menu/item
+  | 'food_photo'       // General food photo (not cake)
+  | 'other';           // Unrelated image
+
+export interface ImageClassificationResult {
+  classification: ImageClassification;
+  confidence: number;        // 0.0 - 1.0
+  isCake: boolean;           // Quick check: is this a cake?
+  detectedItemName?: string; // If menu_screenshot, what item is it?
+  reasoning: string;         // Why this classification
+}
+
+/**
+ * Classify an image using Gemini Vision
+ * Determines if image is: cake_design, menu_screenshot, food_photo, or other
+ */
+export async function classifyImageWithGemini(
+  imageBase64: string,
+  mimeType: string,
+  menuItemNames?: string[] // Optional: menu items for matching screenshots
+): Promise<ImageClassificationResult> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    logger.error('GEMINI_API_KEY not configured for image classification');
+    return {
+      classification: 'other',
+      confidence: 0,
+      isCake: false,
+      reasoning: 'API key not configured',
+    };
+  }
+
+  const menuContext = menuItemNames && menuItemNames.length > 0
+    ? `\n\nMENU ITEMS (for matching screenshots): ${menuItemNames.join(', ')}`
+    : '';
+
+  const prompt = `You are an image classifier for a bakery/cafe ordering system. Analyze this image and classify it.
+
+CLASSIFICATION TYPES:
+1. "cake_design" - A photo of a cake, cake design, or reference image for custom cake order
+   - Birthday cakes, wedding cakes, themed cakes, decorated cakes
+   - Cake design reference photos from internet/Pinterest
+   - Photos showing cake decoration, fondant work, etc.
+
+2. "menu_screenshot" - A screenshot of a menu, price list, or specific menu item
+   - Screenshots from WhatsApp/website showing menu items
+   - Photos of menu boards or price lists
+   - If you can identify a specific item name, include it
+
+3. "food_photo" - Other food photos (not cakes)
+   - Pastries, cookies, bread, snacks, beverages
+   - Food that is NOT a cake
+
+4. "other" - Non-food related images
+   - Receipts, documents, random photos, selfies, etc.
+${menuContext}
+
+IMPORTANT RULES:
+- If the image shows ANY type of cake (even partial), classify as "cake_design"
+- Be generous with "cake_design" - if it looks like a cake reference, it probably is
+- For menu screenshots, try to identify the item name if visible
+
+Respond with JSON only (no markdown):
+{"classification": "cake_design|menu_screenshot|food_photo|other", "confidence": 0.0-1.0, "isCake": true/false, "detectedItemName": "item name if menu screenshot", "reasoning": "brief explanation"}`;
+
+  try {
+    const { GEMINI_MODEL_NAME } = await import('../config/constants');
+
+    const response = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL_NAME}:generateContent?key=${apiKey}`,
+      {
+        contents: [
+          {
+            parts: [
+              {
+                inline_data: {
+                  mime_type: mimeType,
+                  data: imageBase64,
+                },
+              },
+              {
+                text: prompt,
+              },
+            ],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.1, // Low temperature for consistent classification
+          maxOutputTokens: 500,
+        },
+      },
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 30000,
+      }
+    );
+
+    const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) {
+      logger.warn('Empty response from Gemini for image classification');
+      return {
+        classification: 'other',
+        confidence: 0.5,
+        isCake: false,
+        reasoning: 'Empty API response',
+      };
+    }
+
+    // Parse JSON response
+    let jsonStr = text.trim();
+    jsonStr = jsonStr.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '').trim();
+
+    // Extract first JSON object
+    const firstBrace = jsonStr.indexOf('{');
+    const lastBrace = jsonStr.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      jsonStr = jsonStr.substring(firstBrace, lastBrace + 1);
+    }
+
+    const parsed = JSON.parse(jsonStr);
+
+    const result: ImageClassificationResult = {
+      classification: parsed.classification || 'other',
+      confidence: parsed.confidence || 0.5,
+      isCake: parsed.isCake === true || parsed.classification === 'cake_design',
+      detectedItemName: parsed.detectedItemName,
+      reasoning: parsed.reasoning || 'No reasoning provided',
+    };
+
+    logger.info(`Image classified: ${result.classification} (${Math.round(result.confidence * 100)}% confidence) - ${result.reasoning}`);
+    return result;
+
+  } catch (error: any) {
+    logger.error('Failed to classify image with Gemini', error);
+
+    // Fallback: assume it might be a cake (safer for bakery context)
+    return {
+      classification: 'other',
+      confidence: 0.3,
+      isCake: false,
+      reasoning: `Classification failed: ${error.message}`,
+    };
+  }
+}

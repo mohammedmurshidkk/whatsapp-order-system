@@ -193,6 +193,9 @@ export const en = {
   // Custom cake
   customCake: {
     added: "Great! Your custom cake order has been added! 🎂",
+    askForImage: "Yes! We do custom cakes! 🎂\n\nPlease share a photo of the design you'd like.\n\nAlso let us know:\n• Weight (e.g., 1kg, 2kg)\n• Flavor{{flavors}}",
+    askWeightFlavor: "Nice design! 🎂\n\nPlease let us know:\n• Weight (e.g., 1kg, 2kg)\n• Flavor{{flavors}}",
+    askIfCustomize: "Nice cake photo! 🎂\n\nWould you like us to make a custom cake like this?",
     waitingConfirmation: "⏳ Your custom cake order is awaiting time confirmation from our team.\n\nWe're reviewing your requested time and will confirm shortly.\n\n_Please wait for our confirmation before proceeding. Thank you for your patience! 🙏_",
     timeConfirmRequest: "⏰ We've noted your preferred {{type}} time: *{{time}}*\n\nSince this is a custom designed cake, our team will confirm if we can deliver by this time.\n\n_You'll receive a confirmation shortly. Thank you for your patience! 🙏_",
     quoteWaiting: "Our team is still preparing the customized quote for your cake design. We will share it with you as soon as it's ready! 🙏",

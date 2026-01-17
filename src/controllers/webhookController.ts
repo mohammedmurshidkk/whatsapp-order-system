@@ -17,7 +17,7 @@ import {
   saveIncomingMediaMessage,
 } from '../services/messageService';
 import { processIncomingMedia } from '../services/mediaService';
-import { processMessageWithAI, classifyCustomTextResponse } from '../services/aiService';
+import { processMessageWithAI, classifyCustomTextResponse, classifyImageWithGemini } from '../services/aiService';
 import {
   normalizeManglish,
   containsMalayalamScript,
@@ -121,6 +121,26 @@ import {
 import { SupportedLanguage, detectLanguageRequest, t } from '../i18n';
 
 const CAKE_KEYWORDS = ['cake', 'birthday', 'anniversary', 'kg', 'flavor', 'chocolate', 'vanilla', 'fondant', 'design', 'custom'];
+
+/**
+ * Format available flavors from pricing config for display
+ * Returns string like "\n\nAvailable flavors: Chocolate, Vanilla, Red Velvet"
+ */
+async function formatAvailableFlavors(businessId: string, lang: 'en' | 'ml'): Promise<string> {
+  try {
+    const pricingConfig = await getFullPricingConfig(businessId);
+    if (!pricingConfig.flavorsGrouped || pricingConfig.flavorsGrouped.length === 0) {
+      return '';
+    }
+
+    const flavorNames = pricingConfig.flavorsGrouped.map(f => f.flavor_name);
+    const prefix = lang === 'ml' ? '\n\nലഭ്യമായ ഫ്ലേവറുകൾ: ' : '\n\nAvailable flavors: ';
+    return prefix + flavorNames.join(', ');
+  } catch (error) {
+    logger.warn('Failed to get flavors for formatting', error);
+    return '';
+  }
+}
 
 // Track last added item per session for add-on attachment
 const lastAddedItemMap = new Map<string, string>(); // sessionId -> itemId
@@ -491,6 +511,34 @@ export async function processMessage(
       await clearSessionCustomCakeContext(session.id);
       // Message will be saved later in normal AI processing flow
       // Continue to normal AI processing
+    }
+  }
+
+  // 3. Check if user is responding with weight/flavor after sending cake image first
+  if (session.custom_cake_context?.inquiry_type === 'image_first' && session.custom_cake_context?.image_url) {
+    // Extract weight/flavor from message
+    const extractedWeight = messageText.match(/(\d+(?:\.\d+)?\s*(?:kg|g|lb|pound)s?)/i)?.[1];
+    const extractedFlavor = messageText.match(/(chocolate|vanilla|strawberry|red velvet|butterscotch|black forest|truffle|mango|pineapple|blueberry|oreo)/i)?.[0];
+
+    if (extractedWeight || extractedFlavor) {
+      logger.info(`User provided weight/flavor for image_first flow: weight=${extractedWeight}, flavor=${extractedFlavor}`);
+
+      // Save the message before processing
+      await saveIncomingMessage(session.id, originalMessage);
+
+      const imageUrl = session.custom_cake_context.image_url;
+      await clearSessionCustomCakeContext(session.id);
+
+      await processCustomCakeWithIntervention(
+        businessId,
+        session.id,
+        customer.id,
+        phone,
+        imageUrl,
+        extractedWeight,
+        extractedFlavor
+      );
+      return null; // Handled by intervention
     }
   }
 
@@ -1833,12 +1881,14 @@ export async function processMessage(
           flavor: extractedFlavor,
         });
 
-        // Ask for image
-        replyMessage = t('customCake.askForImage', lang);
-        if (!replyMessage || replyMessage.includes('customCake.')) {
-          replyMessage = "Yes! Please share an image of the design you'd like, and let us know the weight and flavor.";
-        }
+        // Get available flavors to show
+        const availableFlavorsText = await formatAvailableFlavors(business.id, lang);
 
+        // Ask for image with flavor list
+        replyMessage = t('customCake.askForImage', lang, { flavors: availableFlavorsText });
+        if (!replyMessage || replyMessage.includes('customCake.')) {
+          replyMessage = `Yes! We do custom cakes! 🎂\n\nPlease share a photo of the design you'd like.\n\nAlso let us know:\n• Weight (e.g., 1kg, 2kg)\n• Flavor${availableFlavorsText}`;
+        }
 
       } else {
         // Custom cakes not enabled
@@ -3069,10 +3119,12 @@ export async function handleWhatsAppWebhook(
             logger.info(`Image saved to messages: ${imageUrl ? 'with URL' : 'without URL'}`);
 
             if (customCakeEnabled) {
-              // 1. Get current context
+              // 1. Get current context and language
               const context = session.custom_cake_context;
+              const lang = getSessionLanguage(session);
 
               // CASE 1: Already awaiting image (text inquiry came first)
+              // User already asked about custom cakes, so we don't need to ask again
               if (context?.awaiting_image) {
                 logger.info(`Processing image for awaiting context: session ${session.id}`);
 
@@ -3113,14 +3165,74 @@ export async function handleWhatsAppWebhook(
                 continue;
               }
 
-              // CASE 3: Check recent messages (simple check if no context)
-              // We skip this for now to rely on explicit confirmation if no context
+              // CASE 3: Classify image using Gemini Vision to determine what it is
+              logger.info(`Classifying image for session ${session.id}`);
 
-              // CASE 4: No context - store pending and wait 30s
-              logger.info(`No context for image - storing pending state for session ${session.id}`);
+              let classification: Awaited<ReturnType<typeof classifyImageWithGemini>> | null = null;
+
+              if (imageBuffer) {
+                try {
+                  const menuItems = await getMenuItems(business.id);
+                  const menuItemNames = menuItems.map(item => item.name);
+                  const imageBase64 = imageBuffer.toString('base64');
+
+                  classification = await classifyImageWithGemini(imageBase64, imageMimeType, menuItemNames);
+                  logger.info(`Image classification result: ${classification.classification} (${Math.round(classification.confidence * 100)}% confidence)`);
+                } catch (error) {
+                  logger.warn('Image classification failed, falling back to clarification', error);
+                }
+              }
+
+              // CASE 3a: Classified as cake_design - ask for weight/flavor (don't ask if custom cake again!)
+              if (classification?.isCake || classification?.classification === 'cake_design') {
+                logger.info(`Image classified as cake design - asking for weight/flavor`);
+
+                // Store image URL in context for later use
+                await updateSessionCustomCakeContext(session.id, {
+                  image_url: imageUrl,
+                  awaiting_image: false,
+                  inquiry_type: 'image_first',
+                });
+
+                // Get available flavors
+                const availableFlavorsText = await formatAvailableFlavors(business.id, lang);
+
+                // Ask for weight and flavor (image already received!)
+                let askWeightFlavorMsg = t('customCake.askWeightFlavor', lang, { flavors: availableFlavorsText });
+                if (!askWeightFlavorMsg || askWeightFlavorMsg.includes('customCake.')) {
+                  askWeightFlavorMsg = `Nice design! 🎂\n\nPlease let us know:\n• Weight (e.g., 1kg, 2kg)\n• Flavor${availableFlavorsText}`;
+                }
+
+                await sendWhatsAppMessage(phone, askWeightFlavorMsg);
+                await saveOutgoingMessage(session.id, askWeightFlavorMsg);
+                continue;
+              }
+
+              // CASE 3b: Classified as menu_screenshot - try to identify the item
+              if (classification?.classification === 'menu_screenshot' && classification.detectedItemName) {
+                logger.info(`Image classified as menu screenshot - detected item: ${classification.detectedItemName}`);
+
+                // Try to find the item in menu
+                const menuItems = await getMenuItems(business.id);
+                const matchedItem = menuItems.find(item =>
+                  item.name.toLowerCase().includes(classification!.detectedItemName!.toLowerCase()) ||
+                  classification!.detectedItemName!.toLowerCase().includes(item.name.toLowerCase())
+                );
+
+                if (matchedItem) {
+                  const confirmMsg = lang === 'ml'
+                    ? `"${matchedItem.name}" ഓർഡർ ചെയ്യണോ? 🛒`
+                    : `Would you like to order "${matchedItem.name}"? 🛒`;
+                  await sendWhatsAppMessage(phone, confirmMsg);
+                  await saveOutgoingMessage(session.id, confirmMsg);
+                  continue;
+                }
+              }
+
+              // CASE 4: No context and not clearly a cake - ask for clarification
+              logger.info(`Image not classified as cake - storing pending state for session ${session.id}`);
 
               // Store pending state with actual image URL
-              // Note: We store the buffer reference for later use when user confirms
               await updateSessionCustomCakeContext(session.id, {
                 pending_image_id: message.image.id,
                 pending_image_timestamp: new Date().toISOString(),
@@ -3128,7 +3240,25 @@ export async function handleWhatsAppWebhook(
                 awaiting_clarification: false,
               });
 
-              // Don't reply yet - wait for follow-up (30s check in processMessage)
+              // If it looks like a food photo (not cake), ask clarification immediately
+              if (classification?.classification === 'food_photo' || classification?.classification === 'other') {
+                const clarificationMsg = t('image.askContext', lang);
+                const finalMsg = (!clarificationMsg || clarificationMsg.includes('image.'))
+                  ? `I received your image! 📸\n\nCould you please let me know what this is for?\n\n• Is this a *cake design* you'd like us to create?\n• Or something else?`
+                  : clarificationMsg;
+
+                await sendWhatsAppMessage(phone, finalMsg);
+                await saveOutgoingMessage(session.id, finalMsg);
+
+                await updateSessionCustomCakeContext(session.id, {
+                  pending_image_id: message.image.id,
+                  pending_image_timestamp: new Date().toISOString(),
+                  image_url: imageUrl,
+                  awaiting_clarification: true,
+                });
+              }
+
+              // Don't reply yet if classification unclear - wait for follow-up (30s check in processMessage)
               continue;
 
             } else {

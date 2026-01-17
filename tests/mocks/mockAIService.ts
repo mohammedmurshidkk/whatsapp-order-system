@@ -181,6 +181,143 @@ const PATTERN_RULES: PatternRule[] = [
     }),
   },
 
+  // Confirmation - "yes", "confirm", "ok", "sheri", "sheriya" (MUST be before address pattern)
+  {
+    pattern: /^(yes|confirm|ok|okay|sheri|sheriya|athe)$/i,
+    response: (_, context) => {
+      if (context.hasDeliveryAddress || context.hasPickupOutlet) {
+        return {
+          reply: "Order confirmed! Thank you.",
+          intent: 'confirm_order',
+        };
+      }
+      return {
+        reply: "What would you like to confirm?",
+        intent: 'ask_question',
+      };
+    },
+  },
+
+  // Modify custom text - "change text to Happy Birthday" (MUST be before address pattern)
+  {
+    pattern: /\b(change|update|modify)\s*(the\s*)?(text|message|writing)\s*(to|into)?\s*["']?(.+?)["']?\s*$/i,
+    response: (match) => {
+      const newText = match[5]?.trim();
+      if (newText) {
+        return {
+          reply: `Updated the cake message to "${newText}".`,
+          intent: 'modify_custom_text',
+          customText: newText,
+        };
+      }
+      return {
+        reply: "What would you like the new message to be?",
+        intent: 'modify_custom_text',
+      };
+    },
+  },
+
+  // Add custom text - "add Happy Birthday on cake", "Add writing on cake" (MUST be before address pattern)
+  {
+    pattern: /\b(add|write)\s*(["']?.+?["']?)?\s*(on|to)\s*(the\s*)?(cake|item)/i,
+    response: (match) => {
+      const text = match[2]?.replace(/["']/g, '').trim();
+      if (text && text.toLowerCase() !== 'writing' && text.toLowerCase() !== 'text') {
+        return {
+          reply: `Added "${text}" to your cake.`,
+          intent: 'modify_custom_text',
+          customText: text,
+        };
+      }
+      return {
+        reply: "What would you like the message to be?",
+        intent: 'modify_custom_text',
+      };
+    },
+  },
+
+  // Remove custom text - "remove the writing", "no text", "remove writing" (MUST be before address pattern)
+  {
+    pattern: /\b(remove|delete|no)\s*(the\s*)?(text|message|writing)\b/i,
+    response: () => ({
+      reply: "I've removed the text from your cake.",
+      intent: 'remove_custom_text',
+    }),
+  },
+
+  // Remove addon - "Remove candle", "No silver coat" (MUST be before address pattern)
+  {
+    pattern: /\b(remove|no|cancel|don'?t\s*want)\s*(the\s*)?(candle|silver\s*coat|packing)\b/i,
+    response: (match) => {
+      const addonName = match[3].trim().toLowerCase();
+      return {
+        reply: `Removed ${addonName} from your order.`,
+        intent: 'remove_addon',
+        addon: { addon_name: addonName },
+      };
+    },
+  },
+
+  // Cancel order with ID - "Cancel order UPS-1" (MUST be before address pattern)
+  {
+    pattern: /\bcancel\s*(order)?\s*(#?\s*)?([A-Z]{2,3}-?\d+)/i,
+    response: (match) => {
+      const orderId = match[3];
+      return {
+        reply: `Cancelling order ${orderId}.`,
+        intent: 'cancel_existing_order',
+        order_id: orderId,
+      };
+    },
+  },
+
+  // Cancel order without ID - "Cancel my order" (MUST be before address pattern)
+  {
+    pattern: /\bcancel\s+(my\s+)?(order|orders?)\b/i,
+    response: () => ({
+      reply: "Please provide your order number to cancel.",
+      intent: 'cancel_existing_order',
+    }),
+  },
+
+  // Check order status with ID - "Status of UPS-2" (MUST be before address pattern)
+  {
+    pattern: /\b(status|where|track)\s*(of|is)?\s*(order)?\s*(#?\s*)?([A-Z]{2,3}-?\d+)/i,
+    response: (match) => {
+      const orderId = match[5];
+      return {
+        reply: `Checking status of ${orderId}.`,
+        intent: 'check_order_status',
+        order_id: orderId,
+      };
+    },
+  },
+
+  // Check order status without ID - "Where is my order" (MUST be before address pattern)
+  {
+    pattern: /\b(where\s+is|status\s+of|track)\s+(my\s+)?(order|orders?)\b/i,
+    response: () => ({
+      reply: "Please provide your order number.",
+      intent: 'check_order_status',
+    }),
+  },
+
+  // Outlet selection - "Bun Studio cafe" (MUST be before address pattern)
+  {
+    pattern: /\b(bun\s*studio|outlet\s*\d+)\b/i,
+    response: (match) => {
+      const outlet = match[1].trim();
+      return {
+        reply: `Pickup at: ${outlet}. When would you like to pick up?`,
+        intent: 'collect_pickup_info',
+        fulfillment: {
+          fulfillment_type: 'takeaway',
+          pickup_outlet_id: 'outlet-1',
+        },
+      };
+    },
+  },
+
   // Address with time - "MG Road, tomorrow 5pm", "Kottakkal, nale 5pm"
   {
     pattern: /^(.+?),\s*(today|tomorrow|nale|innu)\s*(\d{1,2}\s*(am|pm)?)/i,
@@ -200,10 +337,21 @@ const PATTERN_RULES: PatternRule[] = [
   },
 
   // Address only (when in fulfillment flow) - matches place names
+  // IMPORTANT: Only match if in fulfillment context AND text doesn't match other patterns
   {
     pattern: /^([a-zA-Z][a-zA-Z\s]{2,})$/i,
     response: (match, context) => {
       const text = match[1].trim();
+      const lowerText = text.toLowerCase();
+
+      // Skip if matches keywords that should be handled by other patterns
+      const skipKeywords = ['remove', 'cancel', 'no ', 'where', 'status', 'add', 'change', 'write'];
+      if (skipKeywords.some(kw => lowerText.startsWith(kw) || lowerText.includes(kw))) {
+        return {
+          reply: "I didn't quite understand. Could you please rephrase?",
+          intent: 'ask_question',
+        };
+      }
 
       // If has fulfillment type, treat as address
       if (context.hasFulfillmentType && !context.hasDeliveryAddress) {
@@ -234,143 +382,6 @@ const PATTERN_RULES: PatternRule[] = [
         reply: `Time set to ${time}. Please confirm YES.`,
         intent: 'collect_delivery_info',
         fulfillment: { delivery_time: time },
-      };
-    },
-  },
-
-  // Outlet selection - "Bun Studio cafe"
-  {
-    pattern: /\b(bun\s*studio|outlet\s*\d+)\b/i,
-    response: (match) => {
-      const outlet = match[1].trim();
-      return {
-        reply: `Pickup at: ${outlet}. When would you like to pick up?`,
-        intent: 'collect_pickup_info',
-        fulfillment: {
-          fulfillment_type: 'takeaway',
-          pickup_outlet_id: 'outlet-1',
-        },
-      };
-    },
-  },
-
-  // Confirmation - "yes", "confirm", "ok", "sheri", "sheriya"
-  {
-    pattern: /^(yes|confirm|ok|okay|sheri|sheriya)$/i,
-    response: (_, context) => {
-      if (context.hasDeliveryAddress || context.hasPickupOutlet) {
-        return {
-          reply: "Order confirmed! Thank you.",
-          intent: 'confirm_order',
-        };
-      }
-      return {
-        reply: "What would you like to confirm?",
-        intent: 'ask_question',
-      };
-    },
-  },
-
-  // Modify custom text - "change text to Happy Birthday", "Change the text to Happy Birthday"
-  {
-    pattern: /\b(change|update|modify)\s*(the\s*)?(text|message|writing)\s*(to|into)?\s*["']?(.+?)["']?\s*$/i,
-    response: (match) => {
-      const newText = match[5]?.trim();
-      if (newText) {
-        return {
-          reply: `Updated the cake message to "${newText}".`,
-          intent: 'modify_custom_text',
-          customText: newText,
-        };
-      }
-      return {
-        reply: "What would you like the new message to be?",
-        intent: 'modify_custom_text',
-      };
-    },
-  },
-
-  // Add custom text - "add Happy Birthday on cake", "Add writing on cake"
-  {
-    pattern: /\b(add|write)\s*(["']?.+?["']?)?\s*(on|to)\s*(the\s*)?(cake|item)/i,
-    response: (match) => {
-      const text = match[2]?.replace(/["']/g, '').trim();
-      if (text && text.toLowerCase() !== 'writing' && text.toLowerCase() !== 'text') {
-        return {
-          reply: `Added "${text}" to your cake.`,
-          intent: 'modify_custom_text',
-          customText: text,
-        };
-      }
-      return {
-        reply: "What would you like the message to be?",
-        intent: 'modify_custom_text',
-      };
-    },
-  },
-
-  // Remove custom text - "remove the writing", "no text", "remove writing"
-  {
-    pattern: /\b(remove|delete|no)\s*(the\s*)?(text|message|writing)\b/i,
-    response: () => ({
-      reply: "I've removed the text from your cake.",
-      intent: 'remove_custom_text',
-    }),
-  },
-
-  // Cancel order with ID - "Cancel order UPS-1"
-  {
-    pattern: /\bcancel\s*(order)?\s*(#?\s*)?([A-Z]{2,3}-?\d+)/i,
-    response: (match) => {
-      const orderId = match[3];
-      return {
-        reply: `Cancelling order ${orderId}.`,
-        intent: 'cancel_existing_order',
-        order_id: orderId,
-      };
-    },
-  },
-
-  // Cancel order without ID - "Cancel my order"
-  {
-    pattern: /\bcancel\s*(my\s*)?(order|orders?)\b/i,
-    response: () => ({
-      reply: "Please provide your order number to cancel.",
-      intent: 'cancel_existing_order',
-    }),
-  },
-
-  // Check order status with ID - "Status of UPS-2"
-  {
-    pattern: /\b(status|where|track)\s*(of|is)?\s*(order)?\s*(#?\s*)?([A-Z]{2,3}-?\d+)/i,
-    response: (match) => {
-      const orderId = match[5];
-      return {
-        reply: `Checking status of ${orderId}.`,
-        intent: 'check_order_status',
-        order_id: orderId,
-      };
-    },
-  },
-
-  // Check order status without ID - "Where is my order"
-  {
-    pattern: /\b(where\s*is|status\s*of|track)\s*(my\s*)?(order|orders?)\b/i,
-    response: () => ({
-      reply: "Please provide your order number.",
-      intent: 'check_order_status',
-    }),
-  },
-
-  // Remove addon - "Remove candle", "No silver coat"
-  {
-    pattern: /\b(remove|no|cancel|don'?t\s*want)\s*(the\s*)?(candle|silver\s*coat|packing)\b/i,
-    response: (match) => {
-      const addonName = match[3].trim();
-      return {
-        reply: `Removed ${addonName} from your order.`,
-        intent: 'remove_addon',
-        addon: { addon_name: addonName },
       };
     },
   },
@@ -432,6 +443,16 @@ export class MockAIService {
    */
   processMessage(message: string): MockAIResponse {
     const normalizedMessage = message.trim();
+
+    // Handle pending custom text first - any message becomes the custom text
+    if (this.context.pendingCustomText) {
+      this.context.pendingCustomText = false;
+      return {
+        reply: `Updated the cake message to "${normalizedMessage}".`,
+        intent: 'modify_custom_text',
+        customText: normalizedMessage,
+      };
+    }
 
     for (const rule of PATTERN_RULES) {
       const match = normalizedMessage.match(rule.pattern);

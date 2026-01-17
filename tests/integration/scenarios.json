@@ -1,0 +1,48 @@
+{
+  "_comment": "Scenarios for integration testing. Empty expect_reply_contains means just check response exists.",
+  "scenarios": [
+    {
+      "id": "greeting",
+      "name": "Greeting Response",
+      "description": "System responds to greeting",
+      "steps": [
+        { "user": "Hi", "expect_reply_contains": [] }
+      ]
+    },
+    {
+      "id": "menu_request",
+      "name": "Menu Request",
+      "description": "Customer asks for menu",
+      "steps": [
+        { "user": "show menu", "expect_reply_contains": [] }
+      ]
+    },
+    {
+      "id": "item_order",
+      "name": "Item Order",
+      "description": "Customer orders an item",
+      "steps": [
+        { "user": "Hi", "expect_reply_contains": [] },
+        { "user": "Black forest 1kg", "expect_reply_contains": [] }
+      ]
+    },
+    {
+      "id": "checkout",
+      "name": "Checkout Flow",
+      "description": "Customer proceeds to checkout",
+      "steps": [
+        { "user": "Hi", "expect_reply_contains": [] },
+        { "user": "Black forest 1kg", "expect_reply_contains": [] },
+        { "user": "mathi", "expect_reply_contains": [] }
+      ]
+    },
+    {
+      "id": "language_switch",
+      "name": "Language Switch to English",
+      "description": "Customer switches language",
+      "steps": [
+        { "user": "English please", "expect_reply_contains": [] }
+      ]
+    }
+  ]
+}
