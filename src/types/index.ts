@@ -20,6 +20,9 @@ export interface Business {
   minimum_charge_distance_meters?: number;
   increment_per_km?: number;
   max_delivery_radius_meters?: number;
+  // Road distance calculation
+  road_distance_multiplier?: number; // Multiplier for straight-line distance (default 1.3)
+  use_road_distance_api?: boolean; // Use Google Maps API for accurate road distance
   minimum_wait_minutes?: number; // Minimum wait time for orders (no ASAP)
   // Custom AI behavior
   custom_ai_prompt?: string | null; // Business-specific AI instructions
@@ -170,6 +173,7 @@ export interface Session {
   custom_cake_context?: CustomCakeContext | null; // Pending custom cake inquiry context
   fulfillment_type?: FulfillmentType | null;
   delivery_address?: string | null;
+  delivery_geocoded_address?: string | null;
   delivery_latitude?: number | null;
   delivery_longitude?: number | null;
   delivery_time?: string | null;
@@ -245,6 +249,7 @@ export interface Order {
   delivery_date: string | null;
   fulfillment_type?: FulfillmentType | null;
   delivery_address?: string | null;
+  delivery_geocoded_address?: string | null;
   delivery_latitude?: number | null;
   delivery_longitude?: number | null;
   delivery_time?: string | null;

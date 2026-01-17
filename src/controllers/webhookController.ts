@@ -201,7 +201,7 @@ interface PendingMessage {
 }
 const messageDebounceMap = new Map<string, PendingMessage>(); // phone -> pending messages
 
-const DEBOUNCE_DELAY_MS = 10000; // Wait 10 seconds for more messages
+const DEBOUNCE_DELAY_MS = 0; // Wait 10 seconds for more messages
 
 async function processDebouncedMessages(phone: string): Promise<void> {
   const pending = messageDebounceMap.get(phone);
@@ -3556,13 +3556,14 @@ export async function handleWhatsAppWebhook(
               // If customer is in delivery flow and hasn't provided address yet
               // Save lat/long only, ask for full address with landmark
               if (sessionWithItems?.fulfillment_type === 'delivery' && !sessionWithItems.delivery_address && !sessionWithItems.delivery_latitude) {
-                logger.info(`[DEBUG-LOC] Step 7: Saving lat/long only (address=NULL), will ask for full address...`);
+                logger.info(`[DEBUG-LOC] Step 7: Saving lat/long and geocoded address, will ask for full address...`);
                 await updateSessionDeliveryInfo(session.id, {
-                  address: null, // Don't save geocoded address - ask user for full address
+                  address: null, // Will be filled by user with house name/landmark
+                  geocoded_address: displayAddress, // Save WhatsApp geocoded address for reference
                   latitude: location.latitude,
                   longitude: location.longitude,
                 });
-                logger.info(`[DEBUG-LOC] Step 7 done`);
+                logger.info(`[DEBUG-LOC] Step 7 done (geocoded_address=${displayAddress})`);
 
                 // Check if location is beyond max delivery radius
                 const deliveryFeeResult = await calculateDistanceBasedDeliveryFee(
@@ -3611,6 +3612,9 @@ export async function handleWhatsAppWebhook(
                     }
                   );
 
+                  // Pause AI for admin to handle out-of-radius approval
+                  await pauseAI(session.id, 'Out of delivery radius - awaiting admin approval');
+
                   // Inform customer
                   const lang = getSessionLanguage(session);
                   const beyondRadiusMsg = t('fulfillment.beyondArea', lang, { distance: `${(deliveryFeeResult.distance_meters / 1000).toFixed(1)}km` });
@@ -3634,6 +3638,7 @@ export async function handleWhatsAppWebhook(
                 // Save location to session (will be used when user chooses delivery later)
                 await updateSessionDeliveryInfo(session.id, {
                   address: displayAddress, // Can be null if geocoding failed
+                  geocoded_address: displayAddress, // Also save as geocoded for reference
                   latitude: location.latitude,
                   longitude: location.longitude,
                 });

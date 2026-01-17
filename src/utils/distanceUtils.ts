@@ -1,6 +1,10 @@
 /**
- * Distance calculation utilities using Haversine formula
+ * Distance calculation utilities
+ * - Haversine formula for straight-line distance
+ * - Google Maps Distance Matrix API for road distance
  */
+
+import { logger } from './logger';
 
 /**
  * Convert degrees to radians
@@ -50,4 +54,107 @@ export function formatDistance(meters: number): string {
     return `${(meters / 1000).toFixed(1)} km`;
   }
   return `${Math.round(meters)} m`;
+}
+
+/**
+ * Get road distance using Google Maps Distance Matrix API
+ * @param originLat - Latitude of origin (outlet)
+ * @param originLon - Longitude of origin (outlet)
+ * @param destLat - Latitude of destination (customer)
+ * @param destLon - Longitude of destination (customer)
+ * @returns Distance in meters, or null if API call fails
+ */
+export async function getRoadDistanceFromAPI(
+  originLat: number,
+  originLon: number,
+  destLat: number,
+  destLon: number
+): Promise<number | null> {
+  const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+
+  if (!apiKey) {
+    logger.warn('GOOGLE_MAPS_API_KEY not configured, cannot get road distance');
+    return null;
+  }
+
+  try {
+    const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${originLat},${originLon}&destinations=${destLat},${destLon}&key=${apiKey}`;
+
+    const response = await fetch(url);
+    const data: any = await response.json();
+
+    if (data.status !== 'OK') {
+      logger.error(`Google Maps API error: ${data.status}`, data.error_message);
+      return null;
+    }
+
+    const element = data.rows?.[0]?.elements?.[0];
+
+    if (element?.status !== 'OK') {
+      logger.error(`Google Maps element error: ${element?.status}`);
+      return null;
+    }
+
+    const distanceMeters = element.distance.value;
+    logger.info(`Road distance from API: ${(distanceMeters / 1000).toFixed(2)}km`);
+
+    return distanceMeters;
+  } catch (error) {
+    logger.error('Failed to get road distance from Google Maps API:', error);
+    return null;
+  }
+}
+
+/**
+ * Calculate distance with configurable method
+ * @param originLat - Latitude of origin (outlet)
+ * @param originLon - Longitude of origin (outlet)
+ * @param destLat - Latitude of destination (customer)
+ * @param destLon - Longitude of destination (customer)
+ * @param useRoadDistanceAPI - If true, use Google Maps API for road distance
+ * @param roadDistanceMultiplier - Multiplier for straight-line distance (used as fallback)
+ * @returns Distance in meters
+ */
+export async function calculateDeliveryDistance(
+  originLat: number,
+  originLon: number,
+  destLat: number,
+  destLon: number,
+  useRoadDistanceAPI: boolean = false,
+  roadDistanceMultiplier: number = 1.3
+): Promise<{ distance_meters: number; method: 'api' | 'multiplier' | 'straight_line' }> {
+  // Always calculate straight-line as baseline
+  const straightLineDistance = calculateDistanceMeters(originLat, originLon, destLat, destLon);
+
+  // Try API if enabled
+  if (useRoadDistanceAPI) {
+    const roadDistance = await getRoadDistanceFromAPI(originLat, originLon, destLat, destLon);
+
+    if (roadDistance !== null) {
+      return {
+        distance_meters: roadDistance,
+        method: 'api',
+      };
+    }
+
+    // API failed, fall through to multiplier
+    logger.warn('Road distance API failed, falling back to multiplier');
+  }
+
+  // Use multiplier if configured (> 1.0)
+  if (roadDistanceMultiplier > 1.0) {
+    const estimatedRoadDistance = straightLineDistance * roadDistanceMultiplier;
+    logger.info(`Estimated road distance: ${(estimatedRoadDistance / 1000).toFixed(2)}km (straight-line ${(straightLineDistance / 1000).toFixed(2)}km × ${roadDistanceMultiplier})`);
+
+    return {
+      distance_meters: estimatedRoadDistance,
+      method: 'multiplier',
+    };
+  }
+
+  // Return straight-line distance
+  return {
+    distance_meters: straightLineDistance,
+    method: 'straight_line',
+  };
 }

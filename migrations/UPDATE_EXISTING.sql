@@ -33,6 +33,10 @@ ALTER TABLE businesses ADD COLUMN IF NOT EXISTS minimum_charge_distance_meters I
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS increment_per_km DECIMAL(10,2) DEFAULT 10;
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS max_delivery_radius_meters INTEGER DEFAULT 15000;
 
+ALTER TABLE businesses
+ADD COLUMN IF NOT EXISTS road_distance_multiplier DECIMAL(3,2) DEFAULT 1.3,
+ADD COLUMN IF NOT EXISTS use_road_distance_api BOOLEAN DEFAULT false;
+
 -- Add image URLs to menu tables
 ALTER TABLE menu_categories ADD COLUMN IF NOT EXISTS image_url TEXT;
 ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS image_url TEXT;
@@ -74,6 +78,7 @@ CREATE INDEX IF NOT EXISTS idx_outlets_business ON business_outlets(business_id)
 -- Add fulfillment columns to sessions
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS fulfillment_type VARCHAR(20);
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS delivery_address TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS delivery_geocoded_address TEXT;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS delivery_latitude DECIMAL(10, 8);
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS delivery_longitude DECIMAL(11, 8);
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS delivery_time TIMESTAMP;
@@ -87,6 +92,7 @@ ALTER TABLE session_items ADD COLUMN IF NOT EXISTS item_fulfillment_type VARCHAR
 -- Add fulfillment columns to orders
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfillment_type VARCHAR(20);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_address TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_geocoded_address TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_latitude DECIMAL(10, 8);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_longitude DECIMAL(11, 8);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_time TIMESTAMP;

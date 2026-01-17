@@ -558,6 +558,7 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
       delivery_date: deliveryDate,
       fulfillment_type: session.fulfillment_type || null,
       delivery_address: session.delivery_address || null,
+      delivery_geocoded_address: session.delivery_geocoded_address || null,
       delivery_latitude: session.delivery_latitude || null,
       delivery_longitude: session.delivery_longitude || null,
       delivery_time: session.delivery_time || null,

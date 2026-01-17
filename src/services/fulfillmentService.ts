@@ -2,7 +2,7 @@ import { TranslationKeys } from '../i18n';
 import { supabase } from '../config/database';
 import { FulfillmentType, DeliveryFeeResult } from '../types';
 import { logger } from '../utils/logger';
-import { calculateDistanceMeters } from '../utils/distanceUtils';
+import { calculateDeliveryDistance } from '../utils/distanceUtils';
 
 /**
  * Update session with fulfillment type
@@ -55,6 +55,7 @@ export async function updateSessionDeliveryInfo(
   sessionId: string,
   deliveryInfo: {
     address?: string | null; // Can be null if geocoding failed (lat/long still saved)
+    geocoded_address?: string | null; // Auto-geocoded address from WhatsApp location
     time?: string;
     latitude?: number;
     longitude?: number;
@@ -68,6 +69,11 @@ export async function updateSessionDeliveryInfo(
   // Only update address if explicitly provided (including null for clearing)
   if ('address' in deliveryInfo) {
     updateData.delivery_address = deliveryInfo.address || null;
+  }
+
+  // Only update geocoded_address if explicitly provided
+  if ('geocoded_address' in deliveryInfo) {
+    updateData.delivery_geocoded_address = deliveryInfo.geocoded_address || null;
   }
 
   if (deliveryInfo.time !== undefined) {
@@ -573,6 +579,10 @@ export function formatDateForDisplay(isoDate: string, timezone: string = 'Asia/K
  * - Within free_radius: FREE
  * - Beyond free but within minimum_charge_distance: minimum_delivery_charge
  * - Beyond that: minimum_charge + (extra_km * increment_per_km)
+ *
+ * Distance calculation method is configurable per business:
+ * - use_road_distance_api=true: Uses Google Maps API for accurate road distance
+ * - use_road_distance_api=false: Uses straight-line distance × road_distance_multiplier
  */
 export async function calculateDistanceBasedDeliveryFee(
   businessId: string,
@@ -580,7 +590,7 @@ export async function calculateDistanceBasedDeliveryFee(
   customerLat: number,
   customerLon: number
 ): Promise<DeliveryFeeResult> {
-  // Fetch business pricing config
+  // Fetch business pricing config including distance calculation settings
   const { data: business } = await supabase
     .from('businesses')
     .select(`
@@ -590,7 +600,9 @@ export async function calculateDistanceBasedDeliveryFee(
       minimum_delivery_charge,
       minimum_charge_distance_meters,
       increment_per_km,
-      max_delivery_radius_meters
+      max_delivery_radius_meters,
+      road_distance_multiplier,
+      use_road_distance_api
     `)
     .eq('id', businessId)
     .single();
@@ -619,14 +631,19 @@ export async function calculateDistanceBasedDeliveryFee(
   }
 
   const outlet = outlets[0];
-  const distanceMeters = calculateDistanceMeters(
+
+  // Calculate distance using configurable method
+  const distanceResult = await calculateDeliveryDistance(
     outlet.latitude,
     outlet.longitude,
     customerLat,
-    customerLon
+    customerLon,
+    business.use_road_distance_api || false,
+    business.road_distance_multiplier || 1.3
   );
 
-  logger.info(`Distance calculated: ${(distanceMeters / 1000).toFixed(2)}km from outlet to customer`);
+  const distanceMeters = distanceResult.distance_meters;
+  logger.info(`Distance calculated: ${(distanceMeters / 1000).toFixed(2)}km from outlet to customer (method: ${distanceResult.method})`);
 
   // Get pricing config with defaults
   const freeRadius = business.free_radius_meters || 3500; // 3.5km default
