@@ -15,6 +15,7 @@ import { ReplyButton, ListSection, ProviderStatus } from './types';
 import * as metaProvider from './metaProvider';
 import * as webjsProvider from './webjsProvider';
 import { logger } from '../../utils/logger';
+import { trackWhatsAppUsage, MessageType } from '../usageService';
 
 // Log which provider is active
 logger.info(`WhatsApp Provider: ${WHATSAPP_PROVIDER}`);
@@ -25,11 +26,24 @@ const isWebJS = WHATSAPP_PROVIDER === 'webjs';
 /**
  * Send a text message
  */
-export async function sendWhatsAppMessage(to: string, message: string): Promise<void> {
-  if (isWebJS) {
-    return webjsProvider.sendMessage(to, message);
+export async function sendWhatsAppMessage(to: string, message: string, businessId?: string): Promise<void> {
+  try {
+    if (isWebJS) {
+      await webjsProvider.sendMessage(to, message);
+    } else {
+      await metaProvider.sendMessage(to, message);
+    }
+    // Track successful send
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'text', success: true }).catch(() => {});
+    }
+  } catch (error) {
+    // Track failed send
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'text', success: false }).catch(() => {});
+    }
+    throw error;
   }
-  return metaProvider.sendMessage(to, message);
 }
 
 /**
@@ -40,12 +54,24 @@ export async function sendWhatsAppMessage(to: string, message: string): Promise<
 export async function sendReplyButtons(
   to: string,
   body: string,
-  buttons: ReplyButton[]
+  buttons: ReplyButton[],
+  businessId?: string
 ): Promise<void> {
-  if (isWebJS) {
-    return webjsProvider.sendReplyButtons(to, body, buttons);
+  try {
+    if (isWebJS) {
+      await webjsProvider.sendReplyButtons(to, body, buttons);
+    } else {
+      await metaProvider.sendReplyButtons(to, body, buttons);
+    }
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'interactive', success: true }).catch(() => {});
+    }
+  } catch (error) {
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'interactive', success: false }).catch(() => {});
+    }
+    throw error;
   }
-  return metaProvider.sendReplyButtons(to, body, buttons);
 }
 
 /**
@@ -58,12 +84,24 @@ export async function sendInteractiveListMessage(
   header: string,
   body: string,
   buttonText: string,
-  sections: ListSection[]
+  sections: ListSection[],
+  businessId?: string
 ): Promise<void> {
-  if (isWebJS) {
-    return webjsProvider.sendInteractiveList(to, header, body, buttonText, sections);
+  try {
+    if (isWebJS) {
+      await webjsProvider.sendInteractiveList(to, header, body, buttonText, sections);
+    } else {
+      await metaProvider.sendInteractiveList(to, header, body, buttonText, sections);
+    }
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'interactive', success: true }).catch(() => {});
+    }
+  } catch (error) {
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'interactive', success: false }).catch(() => {});
+    }
+    throw error;
   }
-  return metaProvider.sendInteractiveList(to, header, body, buttonText, sections);
 }
 
 /**
@@ -71,11 +109,22 @@ export async function sendInteractiveListMessage(
  * Meta: Native location request button
  * WebJS: Text with instructions
  */
-export async function sendLocationRequest(to: string, body: string): Promise<void> {
-  if (isWebJS) {
-    return webjsProvider.sendLocationRequest(to, body);
+export async function sendLocationRequest(to: string, body: string, businessId?: string): Promise<void> {
+  try {
+    if (isWebJS) {
+      await webjsProvider.sendLocationRequest(to, body);
+    } else {
+      await metaProvider.sendLocationRequest(to, body);
+    }
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'location', success: true }).catch(() => {});
+    }
+  } catch (error) {
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'location', success: false }).catch(() => {});
+    }
+    throw error;
   }
-  return metaProvider.sendLocationRequest(to, body);
 }
 
 /**
@@ -87,12 +136,24 @@ export async function sendDocument(
   to: string,
   documentUrl: string,
   filename: string,
-  caption?: string
+  caption?: string,
+  businessId?: string
 ): Promise<void> {
-  if (isWebJS) {
-    return webjsProvider.sendDocument(to, documentUrl, filename, caption);
+  try {
+    if (isWebJS) {
+      await webjsProvider.sendDocument(to, documentUrl, filename, caption);
+    } else {
+      await metaProvider.sendDocument(to, documentUrl, filename, caption);
+    }
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'document', success: true }).catch(() => {});
+    }
+  } catch (error) {
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'document', success: false }).catch(() => {});
+    }
+    throw error;
   }
-  return metaProvider.sendDocument(to, documentUrl, filename, caption);
 }
 
 /**
@@ -103,12 +164,24 @@ export async function sendDocument(
 export async function sendImage(
   to: string,
   imageUrl: string,
-  caption?: string
+  caption?: string,
+  businessId?: string
 ): Promise<void> {
-  if (isWebJS) {
-    return webjsProvider.sendImage(to, imageUrl, caption);
+  try {
+    if (isWebJS) {
+      await webjsProvider.sendImage(to, imageUrl, caption);
+    } else {
+      await metaProvider.sendImage(to, imageUrl, caption);
+    }
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'image', success: true }).catch(() => {});
+    }
+  } catch (error) {
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'image', success: false }).catch(() => {});
+    }
+    throw error;
   }
-  return metaProvider.sendImage(to, imageUrl, caption);
 }
 
 /**
@@ -177,6 +250,19 @@ export async function sendTypingIndicator(to: string): Promise<void> {
     return;
   }
   return metaProvider.sendTypingIndicator(to);
+}
+
+/**
+ * Track an inbound WhatsApp message
+ * Call this from webhook handler when receiving messages
+ */
+export function trackInboundMessage(businessId: string, messageType: MessageType = 'text'): void {
+  trackWhatsAppUsage({
+    businessId,
+    direction: 'inbound',
+    messageType,
+    success: true,
+  }).catch(() => {});
 }
 
 // Re-export types for convenience

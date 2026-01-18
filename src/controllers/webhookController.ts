@@ -82,6 +82,7 @@ import {
   sendDocument,
   sendImage,
   markAsRead,
+  trackInboundMessage,
 } from '../services/whatsapp';
 import { getAmenityBySlug, getBusinessAmenities } from '../services/amenityService';
 import { getMenuPdfUrl, menuPdfExists } from '../services/pdfService';
@@ -222,7 +223,7 @@ async function processDebouncedMessages(phone: string): Promise<void> {
       pending.customerName
     );
     if (reply !== null) {
-      await sendWhatsAppMessage(phone, reply);
+      await sendWhatsAppMessage(phone, reply, pending.businessId);
     }
   } catch (error) {
     logger.error('Error processing debounced messages', error);
@@ -230,11 +231,11 @@ async function processDebouncedMessages(phone: string): Promise<void> {
       const customer = await findOrCreateCustomer(phone, pending.businessId, pending.customerName);
       const { session } = await findOrCreateSession(customer.id, pending.businessId);
       const lang: SupportedLanguage = getSessionLanguage(session);
-      await sendWhatsAppMessage(phone, t('error.generic', lang));
+      await sendWhatsAppMessage(phone, t('error.generic', lang), pending.businessId);
     } catch (langError) {
       logger.error('Could not get session language for error message', langError);
       // Fallback to default language
-      await sendWhatsAppMessage(phone, t('error.generic', 'en'));
+      await sendWhatsAppMessage(phone, t('error.generic', 'en'), pending.businessId);
     }
   }
 }
@@ -422,6 +423,14 @@ export async function processMessage(
   // Get business timezone for date/time parsing and display
   const businessTimezone = business?.timezone || 'Asia/Kolkata';
 
+  // Helper functions with businessId pre-bound for usage tracking
+  const sendReply = (to: string, msg: string) => sendWhatsAppMessage(to, msg, businessId);
+  const sendButtons = (to: string, body: string, btns: { id: string; title: string }[]) => sendReplyButtons(to, body, btns, businessId);
+  const sendList = (to: string, hdr: string, body: string, btnTxt: string, sections: any[]) => sendInteractiveListMessage(to, hdr, body, btnTxt, sections, businessId);
+  const sendLocation = (to: string, body: string) => sendLocationRequest(to, body, businessId);
+  const sendDoc = (to: string, url: string, name: string, caption?: string) => sendDocument(to, url, name, caption, businessId);
+  const sendImg = (to: string, url: string, caption?: string) => sendImage(to, url, caption, businessId);
+
   // CHECK CRITICAL MESSAGE - If enabled, bypass AI and send critical message
   if (business?.critical_message_enabled && business?.critical_message) {
     logger.info(`⚠️ Critical message enabled for ${business.name} - bypassing AI`);
@@ -466,7 +475,7 @@ export async function processMessage(
       menuButtons = [{ id: 'show_menu', title: `📖 ${t('menu.browseBtn', lang)}` }];
     }
 
-    await sendReplyButtons(phone, welcomeMsg, menuButtons);
+    await sendButtons(phone, welcomeMsg, menuButtons);
     await saveOutgoingMessage(session.id, welcomeMsg);
     return null; // Don't continue to AI - welcome sent
   }
@@ -1060,7 +1069,7 @@ export async function processMessage(
           if (business?.supports_delivery && business?.supports_takeaway) {
             quoteAcceptedReply = t('customCake.addedThenAskFulfillment', lang, { summary });
             await saveOutgoingMessage(session.id, quoteAcceptedReply);
-            await sendReplyButtons(phone, quoteAcceptedReply, [
+            await sendButtons(phone, quoteAcceptedReply, [
               { id: 'delivery', title: t('fulfillment.deliveryBtn', lang) },
               { id: 'takeaway', title: t('fulfillment.takeawayBtn', lang) },
             ]);
@@ -1236,7 +1245,7 @@ export async function processMessage(
       // Ask for delivery date
       const datePrompt = t('fulfillment.locationSavedThenAskDate', lang);
       await saveOutgoingMessage(session.id, datePrompt);
-      await sendReplyButtons(phone, datePrompt, [
+      await sendButtons(phone, datePrompt, [
         { id: 'date_today_delivery', title: `📅 ${t('buttons.today', lang)}` },
         { id: 'date_tomorrow_delivery', title: `📅 ${t('buttons.tomorrow', lang)}` },
         { id: 'date_other_delivery', title: `📅 ${t('buttons.other', lang)}` },
@@ -1367,7 +1376,7 @@ export async function processMessage(
         if (business?.supports_delivery && business?.supports_takeaway) {
           fallbackReply = t('customCake.addedThenAskFulfillment', lang, { summary });
           await saveOutgoingMessage(session.id, fallbackReply);
-          await sendReplyButtons(phone, fallbackReply, [
+          await sendButtons(phone, fallbackReply, [
             { id: 'delivery', title: t('fulfillment.deliveryBtn', lang) },
             { id: 'takeaway', title: t('fulfillment.takeawayBtn', lang) },
           ]);
@@ -1907,7 +1916,7 @@ export async function processMessage(
           // Specific menu requested
           const specificConfig = await getMenuPdfConfigBySlug(business.id, menuSlug);
           if (specificConfig?.pdf_url) {
-            await sendDocument(phone, specificConfig.pdf_url, `${specificConfig.name}.pdf`, specificConfig.name);
+            await sendDoc(phone, specificConfig.pdf_url, `${specificConfig.name}.pdf`, specificConfig.name);
             await saveOutgoingMessage(session.id, `[Sent ${specificConfig.name} PDF]`);
             return null; // Don't send another message
           }
@@ -1920,7 +1929,7 @@ export async function processMessage(
           // Send all menu PDFs
           for (const config of menuConfigs) {
             if (config.pdf_url) {
-              await sendDocument(
+              await sendDoc(
                 phone,
                 config.pdf_url,
                 `${config.name}.pdf`,
@@ -1936,7 +1945,7 @@ export async function processMessage(
           if (pdfExists) {
             const pdfUrl = getMenuPdfUrl(business.id);
             const menuCaption = t('menu.pdfCaption', lang);
-            await sendDocument(phone, pdfUrl, `${business.name || 'Menu'}.pdf`, menuCaption);
+            await sendDoc(phone, pdfUrl, `${business.name || 'Menu'}.pdf`, menuCaption);
             await saveOutgoingMessage(session.id, `[Menu PDF sent] ${menuCaption}`);
             return null;
           }
@@ -1994,7 +2003,7 @@ export async function processMessage(
         // Use interactive buttons for delivery/takeaway choice
         const askFulfillment = summary + '\n\n' + t('fulfillment.askType', lang);
         await saveOutgoingMessage(session.id, askFulfillment);
-        await sendReplyButtons(phone, askFulfillment, [
+        await sendButtons(phone, askFulfillment, [
           { id: 'delivery', title: t('fulfillment.deliveryBtn', lang) },
           { id: 'takeaway', title: t('fulfillment.takeawayBtn', lang) },
         ]);
@@ -2007,7 +2016,7 @@ export async function processMessage(
           await updateSessionFulfillmentType(session.id, 'takeaway');
           const pickupPrompt = summary + '\n\n' + t('fulfillment.pickupPrompt', lang);
           await saveOutgoingMessage(session.id, pickupPrompt);
-          await sendInteractiveListMessage(
+          await sendList(
             phone,
             t('buttons.pickupLocations', lang),
             pickupPrompt,
@@ -2834,11 +2843,11 @@ export async function processMessage(
 
           if (imagesToSend.length > 0) {
             // Send text message first
-            await sendWhatsAppMessage(phone, replyMessage);
+            await sendReply(phone, replyMessage);
 
             // Send all images
             for (const imageUrl of imagesToSend) {
-              await sendImage(phone, imageUrl);
+              await sendImg(phone, imageUrl);
             }
 
             // Mark that we've already sent the message
@@ -2909,7 +2918,7 @@ export async function processMessage(
             }
 
             const caption = `${matchedItem.name}\n💰 ${priceStr}\n\nReply with the name to order!`;
-            await sendImage(phone, matchedItem.image_url, caption);
+            await sendImg(phone, matchedItem.image_url, caption);
             await saveOutgoingMessage(session.id, `[Sent ${matchedItem.name} photo]`);
             return null;
           } else if (matchedItem && !matchedItem.image_url) {
@@ -2952,7 +2961,7 @@ export async function processMessage(
               const introMsg = lang === 'ml'
                 ? `ഇതാ ഞങ്ങളുടെ ${matchedCategory.name} ഫോട്ടോകൾ:`
                 : `Here are our ${matchedCategory.name} photos:`;
-              await sendWhatsAppMessage(phone, introMsg);
+              await sendReply(phone, introMsg);
 
               // Send each image with caption (name + price)
               for (const item of photosToSend) {
@@ -2965,7 +2974,7 @@ export async function processMessage(
                 }
 
                 const caption = `${item.name}\n💰 ${priceStr}\n\nReply with the name to order!`;
-                await sendImage(phone, item.image_url!, caption);
+                await sendImg(phone, item.image_url!, caption);
               }
 
               // If more items available, ask if they want to see more
@@ -2973,7 +2982,7 @@ export async function processMessage(
                 const moreMsg = lang === 'ml'
                   ? `${itemsWithImages.length - MAX_PHOTOS} കൂടി ഐറ്റങ്ങൾ ഉണ്ട്. "കൂടുതൽ കാണിക്കുക" എന്ന് പറയുക അല്ലെങ്കിൽ നിങ്ങളുടെ ഇഷ്ടം പറയുക (ഉദാ: chocolate, fruit).`
                   : `${itemsWithImages.length - MAX_PHOTOS} more items available. Say "show more" or tell me your preference (e.g., chocolate, fruit).`;
-                await sendWhatsAppMessage(phone, moreMsg);
+                await sendReply(phone, moreMsg);
               }
 
               await saveOutgoingMessage(session.id, `[Sent ${photosToSend.length} ${matchedCategory.name} photos]`);
@@ -3062,6 +3071,14 @@ export async function handleWhatsAppWebhook(
 
         logger.info(`Message received for business: ${business.name} (${business.id})`);
 
+        // Helper functions with businessId pre-bound for usage tracking (webhook level)
+        const wbSendReply = (to: string, msg: string) => sendWhatsAppMessage(to, msg, business.id);
+        const wbSendButtons = (to: string, body: string, btns: { id: string; title: string }[]) => sendReplyButtons(to, body, btns, business.id);
+        const wbSendList = (to: string, hdr: string, body: string, btnTxt: string, sections: any[]) => sendInteractiveListMessage(to, hdr, body, btnTxt, sections, business.id);
+        const wbSendLocation = (to: string, body: string) => sendLocationRequest(to, body, business.id);
+        const wbSendDoc = (to: string, url: string, name: string, caption?: string) => sendDocument(to, url, name, caption, business.id);
+        const wbSendImg = (to: string, url: string, caption?: string) => sendImage(to, url, caption, business.id);
+
         // Get business timezone for date/time handling
         const businessTimezone = business.timezone || 'Asia/Kolkata';
 
@@ -3073,6 +3090,13 @@ export async function handleWhatsAppWebhook(
 
         for (const message of value.messages) {
           const phone = sanitizePhoneNumber(message.from);
+
+          // Track inbound message for usage stats
+          const msgType = message.type === 'image' ? 'image' :
+                         message.type === 'document' ? 'document' :
+                         message.type === 'location' ? 'location' :
+                         message.type === 'interactive' ? 'interactive' : 'text';
+          trackInboundMessage(business.id, msgType as any);
 
           // Mark message as read immediately (shows blue checkmarks to sender)
           if (message.id) {
@@ -3203,7 +3227,7 @@ export async function handleWhatsAppWebhook(
                   askWeightFlavorMsg = `Nice design! 🎂\n\nPlease let us know:\n• Weight (e.g., 1kg, 2kg)\n• Flavor${availableFlavorsText}`;
                 }
 
-                await sendWhatsAppMessage(phone, askWeightFlavorMsg);
+                await wbSendReply(phone, askWeightFlavorMsg);
                 await saveOutgoingMessage(session.id, askWeightFlavorMsg);
                 continue;
               }
@@ -3223,7 +3247,7 @@ export async function handleWhatsAppWebhook(
                   const confirmMsg = lang === 'ml'
                     ? `"${matchedItem.name}" ഓർഡർ ചെയ്യണോ? 🛒`
                     : `Would you like to order "${matchedItem.name}"? 🛒`;
-                  await sendWhatsAppMessage(phone, confirmMsg);
+                  await wbSendReply(phone, confirmMsg);
                   await saveOutgoingMessage(session.id, confirmMsg);
                   continue;
                 }
@@ -3247,7 +3271,7 @@ export async function handleWhatsAppWebhook(
                   ? `I received your image! 📸\n\nCould you please let me know what this is for?\n\n• Is this a *cake design* you'd like us to create?\n• Or something else?`
                   : clarificationMsg;
 
-                await sendWhatsAppMessage(phone, finalMsg);
+                await wbSendReply(phone, finalMsg);
                 await saveOutgoingMessage(session.id, finalMsg);
 
                 await updateSessionCustomCakeContext(session.id, {
@@ -3314,7 +3338,7 @@ export async function handleWhatsAppWebhook(
               const supportPhone = business.customer_support_phone;
               const support = supportPhone ? t('error.contactSupport', lang, { phone: supportPhone }) : '';
               const videoResponse = t('video.fallback', lang, { support });
-              await sendWhatsAppMessage(phone, videoResponse);
+              await wbSendReply(phone, videoResponse);
               await saveOutgoingMessage(session.id, videoResponse);
             }
             continue;
@@ -3363,7 +3387,7 @@ export async function handleWhatsAppWebhook(
               const supportPhone = business.customer_support_phone;
               const support = supportPhone ? t('error.contactSupport', lang, { phone: supportPhone }) : '';
               const docResponse = t('document.fallback', lang, { support });
-              await sendWhatsAppMessage(phone, docResponse);
+              await wbSendReply(phone, docResponse);
               await saveOutgoingMessage(session.id, docResponse);
             }
             continue;
@@ -3412,7 +3436,7 @@ export async function handleWhatsAppWebhook(
                 { size: mediaResult?.fileSize, mediaId: audioId }
               );
               const notEnabledReply = t('voice.notEnabled', lang);
-              await sendWhatsAppMessage(phone, notEnabledReply);
+              await wbSendReply(phone, notEnabledReply);
               await saveOutgoingMessage(session.id, notEnabledReply);
               continue;
             }
@@ -3428,7 +3452,7 @@ export async function handleWhatsAppWebhook(
                 { size: mediaResult?.fileSize, mediaId: audioId }
               );
               const noSpeechReply = t('voice.noTranscription', lang);
-              await sendWhatsAppMessage(phone, noSpeechReply);
+              await wbSendReply(phone, noSpeechReply);
               await saveOutgoingMessage(session.id, noSpeechReply);
               continue;
             }
@@ -3457,7 +3481,7 @@ export async function handleWhatsAppWebhook(
               if (reply !== null) {
                 // Prepend transcription confirmation to the reply
                 const voiceReply = t('voice.transcriptionPrefix', lang, { transcription }) + reply;
-                await sendWhatsAppMessage(phone, voiceReply);
+                await sendWhatsAppMessage(phone, voiceReply, business.id);
                 // Note: processMessage already saves outgoing message, so we update it
               }
             } catch (error) {
@@ -3474,7 +3498,7 @@ export async function handleWhatsAppWebhook(
               const supportPhone = business.customer_support_phone;
               const support = supportPhone ? t('error.contactSupport', lang, { phone: supportPhone }) : '';
               const errorReply = t('voice.processingFailed', lang, { support });
-              await sendWhatsAppMessage(phone, errorReply);
+              await wbSendReply(phone, errorReply);
               await saveOutgoingMessage(session.id, errorReply);
             }
             continue;
@@ -3618,7 +3642,7 @@ export async function handleWhatsAppWebhook(
                   // Inform customer
                   const lang = getSessionLanguage(session);
                   const beyondRadiusMsg = t('fulfillment.beyondArea', lang, { distance: `${(deliveryFeeResult.distance_meters / 1000).toFixed(1)}km` });
-                  await sendWhatsAppMessage(phone, beyondRadiusMsg);
+                  await wbSendReply(phone, beyondRadiusMsg);
                   await saveOutgoingMessage(session.id, beyondRadiusMsg);
                   logger.info(`[DEBUG-LOC] Beyond radius - pending approval set for session ${session.id}`);
                   continue;
@@ -3628,7 +3652,7 @@ export async function handleWhatsAppWebhook(
                 logger.info(`[DEBUG-LOC] Step 8: Asking for full address with landmark...`);
                 const lang = getSessionLanguage(session);
                 const askAddressPrompt = t('fulfillment.locationSavedAskFullAddress', lang);
-                await sendWhatsAppMessage(phone, askAddressPrompt);
+                await wbSendReply(phone, askAddressPrompt);
                 await saveOutgoingMessage(session.id, askAddressPrompt);
                 logger.info(`[DEBUG-LOC] Step 8 done - waiting for full address`);
               } else {
@@ -3646,7 +3670,7 @@ export async function handleWhatsAppWebhook(
 
                 const lang = getSessionLanguage(session);
                 const locationReply = t('fulfillment.locationSavedForLater', lang);
-                await sendWhatsAppMessage(phone, locationReply);
+                await wbSendReply(phone, locationReply);
                 await saveOutgoingMessage(session.id, locationReply);
                 logger.info(`[DEBUG-LOC] Step 9 done`);
               }
@@ -3681,7 +3705,7 @@ export async function handleWhatsAppWebhook(
                   await saveIncomingMessage(session.id, `[Selected: ${t('fulfillment.takeawayBtn', lang)}]`);
                   const outletPrompt = t('fulfillment.selectOutlet', lang);
                   await saveOutgoingMessage(session.id, outletPrompt);
-                  await sendInteractiveListMessage(
+                  await wbSendList(
                     phone,
                     t('buttons.pickupLocations', lang),
                     outletPrompt,
@@ -3711,7 +3735,7 @@ export async function handleWhatsAppWebhook(
                 const deliveryPrompt = t('fulfillment.deliveryLocationPrompt', lang);
                 await saveOutgoingMessage(session.id, deliveryPrompt);
                 // Send location request with the prompt
-                await sendLocationRequest(phone, deliveryPrompt);
+                await wbSendLocation(phone, deliveryPrompt);
                 continue;
               }
 
@@ -3729,7 +3753,7 @@ export async function handleWhatsAppWebhook(
                   // Send all menu PDFs
                   for (const config of menuConfigs) {
                     if (config.pdf_url) {
-                      await sendDocument(
+                      await wbSendDoc(
                         phone,
                         config.pdf_url,
                         `${config.name}.pdf`,
@@ -3746,7 +3770,7 @@ export async function handleWhatsAppWebhook(
                     const pdfUrl = await getMenuPdfUrl(business.id);
                     if (pdfUrl) {
                       const pdfCaption = t('menu.pdfCaption', lang);
-                      await sendDocument(phone, pdfUrl, `${business.name}_Menu.pdf`, pdfCaption);
+                      await wbSendDoc(phone, pdfUrl, `${business.name}_Menu.pdf`, pdfCaption);
                       await saveOutgoingMessage(session.id, `[Menu PDF sent]`);
                       continue;
                     }
@@ -3757,7 +3781,7 @@ export async function handleWhatsAppWebhook(
                 const menuCategories = await getMenuCategories(business.id);
                 const categorySections = buildCategoryListSections(menuCategories);
                 if (categorySections.length > 0 && categorySections[0].rows.length > 0) {
-                  await sendInteractiveListMessage(
+                  await wbSendList(
                     phone,
                     t('menu.ourMenu', lang),
                     t('menu.welcome', lang, { businessName: business.name }),
@@ -3766,7 +3790,7 @@ export async function handleWhatsAppWebhook(
                   );
                   await saveOutgoingMessage(session.id, `[Interactive menu sent]`);
                 } else {
-                  await sendWhatsAppMessage(phone, t('menu.fallback', lang));
+                  await wbSendReply(phone, t('menu.fallback', lang));
                   await saveOutgoingMessage(session.id, t('menu.fallback', lang));
                 }
                 continue;
@@ -3783,7 +3807,7 @@ export async function handleWhatsAppWebhook(
                 if (menuConfig?.pdf_url) {
                   const localizedName = getLocalizedMenuName(menuConfig, lang);
                   await saveIncomingMessage(session.id, `[Clicked: ${localizedName}]`);
-                  await sendDocument(
+                  await wbSendDoc(
                     phone,
                     menuConfig.pdf_url,
                     `${localizedName}.pdf`,
@@ -3792,7 +3816,7 @@ export async function handleWhatsAppWebhook(
                   await saveOutgoingMessage(session.id, `[Sent ${localizedName} PDF]`);
                 } else {
                   // Fallback if config not found
-                  await sendWhatsAppMessage(phone, t('menu.fallback', lang));
+                  await wbSendReply(phone, t('menu.fallback', lang));
                   await saveOutgoingMessage(session.id, t('menu.fallback', lang));
                 }
                 continue;
@@ -3818,7 +3842,7 @@ export async function handleWhatsAppWebhook(
                     }, business.id);
 
                     const addedMsg = `Added *${menuItem.name}* (${sizeName}) to your order. Anything else?`;
-                    await sendWhatsAppMessage(phone, addedMsg);
+                    await wbSendReply(phone, addedMsg);
                     await saveOutgoingMessage(session.id, addedMsg);
                     continue;
                   }
@@ -3844,14 +3868,14 @@ export async function handleWhatsAppWebhook(
 
                   if (isDelivery) {
                     // Delivery: In 1 hour, In 1.5 hours, Other
-                    await sendReplyButtons(phone, timePrompt, [
+                    await wbSendButtons(phone, timePrompt, [
                       { id: 'time_1hour', title: '🕐 In 1 hour' },
                       { id: 'time_1_5hour', title: '🕐 In 1.5 hours' },
                       { id: 'time_other', title: `⏰ ${t('buttons.other', lang)}` },
                     ]);
                   } else {
                     // Takeaway: In 30 min, In 1 hour, Other
-                    await sendReplyButtons(phone, timePrompt, [
+                    await wbSendButtons(phone, timePrompt, [
                       { id: 'time_30min', title: '🕐 In 30 min' },
                       { id: 'time_1hour', title: '🕐 In 1 hour' },
                       { id: 'time_other', title: `⏰ ${t('buttons.other', lang)}` },
@@ -3869,7 +3893,7 @@ export async function handleWhatsAppWebhook(
                   await saveOutgoingMessage(session.id, timePrompt);
 
                   // Tomorrow: Morning, Afternoon, Other
-                  await sendReplyButtons(phone, timePrompt, [
+                  await wbSendButtons(phone, timePrompt, [
                     { id: 'time_morning', title: '🌅 Morning (10 AM)' },
                     { id: 'time_afternoon', title: '🌞 Afternoon (2 PM)' },
                     { id: 'time_other', title: `⏰ ${t('buttons.other', lang)}` },
@@ -3883,7 +3907,7 @@ export async function handleWhatsAppWebhook(
                   await saveIncomingMessage(session.id, `[Selected: ${t('buttons.other', lang)}]`);
 
                   const customPrompt = t('buttons.customTimePrompt', lang);
-                  await sendWhatsAppMessage(phone, customPrompt);
+                  await wbSendReply(phone, customPrompt);
                   await saveOutgoingMessage(session.id, customPrompt);
                   continue;
                 }
@@ -3904,7 +3928,7 @@ export async function handleWhatsAppWebhook(
 
                   const dateText = pendingDate?.date === 'tomorrow' ? t('buttons.tomorrow', lang) : t('buttons.today', lang);
                   const customPrompt = t('buttons.customTimePromptForDate', lang, { date: dateText });
-                  await sendWhatsAppMessage(phone, customPrompt);
+                  await wbSendReply(phone, customPrompt);
                   await saveOutgoingMessage(session.id, customPrompt);
                   continue;
                 }
@@ -3915,7 +3939,7 @@ export async function handleWhatsAppWebhook(
 
                 if (!calculatedTime) {
                   logger.error(`Failed to calculate time for: ${dateSelection} ${buttonId}`);
-                  await sendWhatsAppMessage(phone, t('time.calculationError', lang));
+                  await wbSendReply(phone, t('time.calculationError', lang));
                   continue;
                 }
 
@@ -3996,7 +4020,7 @@ export async function handleWhatsAppWebhook(
                     type: fulfillmentTypeForQuote,
                     time: calculatedTime,
                   });
-                  await sendWhatsAppMessage(phone, timeConfirmMsg);
+                  await wbSendReply(phone, timeConfirmMsg);
                   await saveOutgoingMessage(session.id, timeConfirmMsg);
                   continue;
                 }
@@ -4051,7 +4075,7 @@ export async function handleWhatsAppWebhook(
                           : t('fulfillment.takeawayBtn', lang);
 
                         const waitingMsg = t('urgentOrder.waitingConfirmation', lang, { type: typeLabel, time: formattedTime });
-                        await sendWhatsAppMessage(phone, waitingMsg);
+                        await wbSendReply(phone, waitingMsg);
                         await saveOutgoingMessage(session.id, waitingMsg);
 
                         // Clear pending date selection
@@ -4084,7 +4108,7 @@ export async function handleWhatsAppWebhook(
                   ctaMessage: `\n${t('orderSummary.reviewPrompt', lang)}`,
                   timezone: businessTimezone,
                 });
-                await sendWhatsAppMessage(phone, finalSummary);
+                await wbSendReply(phone, finalSummary);
                 await saveOutgoingMessage(session.id, finalSummary);
                 continue;
               }
@@ -4107,7 +4131,7 @@ export async function handleWhatsAppWebhook(
 
                 if (categorySections.length > 0 && categorySections[0].rows.length > 0) {
                   await saveIncomingMessage(session.id, `[Browsing: ${groupName}]`);
-                  await sendInteractiveListMessage(
+                  await wbSendList(
                     phone,
                     groupName,
                     `Select a category from ${groupName}`,
@@ -4132,7 +4156,7 @@ export async function handleWhatsAppWebhook(
                       : `${category.name} (${totalItems} items)`;
 
                     await saveIncomingMessage(session.id, `[Browsing: ${category.name}]`);
-                    await sendInteractiveListMessage(
+                    await wbSendList(
                       phone,
                       category.name,
                       itemListBody,
@@ -4159,7 +4183,7 @@ export async function handleWhatsAppWebhook(
                     const sizeButtons = buildSizeButtons(menuItem);
                     const sizePrompt = t('menu.selectSize', lang, { item: `*${menuItem.name}*` });
                     await saveOutgoingMessage(session.id, sizePrompt);
-                    await sendReplyButtons(phone, sizePrompt, sizeButtons);
+                    await wbSendButtons(phone, sizePrompt, sizeButtons);
                     continue;
                   } else {
                     // Single price or single size - add directly
@@ -4175,7 +4199,7 @@ export async function handleWhatsAppWebhook(
                     const lang = getSessionLanguage(session);
                     const itemIdentifier = size ? `*${menuItem.name}* (${size})` : `*${menuItem.name}*`;
                     const addedMsg = `${t('cart.added', lang, { item: itemIdentifier })} ${t('cart.anythingElse', lang)}`;
-                    await sendWhatsAppMessage(phone, addedMsg);
+                    await wbSendReply(phone, addedMsg);
                     await saveOutgoingMessage(session.id, addedMsg);
                     continue;
                   }
@@ -4195,7 +4219,7 @@ export async function handleWhatsAppWebhook(
                   // Show date selection buttons instead of asking for time as text
                   const datePrompt = `📍 Pickup at: *${selectedOutlet.outlet_name}*\n\nWhen would you like to pick up?`;
                   await saveOutgoingMessage(session.id, datePrompt);
-                  await sendReplyButtons(phone, datePrompt, [
+                  await wbSendButtons(phone, datePrompt, [
                     { id: 'date_today_takeaway', title: '📅 Today' },
                     { id: 'date_tomorrow_takeaway', title: '📅 Tomorrow' },
                     { id: 'date_other_takeaway', title: '📅 Other' },
@@ -4385,7 +4409,7 @@ async function processCustomCakeWithIntervention(
     // 6. Send holding message and save to chat history
     const holdingMessage = "Thank you for sharing! Our team is preparing a customized quote for you.";
     await saveOutgoingMessage(sessionId, holdingMessage);
-    await sendWhatsAppMessage(phone, holdingMessage);
+    await sendWhatsAppMessage(phone, holdingMessage, businessId);
   } else {
     logger.error(`Failed to create intervention for session ${sessionId}`);
   }
@@ -4411,7 +4435,7 @@ async function checkPendingImageClarification(session: Session, phone: string, b
       ? `I received your image! 📸\n\nCould you please let me know what this is for?\n• Is this a *cake design* you'd like us to create?\n• Or something else?`
       : clarificationMsg;
 
-    await sendWhatsAppMessage(phone, finalMsg);
+    await sendWhatsAppMessage(phone, finalMsg, businessId);
     await saveOutgoingMessage(session.id, finalMsg);
 
     // Update context to mark clarification sent

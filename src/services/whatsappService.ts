@@ -2,12 +2,14 @@ import axios from 'axios';
 import crypto from 'crypto';
 import { WHATSAPP_API_VERSION } from '../config/constants';
 import { logger } from '../utils/logger';
+import { trackWhatsAppUsage, MessageType } from './usageService';
 
 const WHATSAPP_API_BASE = `https://graph.facebook.com/${WHATSAPP_API_VERSION}`;
 
 export async function sendWhatsAppMessage(
   to: string,
-  message: string
+  message: string,
+  businessId?: string
 ): Promise<void> {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
@@ -16,6 +18,15 @@ export async function sendWhatsAppMessage(
   if (!phoneNumberId || !accessToken) {
     logger.info(`[WhatsApp Mock] To: ${to}`);
     logger.info(`[WhatsApp Mock] Message: ${message}`);
+    // Track mock usage too for testing
+    if (businessId) {
+      trackWhatsAppUsage({
+        businessId,
+        direction: 'outbound',
+        messageType: 'text',
+        success: true,
+      }).catch(() => {});
+    }
     return;
   }
 
@@ -39,6 +50,16 @@ export async function sendWhatsAppMessage(
     );
 
     logger.info(`WhatsApp message sent to ${to}`);
+
+    // Track usage
+    if (businessId) {
+      trackWhatsAppUsage({
+        businessId,
+        direction: 'outbound',
+        messageType: 'text',
+        success: true,
+      }).catch(() => {});
+    }
   } catch (error) {
     if (axios.isAxiosError(error)) {
       logger.error('WhatsApp API error', {
@@ -47,6 +68,17 @@ export async function sendWhatsAppMessage(
       });
     } else {
       logger.error('Failed to send WhatsApp message', error);
+    }
+
+    // Track failed attempt
+    if (businessId) {
+      trackWhatsAppUsage({
+        businessId,
+        direction: 'outbound',
+        messageType: 'text',
+        success: false,
+        errorMessage: error instanceof Error ? error.message : 'Unknown error',
+      }).catch(() => {});
     }
     // Don't throw - we want to continue even if WhatsApp fails
   }
@@ -103,7 +135,8 @@ export function verifyWebhookChallenge(
 export async function sendReplyButtons(
   to: string,
   body: string,
-  buttons: { id: string; title: string }[]
+  buttons: { id: string; title: string }[],
+  businessId?: string
 ): Promise<void> {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
@@ -112,6 +145,9 @@ export async function sendReplyButtons(
     logger.info(`[WhatsApp Mock] Reply Buttons to: ${to}`);
     logger.info(`[WhatsApp Mock] Body: ${body}`);
     logger.info(`[WhatsApp Mock] Buttons: ${JSON.stringify(buttons)}`);
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'interactive', success: true }).catch(() => {});
+    }
     return;
   }
 
@@ -125,7 +161,7 @@ export async function sendReplyButtons(
       action: {
         buttons: buttons.slice(0, 3).map(btn => ({
           type: 'reply',
-          reply: { id: btn.id, title: btn.title.substring(0, 20) } // Max 20 chars
+          reply: { id: btn.id, title: btn.title.substring(0, 20) }
         }))
       }
     }
@@ -143,6 +179,9 @@ export async function sendReplyButtons(
       }
     );
     logger.info(`WhatsApp reply buttons sent to ${to}`);
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'interactive', success: true }).catch(() => {});
+    }
   } catch (error) {
     if (axios.isAxiosError(error)) {
       logger.error('WhatsApp API error (reply buttons)', {
@@ -151,6 +190,9 @@ export async function sendReplyButtons(
       });
     } else {
       logger.error('Failed to send WhatsApp reply buttons', error);
+    }
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'interactive', success: false }).catch(() => {});
     }
   }
 }
@@ -161,7 +203,8 @@ export async function sendReplyButtons(
  */
 export async function sendLocationRequest(
   to: string,
-  body: string
+  body: string,
+  businessId?: string
 ): Promise<void> {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
@@ -169,6 +212,9 @@ export async function sendLocationRequest(
   if (!phoneNumberId || !accessToken) {
     logger.info(`[WhatsApp Mock] Location Request to: ${to}`);
     logger.info(`[WhatsApp Mock] Body: ${body}`);
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'location', success: true }).catch(() => {});
+    }
     return;
   }
 
@@ -197,6 +243,9 @@ export async function sendLocationRequest(
       }
     );
     logger.info(`WhatsApp location request sent to ${to}`);
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'location', success: true }).catch(() => {});
+    }
   } catch (error) {
     if (axios.isAxiosError(error)) {
       logger.error('WhatsApp API error (location request)', {
@@ -205,6 +254,9 @@ export async function sendLocationRequest(
       });
     } else {
       logger.error('Failed to send WhatsApp location request', error);
+    }
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'location', success: false }).catch(() => {});
     }
   }
 }
@@ -216,7 +268,8 @@ export async function sendDocument(
   to: string,
   documentUrl: string,
   filename: string,
-  caption?: string
+  caption?: string,
+  businessId?: string
 ): Promise<void> {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
@@ -226,6 +279,9 @@ export async function sendDocument(
     logger.info(`[WhatsApp Mock] URL: ${documentUrl}`);
     logger.info(`[WhatsApp Mock] Filename: ${filename}`);
     if (caption) logger.info(`[WhatsApp Mock] Caption: ${caption}`);
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'document', success: true }).catch(() => {});
+    }
     return;
   }
 
@@ -264,6 +320,9 @@ export async function sendDocument(
       }
     );
     logger.info(`WhatsApp document sent to ${to}: ${filename}`);
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'document', success: true }).catch(() => {});
+    }
   } catch (error) {
     if (axios.isAxiosError(error)) {
       logger.error('WhatsApp API error (document)', {
@@ -272,6 +331,9 @@ export async function sendDocument(
       });
     } else {
       logger.error('Failed to send WhatsApp document', error);
+    }
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'document', success: false }).catch(() => {});
     }
   }
 }
@@ -282,7 +344,8 @@ export async function sendDocument(
 export async function sendImage(
   to: string,
   imageUrl: string,
-  caption?: string
+  caption?: string,
+  businessId?: string
 ): Promise<void> {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
@@ -291,6 +354,9 @@ export async function sendImage(
     logger.info(`[WhatsApp Mock] Image to: ${to}`);
     logger.info(`[WhatsApp Mock] URL: ${imageUrl}`);
     if (caption) logger.info(`[WhatsApp Mock] Caption: ${caption}`);
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'image', success: true }).catch(() => {});
+    }
     return;
   }
 
@@ -327,6 +393,9 @@ export async function sendImage(
       }
     );
     logger.info(`WhatsApp image sent to ${to}`);
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'image', success: true }).catch(() => {});
+    }
   } catch (error) {
     if (axios.isAxiosError(error)) {
       logger.error('WhatsApp API error (image)', {
@@ -335,6 +404,9 @@ export async function sendImage(
       });
     } else {
       logger.error('Failed to send WhatsApp image', error);
+    }
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'image', success: false }).catch(() => {});
     }
   }
 }
@@ -347,7 +419,8 @@ export async function sendInteractiveListMessage(
   header: string,
   body: string,
   buttonText: string,
-  sections: { title: string; rows: { id: string; title: string; description?: string }[] }[]
+  sections: { title: string; rows: { id: string; title: string; description?: string }[] }[],
+  businessId?: string
 ): Promise<void> {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
@@ -356,6 +429,9 @@ export async function sendInteractiveListMessage(
     logger.info(`[WhatsApp Mock] Interactive List to: ${to}`);
     logger.info(`[WhatsApp Mock] Header: ${header}, Body: ${body}`);
     logger.info(`[WhatsApp Mock] Sections: ${JSON.stringify(sections)}`);
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'interactive', success: true }).catch(() => {});
+    }
     return;
   }
 
@@ -403,6 +479,9 @@ export async function sendInteractiveListMessage(
       }
     );
     logger.info(`WhatsApp interactive list sent to ${to}`);
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'interactive', success: true }).catch(() => {});
+    }
   } catch (error) {
     if (axios.isAxiosError(error)) {
       logger.error('WhatsApp API error (interactive list)', {
@@ -412,5 +491,23 @@ export async function sendInteractiveListMessage(
     } else {
       logger.error('Failed to send WhatsApp interactive list', error);
     }
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'interactive', success: false }).catch(() => {});
+    }
   }
+}
+
+/**
+ * Track inbound WhatsApp message (called from webhook)
+ */
+export async function trackInboundMessage(
+  businessId: string,
+  messageType: MessageType = 'text'
+): Promise<void> {
+  trackWhatsAppUsage({
+    businessId,
+    direction: 'inbound',
+    messageType,
+    success: true,
+  }).catch(() => {});
 }

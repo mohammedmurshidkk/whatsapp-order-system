@@ -5,9 +5,21 @@ import { OpenRouter } from "@openrouter/sdk";
 import Groq from "groq-sdk";
 
 
+// AI Response with usage metadata
+export interface AIUsageResponse {
+  text: string | null;
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    latencyMs: number;
+  };
+}
+
 // AI Client Interface
 export interface AIClient {
   processMessage(prompt: string): Promise<string | null>;
+  processMessageWithUsage(prompt: string): Promise<AIUsageResponse>;
+  getProvider(): string;
 }
 
 // Gemini Client
@@ -17,15 +29,24 @@ class GeminiClient implements AIClient {
 
   constructor() {
     this.apiKey = process.env.GEMINI_API_KEY!;
-    logger.info('GEM KEY: ', process.env.GEMINI_API_KEY)
     if (!this.apiKey) {
       throw new Error('GEMINI_API_KEY not configured');
     }
     this.apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL_NAME}:generateContent`;
   }
 
+  getProvider(): string {
+    return 'gemini';
+  }
+
   async processMessage(prompt: string, retryCount = 0): Promise<string | null> {
+    const result = await this.processMessageWithUsage(prompt, retryCount);
+    return result.text;
+  }
+
+  async processMessageWithUsage(prompt: string, retryCount = 0): Promise<AIUsageResponse> {
     const MAX_RETRIES = 2;
+    const startTime = Date.now();
 
     try {
       const response = await axios.post(
@@ -43,39 +64,57 @@ class GeminiClient implements AIClient {
         }
       );
 
+      const latencyMs = Date.now() - startTime;
       const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
+
+      // Extract token usage from Gemini response
+      const usageMetadata = response.data?.usageMetadata || {};
+      const inputTokens = usageMetadata.promptTokenCount || Math.ceil(prompt.length / 4);
+      const outputTokens = usageMetadata.candidatesTokenCount || Math.ceil((text?.length || 0) / 4);
 
       // Retry on empty response (Gemini sometimes returns empty)
       if (!text && retryCount < MAX_RETRIES) {
         logger.warn(`Gemini returned empty response. Retry ${retryCount + 1}/${MAX_RETRIES}...`);
-        await new Promise(r => setTimeout(r, 500)); // Small delay before retry
-        return this.processMessage(prompt, retryCount + 1);
+        await new Promise(r => setTimeout(r, 500));
+        return this.processMessageWithUsage(prompt, retryCount + 1);
       }
 
-      return text;
+      return {
+        text,
+        usage: { inputTokens, outputTokens, latencyMs },
+      };
     } catch (error) {
+      const latencyMs = Date.now() - startTime;
       const status = (error as any).response?.status;
       const isRetryable = axios.isAxiosError(error) && (
-        error.code === 'ECONNABORTED' ||  // Timeout
-        !error.response ||                  // Network error
-        status === 503 ||                   // Model overloaded
-        status === 429 ||                   // Rate limited
-        status === 500                      // Server error
+        error.code === 'ECONNABORTED' ||
+        !error.response ||
+        status === 503 ||
+        status === 429 ||
+        status === 500
       );
 
-      // Retry with exponential backoff
       if (retryCount < MAX_RETRIES && isRetryable) {
-        const delay = Math.pow(2, retryCount) * 1000; // 1s, 2s, 4s
+        const delay = Math.pow(2, retryCount) * 1000;
         logger.warn(`Gemini API error (${status || 'network'}). Retry ${retryCount + 1}/${MAX_RETRIES} after ${delay}ms...`);
         await new Promise(r => setTimeout(r, delay));
-        return this.processMessage(prompt, retryCount + 1);
+        return this.processMessageWithUsage(prompt, retryCount + 1);
       }
 
       logger.error('Gemini API error', {
         status: status,
         data: (error as any).response?.data,
       });
-      throw error;
+
+      // Return error response with estimated tokens
+      return {
+        text: null,
+        usage: {
+          inputTokens: Math.ceil(prompt.length / 4),
+          outputTokens: 0,
+          latencyMs,
+        },
+      };
     }
   }
 }
@@ -94,8 +133,18 @@ class OpenRouterClient implements AIClient {
     });
   }
 
+  getProvider(): string {
+    return 'openrouter';
+  }
+
   async processMessage(prompt: string, retryCount = 0): Promise<string | null> {
+    const result = await this.processMessageWithUsage(prompt, retryCount);
+    return result.text;
+  }
+
+  async processMessageWithUsage(prompt: string, retryCount = 0): Promise<AIUsageResponse> {
     const MAX_RETRIES = 2;
+    const startTime = Date.now();
 
     try {
       const stream = await this.openrouter.chat.send({
@@ -110,15 +159,26 @@ class OpenRouterClient implements AIClient {
         responseText += chunk.choices[0]?.delta?.content || "";
       }
 
+      const latencyMs = Date.now() - startTime;
+
       // Retry on empty response
       if (!responseText && retryCount < MAX_RETRIES) {
         logger.warn(`OpenRouter returned empty response. Retry ${retryCount + 1}/${MAX_RETRIES}...`);
         await new Promise(r => setTimeout(r, 500));
-        return this.processMessage(prompt, retryCount + 1);
+        return this.processMessageWithUsage(prompt, retryCount + 1);
       }
 
-      return responseText || null;
+      // Estimate tokens (OpenRouter streaming doesn't return usage)
+      return {
+        text: responseText || null,
+        usage: {
+          inputTokens: Math.ceil(prompt.length / 4),
+          outputTokens: Math.ceil((responseText?.length || 0) / 4),
+          latencyMs,
+        },
+      };
     } catch (error: any) {
+      const latencyMs = Date.now() - startTime;
       const isRetryable =
         error.code === 'ECONNABORTED' ||
         error.code === 'ETIMEDOUT' ||
@@ -126,16 +186,23 @@ class OpenRouterClient implements AIClient {
         error.status === 429 ||
         error.status === 500;
 
-      // Retry with exponential backoff
       if (retryCount < MAX_RETRIES && isRetryable) {
         const delay = Math.pow(2, retryCount) * 1000;
         logger.warn(`OpenRouter API error (${error.status || error.code || 'unknown'}). Retry ${retryCount + 1}/${MAX_RETRIES} after ${delay}ms...`);
         await new Promise(r => setTimeout(r, delay));
-        return this.processMessage(prompt, retryCount + 1);
+        return this.processMessageWithUsage(prompt, retryCount + 1);
       }
 
       logger.error('OpenRouter API error', { status: error.status, message: error.message });
-      throw error;
+
+      return {
+        text: null,
+        usage: {
+          inputTokens: Math.ceil(prompt.length / 4),
+          outputTokens: 0,
+          latencyMs,
+        },
+      };
     }
   }
 }
@@ -154,8 +221,18 @@ class GroqClient implements AIClient {
     });
   }
 
+  getProvider(): string {
+    return 'groq';
+  }
+
   async processMessage(prompt: string, retryCount = 0): Promise<string | null> {
+    const result = await this.processMessageWithUsage(prompt, retryCount);
+    return result.text;
+  }
+
+  async processMessageWithUsage(prompt: string, retryCount = 0): Promise<AIUsageResponse> {
     const MAX_RETRIES = 2;
+    const startTime = Date.now();
 
     try {
       const completion = await this.groq.chat.completions.create({
@@ -164,17 +241,27 @@ class GroqClient implements AIClient {
         max_tokens: 2048,
       });
 
+      const latencyMs = Date.now() - startTime;
       const responseText = completion.choices[0]?.message?.content || null;
+
+      // Groq returns usage info
+      const usage: any = completion.usage || {};
+      const inputTokens = usage?.prompt_tokens || Math.ceil(prompt.length / 4);
+      const outputTokens = usage?.completion_tokens || Math.ceil((responseText?.length || 0) / 4);
 
       // Retry on empty response
       if (!responseText && retryCount < MAX_RETRIES) {
         logger.warn(`Groq returned empty response. Retry ${retryCount + 1}/${MAX_RETRIES}...`);
         await new Promise(r => setTimeout(r, 500));
-        return this.processMessage(prompt, retryCount + 1);
+        return this.processMessageWithUsage(prompt, retryCount + 1);
       }
 
-      return responseText;
+      return {
+        text: responseText,
+        usage: { inputTokens, outputTokens, latencyMs },
+      };
     } catch (error: any) {
+      const latencyMs = Date.now() - startTime;
       const isRetryable =
         error.code === 'ECONNABORTED' ||
         error.code === 'ETIMEDOUT' ||
@@ -182,16 +269,23 @@ class GroqClient implements AIClient {
         error.status === 429 ||
         error.status === 500;
 
-      // Retry with exponential backoff
       if (retryCount < MAX_RETRIES && isRetryable) {
         const delay = Math.pow(2, retryCount) * 1000;
         logger.warn(`Groq API error (${error.status || error.code || 'unknown'}). Retry ${retryCount + 1}/${MAX_RETRIES} after ${delay}ms...`);
         await new Promise(r => setTimeout(r, delay));
-        return this.processMessage(prompt, retryCount + 1);
+        return this.processMessageWithUsage(prompt, retryCount + 1);
       }
 
       logger.error('Groq API error', { status: error.status, message: error.message });
-      throw error;
+
+      return {
+        text: null,
+        usage: {
+          inputTokens: Math.ceil(prompt.length / 4),
+          outputTokens: 0,
+          latencyMs,
+        },
+      };
     }
   }
 }

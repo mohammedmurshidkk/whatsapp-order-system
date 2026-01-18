@@ -619,8 +619,8 @@ BEGIN
 END $$;
 
 -- Step 6: Recreate indexes
-CREATE INDEX idx_cake_flavor_pricing_business ON cake_flavor_pricing(business_id) WHERE is_active = true;
-CREATE INDEX idx_cake_flavor_pricing_flavor ON cake_flavor_pricing(business_id, flavor_name) WHERE is_active = true;
+CREATE INDEX IF NOT EXISTS idx_cake_flavor_pricing_business ON cake_flavor_pricing(business_id) WHERE is_active = true;
+CREATE INDEX IF NOT EXISTS idx_cake_flavor_pricing_flavor ON cake_flavor_pricing(business_id, flavor_name) WHERE is_active = true;
 
 -- Verify migration
 -- SELECT id, business_id, flavor_name, sizes, is_active FROM cake_flavor_pricing;
@@ -690,3 +690,237 @@ ADD COLUMN IF NOT EXISTS delivery_admin_note TEXT;
 
 -- Index for delivery boy orders
 CREATE INDEX IF NOT EXISTS idx_orders_delivery_boy ON orders(delivery_boy_id);
+-- ============================================
+-- USAGE TRACKING MIGRATIONS
+-- ============================================
+-- Usage Tracking Tables for Super Admin Dashboard
+-- Run this migration in Supabase SQL Editor
+
+-- ============================================
+-- 1. API Usage Logs (Raw Logs)
+-- ============================================
+CREATE TABLE IF NOT EXISTS api_usage_logs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+
+  -- API Type
+  api_type VARCHAR(50) NOT NULL, -- 'ai', 'whatsapp', 'google_maps'
+
+  -- Request Details
+  provider VARCHAR(50), -- 'gemini', 'openrouter', 'groq', 'meta', 'google'
+  endpoint VARCHAR(255),
+
+  -- Token Usage (for AI)
+  tokens_input INTEGER DEFAULT 0,
+  tokens_output INTEGER DEFAULT 0,
+
+  -- Performance
+  latency_ms INTEGER,
+
+  -- Status
+  success BOOLEAN DEFAULT true,
+  error_message TEXT,
+
+  -- WhatsApp-specific
+  message_direction VARCHAR(10), -- 'inbound', 'outbound'
+  message_type VARCHAR(50), -- 'text', 'image', 'document', 'interactive'
+
+  -- Google Maps-specific
+  distance_meters INTEGER,
+
+  -- Cost (calculated)
+  estimated_cost_usd DECIMAL(10, 6) DEFAULT 0,
+
+  -- Metadata
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Indexes for efficient querying
+CREATE INDEX IF NOT EXISTS idx_api_usage_business_date ON api_usage_logs(business_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_api_usage_type ON api_usage_logs(api_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_api_usage_created_at ON api_usage_logs(created_at DESC);
+
+-- ============================================
+-- 2. Daily Aggregated Stats
+-- ============================================
+CREATE TABLE IF NOT EXISTS usage_daily_stats (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  stat_date DATE NOT NULL,
+
+  -- AI Usage
+  ai_requests_count INTEGER DEFAULT 0,
+  ai_tokens_input INTEGER DEFAULT 0,
+  ai_tokens_output INTEGER DEFAULT 0,
+  ai_errors_count INTEGER DEFAULT 0,
+  ai_avg_latency_ms INTEGER DEFAULT 0,
+  ai_estimated_cost_usd DECIMAL(10, 4) DEFAULT 0,
+
+  -- WhatsApp Usage
+  wa_messages_received INTEGER DEFAULT 0,
+  wa_messages_sent INTEGER DEFAULT 0,
+  wa_media_sent INTEGER DEFAULT 0,
+  wa_estimated_cost_usd DECIMAL(10, 4) DEFAULT 0,
+
+  -- Google Maps Usage
+  maps_api_calls INTEGER DEFAULT 0,
+  maps_estimated_cost_usd DECIMAL(10, 4) DEFAULT 0,
+
+  -- Business Metrics
+  orders_count INTEGER DEFAULT 0,
+  orders_revenue DECIMAL(12, 2) DEFAULT 0,
+  unique_customers INTEGER DEFAULT 0,
+
+  -- Total Cost
+  total_estimated_cost_usd DECIMAL(10, 4) DEFAULT 0,
+
+  -- Metadata
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+
+  -- Unique constraint for upsert
+  UNIQUE(business_id, stat_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_daily_business ON usage_daily_stats(business_id, stat_date DESC);
+CREATE INDEX IF NOT EXISTS idx_usage_daily_date ON usage_daily_stats(stat_date DESC);
+
+-- ============================================
+-- 3. Super Admins Table
+-- ============================================
+CREATE TABLE IF NOT EXISTS super_admins (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email VARCHAR(255) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  name VARCHAR(255),
+  is_active BOOLEAN DEFAULT true,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  last_login_at TIMESTAMPTZ
+);
+
+-- ============================================
+-- 4. API Cost Configuration
+-- ============================================
+CREATE TABLE IF NOT EXISTS api_cost_config (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  api_type VARCHAR(50) NOT NULL, -- 'ai', 'whatsapp', 'google_maps'
+  provider VARCHAR(50), -- 'gemini', 'openrouter', 'groq', 'meta', 'google'
+
+  -- Pricing (USD)
+  cost_per_input_token DECIMAL(12, 10) DEFAULT 0,
+  cost_per_output_token DECIMAL(12, 10) DEFAULT 0,
+  cost_per_request DECIMAL(10, 6) DEFAULT 0,
+  cost_per_message DECIMAL(10, 6) DEFAULT 0,
+
+  -- Description
+  description TEXT,
+
+  -- Validity
+  effective_from DATE DEFAULT CURRENT_DATE,
+  effective_to DATE,
+
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Insert default pricing
+INSERT INTO api_cost_config (api_type, provider, cost_per_input_token, cost_per_output_token, description) VALUES
+  ('ai', 'gemini', 0.0000001, 0.0000004, 'Gemini 2.0 Flash: $0.10/1M input, $0.40/1M output'),
+  ('ai', 'openrouter', 0.0000001, 0.0000004, 'OpenRouter varies by model'),
+  ('ai', 'groq', 0.0000001, 0.0000004, 'Groq varies by model')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO api_cost_config (api_type, provider, cost_per_request, description) VALUES
+  ('google_maps', 'distance_matrix', 0.005, 'Google Distance Matrix: $5/1000 requests')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO api_cost_config (api_type, provider, cost_per_message, description) VALUES
+  ('whatsapp', 'meta', 0.005, 'Meta WhatsApp: ~$0.005/conversation (varies by country)')
+ON CONFLICT DO NOTHING;
+
+-- ============================================
+-- 5. Helper Function: Aggregate Daily Stats
+-- ============================================
+CREATE OR REPLACE FUNCTION aggregate_daily_usage_stats(target_date DATE)
+RETURNS void AS $$
+BEGIN
+  INSERT INTO usage_daily_stats (
+    business_id,
+    stat_date,
+    ai_requests_count,
+    ai_tokens_input,
+    ai_tokens_output,
+    ai_errors_count,
+    ai_avg_latency_ms,
+    ai_estimated_cost_usd,
+    wa_messages_received,
+    wa_messages_sent,
+    wa_media_sent,
+    wa_estimated_cost_usd,
+    maps_api_calls,
+    maps_estimated_cost_usd,
+    total_estimated_cost_usd
+  )
+  SELECT
+    business_id,
+    target_date,
+    COUNT(*) FILTER (WHERE api_type = 'ai') as ai_requests_count,
+    COALESCE(SUM(tokens_input) FILTER (WHERE api_type = 'ai'), 0) as ai_tokens_input,
+    COALESCE(SUM(tokens_output) FILTER (WHERE api_type = 'ai'), 0) as ai_tokens_output,
+    COUNT(*) FILTER (WHERE api_type = 'ai' AND NOT success) as ai_errors_count,
+    COALESCE(AVG(latency_ms) FILTER (WHERE api_type = 'ai'), 0)::INTEGER as ai_avg_latency_ms,
+    COALESCE(SUM(estimated_cost_usd) FILTER (WHERE api_type = 'ai'), 0) as ai_estimated_cost_usd,
+    COUNT(*) FILTER (WHERE api_type = 'whatsapp' AND message_direction = 'inbound') as wa_messages_received,
+    COUNT(*) FILTER (WHERE api_type = 'whatsapp' AND message_direction = 'outbound') as wa_messages_sent,
+    COUNT(*) FILTER (WHERE api_type = 'whatsapp' AND message_direction = 'outbound' AND message_type IN ('image', 'document')) as wa_media_sent,
+    COALESCE(SUM(estimated_cost_usd) FILTER (WHERE api_type = 'whatsapp'), 0) as wa_estimated_cost_usd,
+    COUNT(*) FILTER (WHERE api_type = 'google_maps') as maps_api_calls,
+    COALESCE(SUM(estimated_cost_usd) FILTER (WHERE api_type = 'google_maps'), 0) as maps_estimated_cost_usd,
+    COALESCE(SUM(estimated_cost_usd), 0) as total_estimated_cost_usd
+  FROM api_usage_logs
+  WHERE created_at >= target_date AND created_at < target_date + INTERVAL '1 day'
+  GROUP BY business_id
+  ON CONFLICT (business_id, stat_date) DO UPDATE SET
+    ai_requests_count = EXCLUDED.ai_requests_count,
+    ai_tokens_input = EXCLUDED.ai_tokens_input,
+    ai_tokens_output = EXCLUDED.ai_tokens_output,
+    ai_errors_count = EXCLUDED.ai_errors_count,
+    ai_avg_latency_ms = EXCLUDED.ai_avg_latency_ms,
+    ai_estimated_cost_usd = EXCLUDED.ai_estimated_cost_usd,
+    wa_messages_received = EXCLUDED.wa_messages_received,
+    wa_messages_sent = EXCLUDED.wa_messages_sent,
+    wa_media_sent = EXCLUDED.wa_media_sent,
+    wa_estimated_cost_usd = EXCLUDED.wa_estimated_cost_usd,
+    maps_api_calls = EXCLUDED.maps_api_calls,
+    maps_estimated_cost_usd = EXCLUDED.maps_estimated_cost_usd,
+    total_estimated_cost_usd = EXCLUDED.total_estimated_cost_usd,
+    updated_at = NOW();
+END;
+$$ LANGUAGE plpgsql;
+
+-- ============================================
+-- 6. RLS Policies
+-- ============================================
+ALTER TABLE api_usage_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usage_daily_stats ENABLE ROW LEVEL SECURITY;
+ALTER TABLE super_admins ENABLE ROW LEVEL SECURITY;
+ALTER TABLE api_cost_config ENABLE ROW LEVEL SECURITY;
+
+-- Super admins can read all usage data
+CREATE POLICY "Super admins can read all usage logs" ON api_usage_logs
+  FOR SELECT USING (true);
+
+CREATE POLICY "Super admins can read all daily stats" ON usage_daily_stats
+  FOR SELECT USING (true);
+
+-- Service role can insert usage logs
+CREATE POLICY "Service can insert usage logs" ON api_usage_logs
+  FOR INSERT WITH CHECK (true);
+
+CREATE POLICY "Service can manage daily stats" ON usage_daily_stats
+  FOR ALL USING (true);
+
+-- ============================================
+-- DONE! Run aggregate function daily via cron:
+-- SELECT aggregate_daily_usage_stats(CURRENT_DATE - INTERVAL '1 day');
+-- ============================================

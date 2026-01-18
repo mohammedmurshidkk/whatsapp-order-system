@@ -639,7 +639,8 @@ export async function calculateDistanceBasedDeliveryFee(
     customerLat,
     customerLon,
     business.use_road_distance_api || false,
-    business.road_distance_multiplier || 1.3
+    business.road_distance_multiplier || 1.3,
+    businessId
   );
 
   const distanceMeters = distanceResult.distance_meters;

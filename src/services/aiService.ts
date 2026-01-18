@@ -4,6 +4,7 @@ import { formatMessagesForAI } from './messageService';
 import { logger } from '../utils/logger';
 import { getAIClient } from './aiClient';
 import { formatWeight } from '../utils/weightUtils';
+import { trackAIUsage, AIProvider } from './usageService';
 
 // Helper: Add minutes to a time string (e.g., "10:00" + 30 = "10:30")
 function addMinutesToTime(time: string, minutes: number): string {
@@ -244,7 +245,7 @@ INTENTS:
 - requires_intervention: Triggers admin support for urgent delivery, out of radius, or complex requests
 
 🚑 INTERVENTIONS:
-- Urgent Delivery (within 24h): Use "requires_intervention". Ask for date/time and reason.
+- Urgent Delivery (within ${minWait} minutes): Use "requires_intervention". Ask for date/time and reason.
 - Out of Radius (far distance): Use "requires_intervention". Ask for location details.
 - Special Events (large party): Use "amenity_inquiry" or "requires_intervention" if generic.
 
@@ -718,7 +719,22 @@ export async function processMessageWithAI(
 
   try {
     const aiClient = getAIClient();
-    const responseText = await aiClient.processMessage(prompt);
+    const result = await aiClient.processMessageWithUsage(prompt);
+
+    // Track AI usage if we have a business ID
+    if (context.business?.id) {
+      trackAIUsage({
+        businessId: context.business.id,
+        provider: aiClient.getProvider() as AIProvider,
+        tokensInput: result.usage.inputTokens,
+        tokensOutput: result.usage.outputTokens,
+        latencyMs: result.usage.latencyMs,
+        success: !!result.text,
+        errorMessage: result.text ? undefined : 'Empty AI response',
+      }).catch(err => logger.warn('Failed to track AI usage', err));
+    }
+
+    const responseText = result.text;
 
     if (!responseText) {
       logger.error('Empty response from AI provider');
