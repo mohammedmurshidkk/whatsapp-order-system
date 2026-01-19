@@ -11,6 +11,7 @@ import { searchMenuItem, getBusinessById } from './menuService';
 import { formatDeliveryTime, formatDateForDisplay, calculateDistanceBasedDeliveryFee } from './fulfillmentService';
 import { logger } from '../utils/logger';
 import { parseWeight, isWeightString } from '../utils/weightUtils';
+import { updateItemStats } from './popularItemsService';
 
 /**
  * Generate the next order number for a business
@@ -572,6 +573,23 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
   if (error) {
     logger.error('Failed to create order', error);
     throw new Error('Failed to create order');
+  }
+
+  // Track item stats for popularity
+  if (order && order.items) {
+    // The items in order.items are of type OrderItemData, which lacks menu_item_id
+    // We need to fetch it to call updateItemStats.
+    const itemsForStats = await Promise.all(
+        (order.items as OrderItemData[]).map(async (item) => {
+            const menuItem = await searchMenuItem(order.business_id, item.name);
+            return {
+                ...item,
+                menu_item_id: menuItem?.id,
+                price: item.unit_price || 0,
+            };
+        })
+    );
+    await updateItemStats(order.business_id, itemsForStats);
   }
 
   // Note: Session stays active until admin marks order as completed/cancelled

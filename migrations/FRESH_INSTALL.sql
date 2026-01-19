@@ -858,3 +858,127 @@ CREATE POLICY "Service can manage daily stats" ON usage_daily_stats
 -- DONE! Run aggregate function daily via cron:
 -- SELECT aggregate_daily_usage_stats(CURRENT_DATE - INTERVAL '1 day');
 -- ============================================
+
+-- ============================================
+-- MOST MOVABLE ITEMS MIGRATIONS
+-- From USAGE_PLAN.md
+-- ============================================
+
+-- 1. Create order_item_stats table
+CREATE TABLE order_item_stats (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID REFERENCES businesses(id) ON DELETE CASCADE,
+  menu_item_id UUID REFERENCES menu_items(id) ON DELETE CASCADE,
+  item_name VARCHAR(255) NOT NULL,
+  period_type VARCHAR(20) NOT NULL, -- 'daily', 'weekly', 'monthly', 'all_time'
+  period_start DATE NOT NULL,
+  order_count INTEGER DEFAULT 0,
+  quantity_sold INTEGER DEFAULT 0,
+  revenue DECIMAL(10,2) DEFAULT 0,
+  updated_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE(business_id, menu_item_id, period_type, period_start)
+);
+
+CREATE INDEX idx_item_stats_business_period
+ON order_item_stats(business_id, period_type, order_count DESC);
+
+CREATE INDEX idx_item_stats_menu_item
+ON order_item_stats(menu_item_id);
+
+-- 2. Add featured columns to menu_items
+ALTER TABLE menu_items
+ADD COLUMN is_featured BOOLEAN DEFAULT FALSE,
+ADD COLUMN featured_order INTEGER DEFAULT 0;
+
+CREATE INDEX idx_menu_items_featured
+ON menu_items(business_id, is_featured, featured_order)
+WHERE is_featured = TRUE;
+
+-- 3. Create increment_item_stats RPC function
+CREATE OR REPLACE FUNCTION increment_item_stats(
+  p_business_id UUID,
+  p_menu_item_id UUID,
+  p_item_name VARCHAR,
+  p_quantity INTEGER,
+  p_revenue DECIMAL,
+  p_date DATE
+) RETURNS VOID AS $$
+BEGIN
+  INSERT INTO order_item_stats (business_id, menu_item_id, item_name, period_type, period_start, order_count, quantity_sold, revenue)
+  VALUES (p_business_id, p_menu_item_id, p_item_name, 'daily', p_date, 1, p_quantity, p_revenue)
+  ON CONFLICT (business_id, menu_item_id, period_type, period_start)
+  DO UPDATE SET
+    order_count = order_item_stats.order_count + 1,
+    quantity_sold = order_item_stats.quantity_sold + p_quantity,
+    revenue = order_item_stats.revenue + p_revenue,
+    updated_at = NOW();
+END;
+$$ LANGUAGE plpgsql;
+
+-- 4. Create aggregate_item_stats RPC function (for cron)
+CREATE OR REPLACE FUNCTION aggregate_item_stats(p_date DATE DEFAULT CURRENT_DATE)
+RETURNS VOID AS $$
+BEGIN
+  -- Weekly aggregation
+  INSERT INTO order_item_stats (business_id, menu_item_id, item_name, period_type, period_start, order_count, quantity_sold, revenue)
+  SELECT
+    business_id, menu_item_id, item_name, 'weekly',
+    date_trunc('week', p_date)::DATE,
+    SUM(order_count), SUM(quantity_sold), SUM(revenue)
+  FROM order_item_stats
+  WHERE period_type = 'daily' AND period_start >= date_trunc('week', p_date)
+  GROUP BY business_id, menu_item_id, item_name
+  ON CONFLICT (business_id, menu_item_id, period_type, period_start)
+  DO UPDATE SET
+    order_count = EXCLUDED.order_count,
+    quantity_sold = EXCLUDED.quantity_sold,
+    revenue = EXCLUDED.revenue,
+    updated_at = NOW();
+
+  -- Monthly aggregation
+  INSERT INTO order_item_stats (business_id, menu_item_id, item_name, period_type, period_start, order_count, quantity_sold, revenue)
+  SELECT
+    business_id, menu_item_id, item_name, 'monthly',
+    date_trunc('month', p_date)::DATE,
+    SUM(order_count), SUM(quantity_sold), SUM(revenue)
+  FROM order_item_stats
+  WHERE period_type = 'daily' AND period_start >= date_trunc('month', p_date)
+  GROUP BY business_id, menu_item_id, item_name
+  ON CONFLICT (business_id, menu_item_id, period_type, period_start)
+  DO UPDATE SET
+    order_count = EXCLUDED.order_count,
+    quantity_sold = EXCLUDED.quantity_sold,
+    revenue = EXCLUDED.revenue,
+    updated_at = NOW();
+
+  -- All-time aggregation
+  INSERT INTO order_item_stats (business_id, menu_item_id, item_name, period_type, period_start, order_count, quantity_sold, revenue)
+  SELECT
+    business_id, menu_item_id, item_name, 'all_time',
+    '2024-01-01'::DATE,
+    SUM(order_count), SUM(quantity_sold), SUM(revenue)
+  FROM order_item_stats
+  WHERE period_type = 'daily'
+  GROUP BY business_id, menu_item_id, item_name
+  ON CONFLICT (business_id, menu_item_id, period_type, period_start)
+  DO UPDATE SET
+    order_count = EXCLUDED.order_count,
+    quantity_sold = EXCLUDED.quantity_sold,
+    revenue = EXCLUDED.revenue,
+    updated_at = NOW();
+END;
+$$ LANGUAGE plpgsql;
+
+create or replace function update_menu_item_featured_order(items jsonb, p_business_id uuid)
+returns void as $$
+declare
+  item jsonb;
+begin
+  for item in select * from jsonb_array_elements(items)
+  loop
+    update menu_items
+    set featured_order = (item->>'featured_order')::integer
+    where id = (item->>'id')::uuid and business_id = p_business_id;
+  end loop;
+end;
+$$ language plpgsql;

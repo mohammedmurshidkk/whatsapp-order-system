@@ -321,7 +321,8 @@ export type AIIntent =
   | 'amenity_inquiry'        // Customer asking about an amenity (party hall, etc.)
   | 'amenity_booking_request' // Customer wants to book/reserve an amenity
   | 'requires_intervention' // Generic intervention needed (admin attention)
-  | 'show_photos';          // Customer wants to see photos of menu items/category
+  | 'show_photos'
+  | 'show_popular_items';          // Customer wants to see photos of menu items/category
 
 export interface AIAddonResponse {
   addon_id?: string;

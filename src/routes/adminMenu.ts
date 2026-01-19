@@ -11,6 +11,8 @@ import {
   updateItemPrice,
   syncMenuPdf,
   getMenuPdf,
+  toggleFeatured,
+  updateFeaturedOrder,
 } from '../controllers/adminMenuController';
 import * as pdfConfigController from '../controllers/adminMenuPdfController';
 import { authMiddleware } from '../middleware/auth';
@@ -54,5 +56,9 @@ router.delete('/:itemId', deleteMenuItem);
 router.patch('/:itemId/availability', toggleAvailability);
 router.patch('/:itemId/price', updateItemPrice);  // Convenience endpoint for price updates
 router.post('/:itemId/image', upload.single('image'), uploadItemImage);
+
+// Featured items
+router.patch('/:itemId/featured', toggleFeatured);
+router.patch('/featured/order', updateFeaturedOrder);
 
 export default router;

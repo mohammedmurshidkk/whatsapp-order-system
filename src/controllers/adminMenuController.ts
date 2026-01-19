@@ -55,6 +55,8 @@ export async function listMenuItems(req: AuthRequest, res: Response): Promise<vo
         pricing_type: item.sizes && item.sizes.length > 0 ? 'sizes' : 'single',
         image_url: item.image_url || null,
         is_available: item.is_available,
+        is_featured: item.is_featured || false,
+        featured_order: item.featured_order || 0,
         created_at: item.created_at,
       })),
     });
@@ -633,5 +635,94 @@ export async function getMenuPdf(req: AuthRequest, res: Response): Promise<void>
   } catch (error) {
     logger.error('Failed to get menu PDF URL', error);
     res.status(500).json({ error: 'Failed to get menu PDF URL' });
+  }
+}
+
+// Toggle item featured status
+export async function toggleFeatured(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const { itemId } = req.params;
+    const { is_featured } = req.body;
+
+    if (typeof is_featured !== 'boolean') {
+      res.status(400).json({ error: 'is_featured must be a boolean' });
+      return;
+    }
+
+    // Verify item belongs to this business
+    const { data: existing } = await supabase
+      .from('menu_items')
+      .select('id, name')
+      .eq('id', itemId)
+      .eq('business_id', businessId)
+      .single();
+
+    if (!existing) {
+      res.status(404).json({ error: 'Menu item not found' });
+      return;
+    }
+
+    const { error } = await supabase
+      .from('menu_items')
+      .update({ is_featured, featured_order: is_featured ? 0 : null }) // Reset order when un-featuring
+      .eq('id', itemId);
+
+    if (error) {
+      throw error;
+    }
+
+    // Clear menu cache
+    clearMenuCache(businessId);
+
+    logger.info(`Menu item ${existing.name} featured status: ${is_featured}`);
+
+    res.status(200).json({ success: true, is_featured });
+  } catch (error) {
+    logger.error('Failed to toggle featured status', error);
+    res.status(500).json({ error: 'Failed to toggle featured status' });
+  }
+}
+
+// Update the display order of featured items
+export async function updateFeaturedOrder(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const { items } = req.body; // items is an array of {id: string, featured_order: number}
+
+    if (!Array.isArray(items)) {
+      res.status(400).json({ error: 'items must be an array of {id, featured_order} objects' });
+      return;
+    }
+
+    // Use RPC to update all in a single transaction
+    const { error } = await supabase.rpc('update_menu_item_featured_order', {
+      items,
+      p_business_id: businessId,
+    });
+
+    if (error) {
+      throw error;
+    }
+
+    // Clear menu cache
+    clearMenuCache(businessId);
+
+    logger.info(`Featured order updated for business ${businessId}`);
+
+    res.status(200).json({ success: true });
+  } catch (error) {
+    logger.error('Failed to update featured order', error);
+    res.status(500).json({ error: 'Failed to update featured order' });
   }
 }

@@ -6,6 +6,8 @@ import { getAIClient } from './aiClient';
 import { formatWeight } from '../utils/weightUtils';
 import { trackAIUsage, AIProvider } from './usageService';
 
+import { getPopularItemsForAI } from './popularItemsService';
+
 // Helper: Add minutes to a time string (e.g., "10:00" + 30 = "10:30")
 function addMinutesToTime(time: string, minutes: number): string {
   const [hours, mins] = time.split(':').map(Number);
@@ -25,6 +27,10 @@ function subtractMinutesFromTime(time: string, minutes: number): string {
   return `${String(newHours).padStart(2, '0')}:${String(newMins).padStart(2, '0')}`;
 }
 
+export interface PopularItem {
+  item_name: string;
+}
+
 export interface AIContext {
   business?: Business;
   menuItems?: MenuItem[];
@@ -38,6 +44,7 @@ export interface AIContext {
   lastAddedItemId?: string; // NEW: Last added session item ID (for add-on flow)
   amenities?: BusinessAmenity[]; // Available amenities (party hall, etc.)
   customerLanguage?: 'en' | 'ml'; // i18n: Customer's preferred language
+  popularItems?: PopularItem[];
   // Active order context for post-order inquiries
   activeOrder?: {
     order_number: string;
@@ -138,6 +145,13 @@ function getSystemPrompt(context: AIContext): string {
     itemNamesList = context.menuItems.map(item => `"${item.name}"`).join(', ');
   }
 
+  let popularItemsSection = '';
+  if (context.popularItems && context.popularItems.length > 0) {
+    popularItemsSection += `\n\nPOPULAR ITEMS (recommend when asked "what's good", "best seller", etc.):\n`;
+    popularItemsSection += context.popularItems.map((item, i) => `${i + 1}. ${item.item_name}`).join('\n');
+    popularItemsSection += `\nWhen asked for recommendations, use intent "show_popular_items" or suggest these items naturally.\n`;
+  }
+
   // Format outlets for takeaway (static per business) with operating hours
   let outletsSection = '';
   if (context.outlets && context.outlets.length > 0) {
@@ -203,6 +217,7 @@ function getSystemPrompt(context: AIContext): string {
   const staticPrompt = `You are an AI ordering assistant for ${businessName}.
 ${customInstructions}${customerSupportSection}
 ${menuSection}
+${popularItemsSection}
 ${outletsSection}${amenitiesSection}
 ⚠️ RULES: Only accept menu items. Match names EXACTLY. Never invent items/prices.
 VALID ITEMS: [${itemNamesList}]
@@ -715,6 +730,13 @@ export async function processMessageWithAI(
   _sessionContext: Session,
   context: AIContext = {}
 ): Promise<AIResponse> {
+  if (context.business) {
+    const popularItems = await getPopularItemsForAI(context.business.id);
+    if (popularItems && popularItems.length > 0) {
+      context.popularItems = popularItems;
+    }
+  }
+
   const prompt = buildPrompt(currentMessage, conversationHistory, context);
 
   try {

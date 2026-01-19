@@ -53,6 +53,7 @@ import {
   formatOutletsForCustomer,
   findOutletByCustomerInput,
 } from '../services/outletService';
+import { getPopularItemsForAI } from '../services/popularItemsService';
 import {
   updateSessionFulfillmentType,
   updateSessionDeliveryInfo,
@@ -2919,7 +2920,12 @@ export async function processMessage(
 
             const caption = `${matchedItem.name}\n💰 ${priceStr}\n\nReply with the name to order!`;
             await sendImg(phone, matchedItem.image_url, caption);
-            await saveOutgoingMessage(session.id, `[Sent ${matchedItem.name} photo]`);
+            await saveOutgoingMessage(session.id, caption, {
+              messageType: 'image',
+              mediaUrl: matchedItem.image_url,
+              mediaMimeType: 'image/jpeg',
+              mediaCaption: caption
+            });
             return null;
           } else if (matchedItem && !matchedItem.image_url) {
             replyMessage = lang === 'ml'
@@ -2975,6 +2981,12 @@ export async function processMessage(
 
                 const caption = `${item.name}\n💰 ${priceStr}\n\nReply with the name to order!`;
                 await sendImg(phone, item.image_url!, caption);
+                await saveOutgoingMessage(session.id, caption, {
+                  messageType: 'image',
+                  mediaUrl: item.image_url,
+                  mediaMimeType: 'image/jpeg',
+                  mediaCaption: caption
+                });
               }
 
               // If more items available, ask if they want to see more
@@ -2985,7 +2997,6 @@ export async function processMessage(
                 await sendReply(phone, moreMsg);
               }
 
-              await saveOutgoingMessage(session.id, `[Sent ${photosToSend.length} ${matchedCategory.name} photos]`);
               return null; // Don't send another message
             }
           } else {
@@ -3003,6 +3014,46 @@ export async function processMessage(
             ? `ഏത് കാറ്റഗറിയുടെ ഫോട്ടോകൾ കാണണം? ലഭ്യമായവ: ${categoryNames}`
             : `Which category photos would you like to see? Available: ${categoryNames}`;
         }
+      }
+      break;
+
+    case 'show_popular_items':
+      if (business?.id) {
+        const popularItems = await getPopularItemsForAI(business.id);
+        if (popularItems.length > 0) {
+          replyMessage = `⭐ Here are our most popular items:\n\n`;
+          replyMessage += popularItems.map((item, i) => {
+            let itemText = `${i + 1}. *${item.item_name}*`;
+            // Add price
+            if (item.sizes && item.sizes.length > 0) {
+              const prices = item.sizes.map((s: any) => s.price);
+              const minPrice = Math.min(...prices);
+              const maxPrice = Math.max(...prices);
+              itemText += minPrice === maxPrice
+                ? ` - ₹${minPrice}`
+                : ` - ₹${minPrice} to ₹${maxPrice}`;
+            } else if (item.base_price) {
+              itemText += ` - ₹${item.base_price}`;
+            }
+            // Add description
+            if (item.description) {
+              itemText += `\n   ${item.description}`;
+            }
+            return itemText;
+          }).join('\n\n');
+          replyMessage += `\n\nWhat would you like to order?`;
+
+          // Send images for items that have them (max 3 to avoid spam)
+          const itemsWithImages = popularItems.filter((item: any) => item.image_url).slice(0, 3);
+          for (const item of itemsWithImages) {
+            const caption = `${item.item_name}${item.base_price ? ` - ₹${item.base_price}` : ''}`;
+            await sendImg(phone, item.image_url, caption);
+          }
+        } else {
+          replyMessage = "We're still gathering our top sellers! You can ask for the menu to see all our items.";
+        }
+      } else {
+        replyMessage = "I can't fetch popular items right now. Please ask for the menu.";
       }
       break;
 
