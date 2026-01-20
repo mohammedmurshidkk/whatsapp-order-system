@@ -20,6 +20,7 @@ import {
   getRealTimeUsage,
   aggregateDailyStats,
 } from '../services/usageService';
+import { getAuditLogs, getAuditStats, auditFromRequest } from '../services/auditService';
 import { supabase } from '../config/database';
 import { logger } from '../utils/logger';
 
@@ -341,6 +342,79 @@ router.get('/usage/raw-logs', async (req: AuthRequest, res: Response) => {
   } catch (error) {
     logger.error('Failed to get raw logs', { error });
     res.status(500).json({ error: 'Failed to load logs' });
+  }
+});
+
+// ============================================
+// Audit Logs APIs
+// ============================================
+
+/**
+ * GET /api/superadmin/audit-logs
+ * Get audit logs with filtering
+ */
+router.get('/audit-logs', async (req: AuthRequest, res: Response) => {
+  try {
+    const {
+      adminId,
+      businessId,
+      action,
+      entityType,
+      entityId,
+      from,
+      to,
+      limit = '50',
+      page = '1',
+    } = req.query;
+
+    const limitNum = parseInt(limit as string, 10);
+    const pageNum = parseInt(page as string, 10);
+    const offset = (pageNum - 1) * limitNum;
+
+    const { logs, total } = await getAuditLogs({
+      adminId: adminId as string,
+      businessId: businessId as string,
+      action: action as string,
+      entityType: entityType as string,
+      entityId: entityId as string,
+      fromDate: from as string,
+      toDate: to as string,
+      limit: limitNum,
+      offset,
+    });
+
+    res.json({
+      logs,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum),
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to get audit logs', { error });
+    res.status(500).json({ error: 'Failed to load audit logs' });
+  }
+});
+
+/**
+ * GET /api/superadmin/audit-logs/stats
+ * Get audit log statistics
+ */
+router.get('/audit-logs/stats', async (req: AuthRequest, res: Response) => {
+  try {
+    const { businessId, days = '30' } = req.query;
+
+    const stats = await getAuditStats(
+      businessId as string,
+      parseInt(days as string, 10)
+    );
+
+    res.json(stats);
+  } catch (error) {
+    logger.error('Failed to get audit stats', { error });
+    res.status(500).json({ error: 'Failed to load audit stats' });
   }
 });
 

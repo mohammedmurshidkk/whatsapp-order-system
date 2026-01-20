@@ -68,6 +68,26 @@ export async function getAddonById(addonId: string): Promise<MenuAddon | null> {
 }
 
 /**
+ * Get multiple addons by IDs
+ */
+export async function getAddonsByIds(addonIds: string[]): Promise<MenuAddon[]> {
+  if (!addonIds || addonIds.length === 0) return [];
+
+  const { data, error } = await supabase
+    .from('menu_addons')
+    .select('*')
+    .in('id', addonIds)
+    .eq('is_available', true);
+
+  if (error) {
+    logger.error('Failed to fetch addons by IDs', error);
+    return [];
+  }
+
+  return (data || []) as MenuAddon[];
+}
+
+/**
  * Find addon by name (fuzzy match)
  */
 export async function findAddonByName(

@@ -607,6 +607,30 @@ export async function createFinalOrder(sessionId: string): Promise<Order> {
     // Don't fail the order - items are already stored in the order
   }
 
+  // Clear session fulfillment data to prevent stale data in next order
+  // Order details are preserved in the orders table for follow-up queries
+  const { error: clearFulfillmentError } = await supabase
+    .from('sessions')
+    .update({
+      fulfillment_type: null,
+      delivery_address: null,
+      delivery_time: null,
+      delivery_latitude: null,
+      delivery_longitude: null,
+      delivery_geocoded_address: null,
+      pickup_outlet_id: null,
+      pickup_time: null,
+      fulfillment_notes: null,
+      custom_delivery_fee: null,
+    })
+    .eq('id', sessionId);
+
+  if (clearFulfillmentError) {
+    logger.warn(`Failed to clear session fulfillment data for session ${sessionId}:`, clearFulfillmentError);
+  } else {
+    logger.info(`Cleared session fulfillment data for session ${sessionId}`);
+  }
+
   logger.info(`Order created: ${order.order_number} (ID: ${order.id}) - Total: ₹${grandTotal} (items: ₹${totalAmount}, delivery: ₹${deliveryFee})`);
 
   // Send notification to business

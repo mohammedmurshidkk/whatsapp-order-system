@@ -2,6 +2,8 @@ import { Request, Response } from 'express';
 import { supabase } from '../config/database';
 import { logger } from '../utils/logger';
 import bcrypt from 'bcryptjs';
+import { auditFromRequest } from '../services/auditService';
+import { AuthRequest } from '../middleware/auth';
 
 // Get all businesses with pagination and search
 export async function getBusinesses(req: Request, res: Response): Promise<void> {
@@ -191,6 +193,14 @@ export async function createBusiness(req: Request, res: Response): Promise<void>
 
     logger.info(`Business created: ${name} (${business.id})`);
 
+    // Audit log
+    await auditFromRequest(req as AuthRequest, 'business.create', {
+      entityType: 'business',
+      entityId: business.id,
+      businessId: business.id,
+      details: { name, phone },
+    });
+
     res.status(201).json({
       business,
       // admin,
@@ -226,6 +236,14 @@ export async function updateBusiness(req: Request, res: Response): Promise<void>
     }
 
     logger.info(`Business updated: ${business.name} (${id})`);
+
+    // Audit log
+    await auditFromRequest(req as AuthRequest, 'business.update', {
+      entityType: 'business',
+      entityId: id,
+      businessId: id,
+      details: { updatedFields: Object.keys(updateData).filter(k => k !== 'updated_at') },
+    });
 
     res.status(200).json({ business });
   } catch (error) {
@@ -265,6 +283,14 @@ export async function toggleBusinessStatus(req: Request, res: Response): Promise
     }
 
     logger.info(`Business status toggled: ${id} -> ${updatedBusiness?.is_active}`);
+
+    // Audit log
+    await auditFromRequest(req as AuthRequest, 'business.toggle_status', {
+      entityType: 'business',
+      entityId: id,
+      businessId: id,
+      details: { previousStatus: business.is_active, newStatus: updatedBusiness?.is_active },
+    });
 
     res.status(200).json({ business: updatedBusiness });
   } catch (error) {
@@ -330,6 +356,14 @@ export async function addBusinessAdmin(req: Request, res: Response): Promise<voi
 
     logger.info(`Admin added to business ${id}: ${email}`);
 
+    // Audit log
+    await auditFromRequest(req as AuthRequest, 'business.admin_add', {
+      entityType: 'admin_user',
+      entityId: admin?.id,
+      businessId: id,
+      details: { email: email.toLowerCase(), role },
+    });
+
     res.status(201).json({ admin });
   } catch (error) {
     logger.error('Failed to add admin', error);
@@ -372,6 +406,14 @@ export async function deleteBusinessAdmin(req: Request, res: Response): Promise<
     }
 
     logger.info(`Admin deleted from business ${id}: ${adminId}`);
+
+    // Audit log
+    await auditFromRequest(req as AuthRequest, 'business.admin_delete', {
+      entityType: 'admin_user',
+      entityId: adminId,
+      businessId: id,
+      details: { deletedAdminRole: adminToDelete?.role },
+    });
 
     res.status(200).json({ success: true });
   } catch (error) {

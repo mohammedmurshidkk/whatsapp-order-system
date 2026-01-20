@@ -144,7 +144,7 @@ async function handleTextMessage(
     // Process message using shared logic
     const reply = await processMessageForWebJS(sanitizedPhone, sanitizedMessage, business.id);
 
-    if (reply !== null) {
+    if (reply) {
       // Send with human-like delays (typing indicator + natural timing)
       const sent = await sendHumanLikeReply(message, reply, sanitizedPhone);
       if (!sent) {

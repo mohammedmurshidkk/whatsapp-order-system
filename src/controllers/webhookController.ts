@@ -9,6 +9,13 @@ import {
   updateSessionItemCustomText,
   updateSessionLanguage,
   getSessionLanguage,
+  setLastAddedItem,
+  setPendingCustomText,
+  setPendingAddonSelection,
+  setPendingDateSelection,
+  setPendingCustomDate,
+  updateSessionPendingState,
+  clearSessionPendingState,
 } from '../services/sessionService';
 import {
   getRecentMessages,
@@ -72,6 +79,7 @@ import {
   findAddonByCustomerInput,
   findMultipleAddonsByInput,
   removeAddonFromSession,
+  getAddonsByIds,
 } from '../services/addonService';
 import {
   sendWhatsAppMessage,
@@ -121,6 +129,8 @@ import {
   pauseAI
 } from '../services/sessionService';
 import { SupportedLanguage, detectLanguageRequest, t } from '../i18n';
+import { executeHandler, hasHandler } from './intents/registry';
+import { IntentContext } from './intents/types';
 
 const CAKE_KEYWORDS = ['cake', 'birthday', 'anniversary', 'kg', 'flavor', 'chocolate', 'vanilla', 'fondant', 'design', 'custom'];
 
@@ -145,19 +155,19 @@ async function formatAvailableFlavors(businessId: string, lang: 'en' | 'ml'): Pr
 }
 
 // Track last added item per session for add-on attachment
-const lastAddedItemMap = new Map<string, string>(); // sessionId -> itemId
+// Moved to database: last_added_item_id
 
 // Track pending custom text questions per session
-const pendingCustomTextMap = new Map<string, { itemId: string; prompt: string }>(); // sessionId -> { itemId, prompt }
+// Moved to database: pending_state.pendingCustomText
 
 // Track pending addon selections per session
-const pendingAddonSelectionMap = new Map<string, { itemId: string; addons: MenuAddon[] }>(); // sessionId -> { itemId, addons }
+// Moved to database: pending_state.pendingAddonSelection
 
 // Track pending date selection for time button flow (date selected, waiting for time)
-const pendingDateSelectionMap = new Map<string, { date: 'today' | 'tomorrow'; fulfillmentType: 'delivery' | 'takeaway' }>(); // sessionId -> { date, fulfillmentType }
+// Moved to database: pending_state.pendingDateSelection
 
 // Track pending custom date when user sends date and time separately (e.g., "14/01/26" then "11am")
-const pendingCustomDateMap = new Map<string, { year: number; month: number; day: number; fulfillmentType?: 'delivery' | 'takeaway' }>(); // sessionId -> { year, month, day }
+// Moved to database: pending_state.pendingCustomDate
 
 // Helper: Check if text is date-only (DD/MM/YY or DD/MM/YYYY without time)
 function isDateOnly(text: string): { year: number; month: number; day: number } | null {
@@ -223,7 +233,7 @@ async function processDebouncedMessages(phone: string): Promise<void> {
       pending.businessId,
       pending.customerName
     );
-    if (reply !== null) {
+    if (reply) {
       await sendWhatsAppMessage(phone, reply, pending.businessId);
     }
   } catch (error) {
@@ -397,7 +407,7 @@ export async function processMessage(
   messageText: string,
   businessId: string,
   customerName?: string
-): Promise<string | null> {
+): Promise<string | null | undefined> {
   logger.info(`Processing message from ${phone}: ${messageText.substring(0, 50)}...`);
 
   // Normalize Manglish (Malayalam + English) to English for AI processing
@@ -553,7 +563,7 @@ export async function processMessage(
   }
 
   // Check for pending custom text question (e.g., "What to write on cake?")
-  const pendingCustomText = pendingCustomTextMap.get(session.id);
+  const pendingCustomText = session.pending_state?.pendingCustomText;
   if (pendingCustomText) {
     const normalizedInput = messageText.toLowerCase().trim();
 
@@ -567,14 +577,15 @@ export async function processMessage(
 
     if (wantsToSkip) {
       logger.info(`Customer skipped custom text for item ${pendingCustomText.itemId}`);
-      pendingCustomTextMap.delete(session.id);
+      await setPendingCustomText(session.id, null);
       await saveIncomingMessage(session.id, originalMessage);
 
       // Check if there are pending addons to ask about (stored when custom text was first asked)
-      const pendingAddonsAfterSkip = pendingAddonSelectionMap.get(session.id);
-      if (pendingAddonsAfterSkip && pendingAddonsAfterSkip.itemId === pendingCustomText.itemId) {
+      const pendingAddonStateAfterSkip = session.pending_state?.pendingAddonSelection;
+      if (pendingAddonStateAfterSkip && pendingAddonStateAfterSkip.itemId === pendingCustomText.itemId) {
         // Ask about addons now
-        const addonsMessage = formatAddonsForCustomer(pendingAddonsAfterSkip.addons);
+        const addons = await getAddonsByIds(pendingAddonStateAfterSkip.addonIds);
+        const addonsMessage = formatAddonsForCustomer(addons);
         const skipWithAddons = `${t('customText.skipped', lang).split('!')[0]}!\n\n${addonsMessage}`;
         await saveOutgoingMessage(session.id, skipWithAddons);
         return skipWithAddons;
@@ -588,7 +599,7 @@ export async function processMessage(
     if (looksLikeNewOrder) {
       // User wants to order something else, clear pending and continue to AI
       logger.info(`Input "${messageText}" looks like a new order, clearing pending custom text`);
-      pendingCustomTextMap.delete(session.id);
+      await setPendingCustomText(session.id, null);
       // Fall through to AI processing
     } else {
       // Use AI to classify if this is valid custom text or a question
@@ -614,14 +625,15 @@ export async function processMessage(
       } else if (!classification.isValidText) {
         // AI detected a skip (e.g., "no", "nothing", "venda")
         logger.info(`AI detected skip for custom text: "${originalMessage}"`);
-        pendingCustomTextMap.delete(session.id);
+        await setPendingCustomText(session.id, null);
         await saveIncomingMessage(session.id, originalMessage);
 
         // Check for pending addons
-        const pendingAddonsAfterSkip = pendingAddonSelectionMap.get(session.id);
-        if (pendingAddonsAfterSkip && pendingAddonsAfterSkip.itemId === pendingCustomText.itemId) {
+        const pendingAddonStateAfterSkip = session.pending_state?.pendingAddonSelection;
+        if (pendingAddonStateAfterSkip && pendingAddonStateAfterSkip.itemId === pendingCustomText.itemId) {
           // Ask about addons now
-          const addonsMessage = formatAddonsForCustomer(pendingAddonsAfterSkip.addons);
+          const addons = await getAddonsByIds(pendingAddonStateAfterSkip.addonIds);
+          const addonsMessage = formatAddonsForCustomer(addons);
           const skipWithAddons = `${t('customText.skipped', lang).split('!')[0]}!\n\n${addonsMessage}`;
           await saveOutgoingMessage(session.id, skipWithAddons);
           return skipWithAddons;
@@ -636,16 +648,17 @@ export async function processMessage(
 
         logger.info(`Saving custom text response for item ${pendingCustomText.itemId}: "${cleanedText}"`);
         await updateSessionItemCustomText(pendingCustomText.itemId, cleanedText);
-        pendingCustomTextMap.delete(session.id);
+        await setPendingCustomText(session.id, null);
 
         // Save incoming message
         await saveIncomingMessage(session.id, originalMessage);
 
         // Check if there are pending addons to ask about (stored when custom text was first asked)
-        const pendingAddonsAfterText = pendingAddonSelectionMap.get(session.id);
-        if (pendingAddonsAfterText && pendingAddonsAfterText.itemId === pendingCustomText.itemId) {
+        const pendingAddonStateAfterText = session.pending_state?.pendingAddonSelection;
+        if (pendingAddonStateAfterText && pendingAddonStateAfterText.itemId === pendingCustomText.itemId) {
           // Ask about addons now
-          const addonsMessage = formatAddonsForCustomer(pendingAddonsAfterText.addons);
+          const addons = await getAddonsByIds(pendingAddonStateAfterText.addonIds);
+          const addonsMessage = formatAddonsForCustomer(addons);
           const confirmWithAddons = `${t('customText.saved', lang, { text: cleanedText })}\n\n${addonsMessage}`;
           await saveOutgoingMessage(session.id, confirmWithAddons);
           return confirmWithAddons;
@@ -661,14 +674,16 @@ export async function processMessage(
 
   // Check for pending addon selection (e.g., user replied "1" or "candle" after addon suggestion)
   // Skip if user asked a question during custom text prompt (let AI answer instead)
-  const pendingAddon = pendingAddonSelectionMap.get(session.id);
-  if (pendingAddon && !isCustomTextQuestion) {
+  const pendingAddonState = session.pending_state?.pendingAddonSelection;
+  if (pendingAddonState && !isCustomTextQuestion) {
+    const addons = await getAddonsByIds(pendingAddonState.addonIds);
+    const pendingAddon = { ...pendingAddonState, addons };
     const normalizedInput = messageText.toLowerCase().trim();
 
     // Check if user wants to skip addons
     if (['no', 'no thanks', 'skip', 'none', 'nope', 'nothing'].some(s => normalizedInput === s || normalizedInput.startsWith(s + ' '))) {
       logger.info(`Customer declined addons for item ${pendingAddon.itemId}`);
-      pendingAddonSelectionMap.delete(session.id);
+      await setPendingAddonSelection(session.id, null);
 
       await saveIncomingMessage(session.id, originalMessage);
       const skipReply = t('addons.declined', lang);
@@ -701,7 +716,7 @@ export async function processMessage(
         const askTextReply = t('customText.askPrompt', lang);
         await saveOutgoingMessage(session.id, askTextReply);
         // Set pending custom text for next message
-        pendingCustomTextMap.set(session.id, {
+        await setPendingCustomText(session.id, {
           itemId: pendingAddon.itemId,
           prompt: t('customText.askPrompt', lang),
         });
@@ -721,7 +736,7 @@ export async function processMessage(
         addedNames.push(`${addon.name}${priceText}`);
         logger.info(`Addon added: ${addon.name} to item ${pendingAddon.itemId}`);
       }
-      pendingAddonSelectionMap.delete(session.id);
+      await setPendingAddonSelection(session.id, null);
 
       await saveIncomingMessage(session.id, originalMessage);
       const addonReply = selectedAddons.length === 1
@@ -739,7 +754,7 @@ export async function processMessage(
     if (looksLikeNewOrder) {
       // User is ordering something new, clear addon pending and continue to AI
       logger.info(`Input "${messageText}" looks like a new order, continuing to AI`);
-      pendingAddonSelectionMap.delete(session.id);
+      await setPendingAddonSelection(session.id, null);
     } else {
       // Give hint about addon selection
       logger.info(`Input "${messageText}" didn't match addons, giving hint`);
@@ -768,7 +783,7 @@ export async function processMessage(
       // Check if message is a date-only input (e.g., "14/1/26") - store for combining with time later
       const dateOnlyInputEarly = isDateOnly(messageText);
       if (dateOnlyInputEarly) {
-        pendingCustomDateMap.set(session.id, {
+        await setPendingCustomDate(session.id, {
           ...dateOnlyInputEarly,
           fulfillmentType: sessionForTimeCheck.fulfillment_type || undefined,
         });
@@ -787,14 +802,14 @@ export async function processMessage(
         logger.info(`Session needs time, parsing: "${messageText}"`);
 
         // Check if there's a pending custom date (user sent date and time separately)
-        const pendingCustomDate = pendingCustomDateMap.get(session.id);
+        const pendingCustomDate = session.pending_state?.pendingCustomDate;
         let parsedTime: string | null = null;
 
         if (pendingCustomDate && isTimeOnly(messageText)) {
           // Combine pending date with time-only input
           parsedTime = combineDateAndTime(pendingCustomDate, messageText, businessTimezone);
           logger.info(`📅 Combined pending date with time: ${messageText} -> ${parsedTime}`);
-          pendingCustomDateMap.delete(session.id);
+          await setPendingCustomDate(session.id, null);
         } else {
           parsedTime = parseDeliveryTime(messageText, businessTimezone);
         }
@@ -1054,7 +1069,7 @@ export async function processMessage(
           logger.info(`✅ Custom cake added to cart: ${customCakeItem.id}, price: ₹${finalPrice}`);
 
           // Store last item for addons
-          lastAddedItemMap.set(session.id, customCakeItem.id);
+          await setLastAddedItem(session.id, customCakeItem.id);
 
           // Refresh existing items
           const updatedSession = await getSessionWithItems(session.id);
@@ -1281,7 +1296,7 @@ export async function processMessage(
   const dateOnlyInput = isDateOnly(messageText);
   if (dateOnlyInput) {
     // Store the date for combining with time in next message
-    pendingCustomDateMap.set(session.id, {
+    await setPendingCustomDate(session.id, {
       ...dateOnlyInput,
       fulfillmentType: latestSessionData.fulfillment_type || undefined,
     });
@@ -1290,10 +1305,10 @@ export async function processMessage(
   }
 
   // Check if user sent time-only and we have a pending custom date
-  const pendingCustomDate = pendingCustomDateMap.get(session.id);
-  if (pendingCustomDate && isTimeOnly(messageText)) {
+  const pendingCustomDateInt = session.pending_state?.pendingCustomDate;
+  if (pendingCustomDateInt && isTimeOnly(messageText)) {
     // Combine pending date with time
-    const combinedTime = combineDateAndTime(pendingCustomDate, messageText, businessTimezone);
+    const combinedTime = combineDateAndTime(pendingCustomDateInt, messageText, businessTimezone);
     if (combinedTime) {
       logger.info(`📅 Combined pending date with time: ${messageText} -> ${combinedTime}`);
       // Update AI response's delivery_time with combined datetime
@@ -1304,7 +1319,7 @@ export async function processMessage(
       }
     }
     // Clear pending date after use
-    pendingCustomDateMap.delete(session.id);
+    await setPendingCustomDate(session.id, null);
   }
 
   // SERVER-SIDE: Detect custom text change requests (e.g., "change text to Happy Birthday")
@@ -1312,7 +1327,7 @@ export async function processMessage(
   if (customTextChangeMatch && existingItems.length > 0) {
     const newCustomText = customTextChangeMatch[1].replace(/^["']|["']$/g, '').trim();
     if (newCustomText.length > 2) {
-      const lastItemId = lastAddedItemMap.get(session.id);
+      const lastItemId = session.last_added_item_id;
       if (lastItemId) {
         await updateSessionItemCustomText(lastItemId, newCustomText);
         logger.info(`Custom text updated via server-side detection: "${newCustomText}"`);
@@ -1368,7 +1383,7 @@ export async function processMessage(
           .eq('id', customCakeItem.id);
 
         logger.info(`✅ Custom cake added via fallback: ${customCakeItem.id}, price: ₹${finalPrice}`);
-        lastAddedItemMap.set(session.id, customCakeItem.id);
+        await setLastAddedItem(session.id, customCakeItem.id);
 
         // Generate summary and ask for fulfillment
         const summary = await generateOrderSummary(session.id, { includeCta: false, timezone: business?.timezone || 'Asia/Kolkata' });
@@ -1396,1686 +1411,81 @@ export async function processMessage(
     }
   }
 
-  // Handle different intents
-  switch (intentToProcess) {
-    case 'add_item':
-      // Handle multiple items with individual notes (e.g., "2 burgers - one less spicy, one extra cheese")
-      if (aiResponse.items && aiResponse.items.length > 0) {
-        logger.info(`🛒 ADD_ITEM intent received for ${aiResponse.items.length} items with individual notes`);
+  // ============================================
+  // BUILD INTENT CONTEXT & EXECUTE HANDLER
+  // ============================================
+  // Build context for intent handlers
+  const intentContext: IntentContext = {
+    // Business & Customer
+    phone,
+    businessId,
+    business,
+    customer,
+    session,
+    lang,
 
-        let lastSavedItemId: string | null = null;
-        const addedItemNames: string[] = [];
+    // Session State
+    sessionWithItems: sessionWithItems!,
+    existingItems,
+    outlets,
+    activeOrder,
 
-        for (const itemData of aiResponse.items) {
-          if (!itemData.name) continue;
+    // Menu & Content
+    menuItems: menuItems || [],
+    menuCategories: menuCategories || [],
+    amenities: amenities || [],
 
-          // Check for duplicates before adding
-          const isDuplicate = isItemDuplicate(existingItems, itemData.name, itemData.size_or_weight);
-          if (isDuplicate) {
-            logger.info(`Duplicate item prevented: ${itemData.name}`);
-            continue;
-          }
+    // Message Data
+    messageText,
+    originalMessage,
+    businessTimezone,
+    isFirstMessage,
 
-          try {
-            const savedItem = await saveOrderItem(session.id, {
-              ...itemData,
-              quantity: itemData.quantity || 1,
-            }, businessId);
-            logger.info(`✅ Item SAVED to DB: ${itemData.name} (ID: ${savedItem.id}, notes: ${itemData.notes || 'none'})`);
-            lastSavedItemId = savedItem.id;
+    // Messaging Helpers (pre-bound with businessId)
+    sendWhatsAppMessage: sendReply,
+    sendButtons,
+    sendList,
+    sendLocation,
+    sendDoc,
+    sendImage: sendImg,
 
-            const itemDesc = itemData.notes
-              ? `${itemData.name}${itemData.size_or_weight ? ` (${itemData.size_or_weight})` : ''} - ${itemData.notes}`
-              : `${itemData.name}${itemData.size_or_weight ? ` (${itemData.size_or_weight})` : ''}`;
-            addedItemNames.push(itemDesc);
-          } catch (saveError) {
-            logger.error(`❌ Failed to save item to DB: ${itemData.name}`, saveError);
-          }
-        }
+    // Message Persistence
+    saveOutgoingMessage,
+    saveIncomingMessage,
+  };
 
-        if (lastSavedItemId) {
-          lastAddedItemMap.set(session.id, lastSavedItemId);
-        }
-
-        if (addedItemNames.length > 0) {
-          replyMessage = t('cart.addedMultiple', lang, { items: addedItemNames.map((n, i) => `${i + 1}. ${n}`).join('\n') });
-        }
-        break;
-      }
-
-      if (aiResponse.item && aiResponse.item.name) {
-        logger.info(`🛒 ADD_ITEM intent received for: ${aiResponse.item.name} (size: ${aiResponse.item.size_or_weight || 'default'}, qty: ${aiResponse.item.quantity || 1}, notes: ${aiResponse.item.notes || 'none'})`);
-
-        // Check for duplicates before adding
-        const isDuplicate = isItemDuplicate(
-          existingItems,
-          aiResponse.item.name,
-          aiResponse.item.size_or_weight
-        );
-
-        if (isDuplicate) {
-          logger.info(`Duplicate item prevented: ${aiResponse.item.name}`);
-          // Don't add, but keep the AI's response (it should acknowledge it's already added)
-        } else {
-          try {
-            const savedItem = await saveOrderItem(session.id, aiResponse.item, businessId);
-            logger.info(`✅ Item SAVED to DB: ${aiResponse.item.name} (ID: ${savedItem.id})`);
-
-            // Store last added item ID for add-on attachment
-            lastAddedItemMap.set(session.id, savedItem.id);
-
-            // Check for custom text prompt OR add-ons (ask separately, custom text first)
-            if (menuItems && menuItems.length > 0) {
-              const addedMenuItem = menuItems.find(
-                mi => mi.name.toLowerCase() === aiResponse.item!.name.toLowerCase()
-              );
-
-              if (addedMenuItem && addedMenuItem.category_id) {
-                // Check for category note (display only) and custom text prompt (expects input)
-                let hasCustomTextPrompt = false;
-                let categoryNoteToShow = '';
-
-                if (menuCategories && menuCategories.length > 0) {
-                  const category = menuCategories.find(c => c.id === addedMenuItem.category_id);
-
-                  // Display-only note (no input expected)
-                  if (category?.category_note) {
-                    categoryNoteToShow = category.category_note;
-                    logger.info(`Category has display note: "${category.category_note}"`);
-                  }
-
-                  // Custom text prompt (expects input)
-                  if (category?.custom_text_prompt) {
-                    hasCustomTextPrompt = true;
-                    logger.info(`Category has custom_text_prompt: "${category.custom_text_prompt}"`);
-                    // Store pending custom text question for next message
-                    pendingCustomTextMap.set(session.id, {
-                      itemId: savedItem.id,
-                      prompt: category.custom_text_prompt,
-                    });
-                    // Also store addons for AFTER custom text is collected
-                    const suggestedAddons = await getAutoSuggestedAddons(addedMenuItem.category_id);
-                    if (suggestedAddons.length > 0) {
-                      pendingAddonSelectionMap.set(session.id, {
-                        itemId: savedItem.id,
-                        addons: suggestedAddons,
-                      });
-                    }
-                    // REPLACE the AI reply - don't ask "Anything else?" when we need custom text
-                    // Build a clean response that only asks for custom text input
-                    const itemDesc = aiResponse.item?.size_or_weight
-                      ? `${addedMenuItem.name} (${aiResponse.item.size_or_weight})`
-                      : addedMenuItem.name;
-                    const notePrefix = categoryNoteToShow ? `_${categoryNoteToShow}_\n\n` : '';
-                    // i18n: Use translated "Added to cart" message, keep custom_text_prompt as-is (business sets it)
-                    replyMessage = `${t('cart.added', lang, { item: itemDesc })}\n\n${notePrefix}${category.custom_text_prompt}`;
-                  } else if (categoryNoteToShow) {
-                    // Only display note (no input expected), continue with addons
-                    replyMessage = aiResponse.reply + `\n\n_${categoryNoteToShow}_`;
-                  }
-                }
-
-                // If no custom text prompt, check for add-ons directly
-                if (!hasCustomTextPrompt) {
-                  const suggestedAddons = await getAutoSuggestedAddons(addedMenuItem.category_id);
-                  if (suggestedAddons.length > 0) {
-                    logger.info(`${suggestedAddons.length} add-ons available for ${addedMenuItem.name}`);
-                    const addonsMessage = formatAddonsForCustomer(suggestedAddons);
-                    replyMessage = aiResponse.reply + '\n\n' + addonsMessage;
-
-                    // Store pending addon selection for next message
-                    pendingAddonSelectionMap.set(session.id, {
-                      itemId: savedItem.id,
-                      addons: suggestedAddons,
-                    });
-                  }
-                }
-              }
-            }
-          } catch (saveError) {
-            logger.error(`❌ Failed to save item to DB: ${aiResponse.item.name}`, saveError);
-            const supportPhone = business?.customer_support_phone;
-            replyMessage = t('error.cartAddFailed', lang, {
-              support: supportPhone ? t('error.contactSupport', lang, { phone: supportPhone }) : '',
-            });
-          }
-        }
+  // Execute handler for the intent
+  let messageSaved = false;
+  if (hasHandler(intentToProcess)) {
+    const result = await executeHandler(intentToProcess, intentContext, aiResponse);
+    if (result) {
+      if (result.reply !== null) {
+        replyMessage = result.reply;
       } else {
-        logger.warn(`⚠️ ADD_ITEM intent but missing item data: ${JSON.stringify(aiResponse)}`);
+        // Handler sent custom message (buttons, list, etc.) - return null
+        return null;
       }
-      break;
-
-    case 'modify_order':
-      // Customer wants to modify their order (change quantity, remove item)
-      if (aiResponse.item && aiResponse.item.name) {
-        if (aiResponse.item.quantity === 0) {
-          // Remove item
-          await removeSessionItem(session.id, aiResponse.item.name, aiResponse.item.size_or_weight);
-          logger.info(`Item removed: ${aiResponse.item.name}`);
-        } else {
-          // Check if item exists in session
-          const itemExists = existingItems.some(item =>
-            item.item_name.toLowerCase().includes(aiResponse.item!.name.toLowerCase()) ||
-            aiResponse.item!.name.toLowerCase().includes(item.item_name.toLowerCase())
-          );
-
-          if (itemExists) {
-            // Update quantity
-            await updateSessionItemQuantity(
-              session.id,
-              aiResponse.item.name,
-              aiResponse.item.quantity,
-              aiResponse.item.size_or_weight
-            );
-            logger.info(`Item updated: ${aiResponse.item.name} x${aiResponse.item.quantity}`);
-          } else {
-            // Add as new item
-            await saveOrderItem(session.id, aiResponse.item, businessId);
-            logger.info(`Item added: ${aiResponse.item.name}`);
-          }
-        }
+      if (result.messageSaved) {
+        messageSaved = true;
       }
-      // Always show updated summary after modification
-      const modifiedSummary = await generateOrderSummary(session.id, {
-        includeCta: true,
-        ctaMessage: t('orderSummary.confirmItems', lang),
-        timezone: businessTimezone
-      });
-      replyMessage = aiResponse.reply + '\n\n' + modifiedSummary;
-      break;
-
-    case 'suggest_addons':
-      // AI is suggesting add-ons (already formatted in AI reply)
-      // Just use the AI's reply as is
-      logger.info('AI suggesting add-ons');
-      break;
-
-    case 'add_addon':
-      // Customer wants to add an add-on
-      if (aiResponse.addon && aiResponse.addon.addon_name) {
-        const lastItemId = lastAddedItemMap.get(session.id);
-
-        if (!lastItemId) {
-          logger.warn('No last item found for add-on attachment');
-          replyMessage = t('addons.noItemForAddon', lang);
-          break;
-        }
-
-        // Find the add-on from available add-ons (could be by name or number)
-        if (menuItems && menuItems.length > 0) {
-          // Get the last added item to find its category
-          const lastItem = existingItems.find(item => item.id === lastItemId);
-          if (lastItem) {
-            const menuItem = menuItems.find(
-              mi => mi.name.toLowerCase() === lastItem.item_name.toLowerCase()
-            );
-
-            if (menuItem && menuItem.category_id) {
-              const availableAddons = await getAutoSuggestedAddons(menuItem.category_id);
-
-              // Try to match addon by customer input (could be number or name)
-              let selectedAddon = findAddonByCustomerInput(messageText, availableAddons);
-
-              // If not found, try by AI-provided name
-              if (!selectedAddon) {
-                selectedAddon = availableAddons.find(
-                  addon => addon.name.toLowerCase() === aiResponse.addon!.addon_name.toLowerCase()
-                ) || null;
-              }
-
-              if (selectedAddon) {
-                await addAddonToSessionItem(lastItemId, selectedAddon.id, aiResponse.addon.quantity || 1);
-                logger.info(`Add-on added: ${selectedAddon.name} to item ${lastItemId}`);
-
-                // Update reply to confirm
-                if (!replyMessage.includes('Added')) {
-                  replyMessage = t('addons.added', lang, { addon: `${selectedAddon.name}${selectedAddon.price ? ` (₹${selectedAddon.price})` : ' (FREE)'}` }) + `! ${replyMessage}`;
-                }
-              } else {
-                logger.warn(`Add-on not found: ${aiResponse.addon.addon_name}`);
-                replyMessage = t('addons.notAvailable', lang);
-              }
-            }
-          }
-        }
-      }
-      break;
-
-    case 'decline_addon':
-      // Customer declined add-ons
-      logger.info('Customer declined add-ons');
-      // Just use AI's reply
-      break;
-
-    case 'remove_addon':
-      // Customer wants to remove an add-on from their order
-      if (aiResponse.addon && aiResponse.addon.addon_name) {
-        const removeResult = await removeAddonFromSession(session.id, aiResponse.addon.addon_name);
-
-        if (removeResult.success) {
-          logger.info(`Add-on removed: ${removeResult.addonName} from ${removeResult.itemName}`);
-          replyMessage = t('addons.removed', lang, { addonName: removeResult.addonName ?? '', itemName: removeResult.itemName ?? '' });
-
-          // Clear pending addon selection if exists
-          pendingAddonSelectionMap.delete(session.id);
-        } else {
-          logger.warn(`Failed to remove addon: ${aiResponse.addon.addon_name}`);
-          replyMessage = t('addons.notFound', lang, { addon: aiResponse.addon.addon_name });
-        }
-      } else {
-        replyMessage = t('addons.whichRemove', lang);
-      }
-      break;
-
-    case 'continue_ordering':
-      // Ask for more items after add-ons handled
-      logger.info('Continuing with ordering');
-      // AI's reply should ask "Anything else?"
-      break;
-
-    case 'save_custom_text':
-      // Save custom text response (e.g., cake message)
-      // Try to extract text from AI response or from user message
-      let customTextToSave = aiResponse.customText;
-
-      // Fallback: Extract from user message if AI didn't provide it
-      if (!customTextToSave) {
-        // Pattern: "change text to X", "update message to X", "write X instead"
-        const changeMatch = messageText.match(/(?:change|update|make it|write)\s*(?:the\s*)?(?:text|message|writing)?\s*(?:to|into|as)?\s*["']?(.+?)["']?\s*$/i);
-        if (changeMatch) {
-          customTextToSave = changeMatch[1].replace(/^["']|["']$/g, '').trim();
-        }
-      }
-
-      if (customTextToSave) {
-        const lastItemId = lastAddedItemMap.get(session.id);
-        if (lastItemId) {
-          await updateSessionItemCustomText(lastItemId, customTextToSave);
-          logger.info(`Custom text saved: "${customTextToSave}" for item ${lastItemId}`);
-          // Clear pending custom text if exists
-          pendingCustomTextMap.delete(session.id);
-        } else {
-          logger.warn('No last item found for custom text');
-        }
-      }
-      break;
-
-    case 'modify_custom_text':
-      // Customer wants to change the cake writing
-      let newCustomText = aiResponse.customText;
-
-      // Fallback: Extract from user message if AI didn't provide it
-      if (!newCustomText) {
-        const modifyMatch = messageText.match(/(?:change|update|make it|write)\s*(?:the\s*)?(?:text|message|writing)?\s*(?:to|into|as)?\s*["']?(.+?)["']?\s*$/i);
-        if (modifyMatch) {
-          newCustomText = modifyMatch[1].replace(/^["']|["']$/g, '').trim();
-        }
-      }
-
-      // Helper function to find the target item for custom text
-      const findTargetItemForCustomText = (): typeof existingItems[0] | null => {
-        // 1. Check if AI provided item name
-        if (aiResponse.item?.name) {
-          const aiItemMatch = existingItems.find(item =>
-            item.item_name.toLowerCase().includes(aiResponse.item!.name.toLowerCase()) ||
-            aiResponse.item!.name.toLowerCase().includes(item.item_name.toLowerCase())
-          );
-          if (aiItemMatch) return aiItemMatch;
-        }
-
-        // 2. Try to extract item name from user message
-        // Patterns: "on Black Forest", "on the Rainbow cake", "for chocolate cake"
-        const itemNameMatch = messageText.match(/(?:on|for|to)\s*(?:the\s*)?["']?([a-zA-Z\s]+?)["']?\s*(?:cake)?$/i) ||
-          messageText.match(/["']?([a-zA-Z\s]+?)["']?\s*(?:cake)?\s*(?:text|message|writing)/i);
-
-        if (itemNameMatch) {
-          const mentionedItem = itemNameMatch[1].trim().toLowerCase();
-          const matchedItem = existingItems.find(item =>
-            item.item_name.toLowerCase().includes(mentionedItem) ||
-            mentionedItem.includes(item.item_name.toLowerCase())
-          );
-          if (matchedItem) return matchedItem;
-        }
-
-        // 3. Check for item names mentioned anywhere in the message
-        for (const item of existingItems) {
-          if (messageText.toLowerCase().includes(item.item_name.toLowerCase())) {
-            return item;
-          }
-        }
-
-        // 4. Fallback: item with existing custom_text or last added item
-        return existingItems.find(item => item.custom_text) || existingItems[existingItems.length - 1] || null;
-      };
-
-      // Filter items that could have custom text (typically cakes)
-      const customizableItems = existingItems.filter(item => {
-        const itemNameLower = item.item_name.toLowerCase();
-        return itemNameLower.includes('cake') || itemNameLower.includes('pastry') ||
-          itemNameLower.includes('cupcake') || item.custom_text;
-      });
-
-      if (newCustomText) {
-        // Find the specific item to update
-        let itemToUpdate = findTargetItemForCustomText();
-
-        if (itemToUpdate) {
-          await updateSessionItemCustomText(itemToUpdate.id, newCustomText);
-          logger.info(`Custom text modified: "${newCustomText}" for item ${itemToUpdate.id} (${itemToUpdate.item_name})`);
-          replyMessage = t('customText.updated', lang, { item: itemToUpdate.item_name, text: newCustomText });
-          // Clear pending custom text only after successfully updating
-          pendingCustomTextMap.delete(session.id);
-        } else {
-          logger.warn('No item found to update custom text');
-          replyMessage = t('customText.updateFailedNoItem', lang);
-        }
-      } else {
-        // No custom text provided - need to SET pending state to wait for user's response
-
-        // Check if multiple customizable items exist and user didn't specify which one
-        if (customizableItems.length > 1) {
-          // Check if user mentioned a specific item
-          let itemToUpdate = findTargetItemForCustomText();
-          const userMentionedSpecificItem = existingItems.some(item =>
-            messageText.toLowerCase().includes(item.item_name.toLowerCase())
-          );
-
-          if (!userMentionedSpecificItem) {
-            // Multiple cakes and user didn't specify - ask which one
-            const cakeList = customizableItems.map((item, i) => `${i + 1}. ${item.item_name}`).join('\n');
-            replyMessage = t('customText.clarifyItem', lang, { items: cakeList });
-            // Don't set pending yet - wait for them to specify which cake
-            break;
-          }
-
-          // User mentioned specific item
-          if (itemToUpdate) {
-            pendingCustomTextMap.set(session.id, {
-              itemId: itemToUpdate.id,
-              prompt: t('customText.askPromptForItem', lang, { item: itemToUpdate.item_name }),
-            });
-            replyMessage = t('customText.askPromptForItem', lang, { item: itemToUpdate.item_name });
-          } else {
-            replyMessage = t('customText.addFailedNoItem', lang);
-          }
-        } else {
-          // Single item or no ambiguity
-          const itemToUpdate = findTargetItemForCustomText();
-          if (itemToUpdate) {
-            pendingCustomTextMap.set(session.id, {
-              itemId: itemToUpdate.id,
-              prompt: t('customText.askPromptForItem', lang, { item: itemToUpdate.item_name }),
-            });
-            replyMessage = t('customText.askPromptForItem', lang, { item: itemToUpdate.item_name });
-          } else {
-            replyMessage = t('customText.updateFailedNoItem', lang);
-          }
-        }
-      }
-      break;
-
-    case 'remove_custom_text':
-      // Customer wants to remove the cake writing entirely
-      const itemWithText = existingItems.find(item => item.custom_text);
-      if (itemWithText) {
-        await updateSessionItemCustomText(itemWithText.id, ''); // Clear the custom text
-        logger.info(`Custom text removed for item ${itemWithText.id}`);
-        replyMessage = t('customText.removed', lang, { item: itemWithText.item_name });
-      } else {
-        logger.warn('No item found with custom text to remove');
-        replyMessage = t('customText.removeFailedNoText', lang);
-      }
-      // Clear pending custom text if exists
-      pendingCustomTextMap.delete(session.id);
-      break;
-
-    case 'requires_intervention':
-      // Generic intervention triggers (urgent delivery, out or radius, etc.)
-      logger.info(`🚨 Intervention triggered: ${aiResponse.analysis?.reason || 'Unknown reason'}`);
-
-      // Create intervention request
-      const intervention = await createIntervention(
-        businessId,
-        session.id,
-        customer.id,
-        'other', // Could be refined based on analysis
-        {
-          message: messageText,
-          reason: aiResponse.analysis?.reason
-        },
-        aiResponse.analysis
-      );
-
-      if (intervention) {
-        // Pause AI to let admin handle it
-        await pauseAI(session.id, 'System Intervention');
-
-        // Notify admins via socket
-        emitInterventionCreated(businessId, intervention);
-
-        // Notify generic admin via notification service (push/email if configured)
-        await notifyBusinessAdmin(businessId, {
-          type: 'intervention_required',
-          customerId: customer.id,
-          phone,
-          message: `Admin intervention needed: ${aiResponse.analysis?.reason || messageText}`,
-        });
-
-        // Reply to customer
-        replyMessage = t('intervention.adminWillContact', lang); // Need to add this translation key or use hardcoded
-        if (!replyMessage || replyMessage.includes('intervention.')) {
-          replyMessage = "An admin will review your request and contact you shortly.";
-        }
-      } else {
-        replyMessage = t('error.generic', lang);
-      }
-      break;
-
-    case 'custom_cake_inquiry':
-      // Customer asking about custom/personalized cake design
-      if (business && (business as any).custom_cake_enabled) {
-        logger.info('Custom cake inquiry - triggering intervention');
-
-        // Extract weight/flavor if present in message
-        const extractedWeight = messageText.match(/(\d+(?:\.\d+)?\s*(?:kg|g|lb|pound)s?)/i)?.[1];
-        const extractedFlavor = messageText.match(/(chocolate|vanilla|strawberry|red velvet|butterscotch|black forest|truffle)/i)?.[0];
-
-        // DON'T create intervention yet - wait for image
-        // DON'T pause AI - keep conversation flowing
-
-        // Set context flag
-        await updateSessionCustomCakeContext(session.id, {
-          awaiting_image: true,
-          inquiry_type: 'text_first',
-          weight: extractedWeight,
-          flavor: extractedFlavor,
-        });
-
-        // Get available flavors to show
-        const availableFlavorsText = await formatAvailableFlavors(business.id, lang);
-
-        // Ask for image with flavor list
-        replyMessage = t('customCake.askForImage', lang, { flavors: availableFlavorsText });
-        if (!replyMessage || replyMessage.includes('customCake.')) {
-          replyMessage = `Yes! We do custom cakes! 🎂\n\nPlease share a photo of the design you'd like.\n\nAlso let us know:\n• Weight (e.g., 1kg, 2kg)\n• Flavor${availableFlavorsText}`;
-        }
-
-      } else {
-        // Custom cakes not enabled
-        const supportPhone = business?.customer_support_phone;
-        replyMessage = supportPhone
-          ? t('customCake.contactSupport', lang, { phone: supportPhone })
-          : "Sorry, we don't do custom cakes at the moment.";
-      }
-      break;
-
-    case 'show_menu':
-      if (business?.id) {
-        const menuSlug = (aiResponse as any).menu_slug;
-
-        if (menuSlug) {
-          // Specific menu requested
-          const specificConfig = await getMenuPdfConfigBySlug(business.id, menuSlug);
-          if (specificConfig?.pdf_url) {
-            await sendDoc(phone, specificConfig.pdf_url, `${specificConfig.name}.pdf`, specificConfig.name);
-            await saveOutgoingMessage(session.id, `[Sent ${specificConfig.name} PDF]`);
-            return null; // Don't send another message
-          }
-        }
-
-        // Get all active menu PDF configs
-        const menuConfigs = await getActiveMenuPdfConfigs(business.id);
-
-        if (menuConfigs.length > 0) {
-          // Send all menu PDFs
-          for (const config of menuConfigs) {
-            if (config.pdf_url) {
-              await sendDoc(
-                phone,
-                config.pdf_url,
-                `${config.name}.pdf`,
-                config.name // Caption = menu name
-              );
-            }
-          }
-          await saveOutgoingMessage(session.id, `[Sent ${menuConfigs.length} menu PDF(s)]`);
-          return null;
-        } else {
-          // Fallback to full menu PDF if no configs
-          const pdfExists = await menuPdfExists(business.id);
-          if (pdfExists) {
-            const pdfUrl = getMenuPdfUrl(business.id);
-            const menuCaption = t('menu.pdfCaption', lang);
-            await sendDoc(phone, pdfUrl, `${business.name || 'Menu'}.pdf`, menuCaption);
-            await saveOutgoingMessage(session.id, `[Menu PDF sent] ${menuCaption}`);
-            return null;
-          }
-        }
-      }
-      // Fallback: Send interactive category list for large menus, text for small menus
-      if (menuItems && menuCategories && menuItems.length > 0) {
-        if (menuItems.length > 30 && menuCategories.length > 5) {
-          // Large menu: Use interactive list with smart groupings
-          const categorySections = buildCategoryListSections(menuCategories);
-          if (categorySections.length > 0) {
-            const menuIntro = t('menu.welcome', lang, { businessName: business?.name || t('menu.ourMenu', lang) });
-            await saveOutgoingMessage(session.id, menuIntro);
-            await sendInteractiveListMessage(
-              phone,
-              t('menu.ourMenu', lang),
-              menuIntro,
-              t('menu.browseBtn', lang),
-              categorySections
-            );
-            return null; // Don't send another message
-          }
-        }
-        // Small menu or fallback: use text format
-        replyMessage = formatMenuForCustomer(menuItems, menuCategories);
-      } else {
-        replyMessage = t('menu.fallback', lang);
-      }
-      break;
-
-    case 'ready_for_checkout':
-      // Generate and send order summary - but validate cart first
-      const checkoutSession = await getSessionWithItems(session.id);
-      if (!checkoutSession || checkoutSession.items.length === 0) {
-        logger.warn(`⚠️ READY_FOR_CHECKOUT but cart is EMPTY! Session: ${session.id}`);
-        replyMessage = t('cart.empty', lang);
-        break;
-      }
-      // Check if fulfillment info is already complete (user added more items after providing address)
-      const hasFulfillmentInfo = session.fulfillment_type && (
-        (session.fulfillment_type === 'delivery' && session.delivery_address) ||
-        (session.fulfillment_type === 'takeaway' && session.pickup_outlet_id)
-      );
-
-      if (hasFulfillmentInfo) {
-        // Fulfillment already collected - show final summary and ask for confirmation
-        const finalSummary = await generateOrderSummary(session.id, { includeCta: true, timezone: businessTimezone });
-        replyMessage = finalSummary + '\n\n' + t('order.confirmPrompt', lang);
-        break;
-      }
-
-      // Show summary and ask for delivery/takeaway directly (no separate item confirmation)
-      const summary = await generateOrderSummary(session.id, { includeCta: false, timezone: businessTimezone });
-      if (business?.supports_delivery && business?.supports_takeaway) {
-        // Use interactive buttons for delivery/takeaway choice
-        const askFulfillment = summary + '\n\n' + t('fulfillment.askType', lang);
-        await saveOutgoingMessage(session.id, askFulfillment);
-        await sendButtons(phone, askFulfillment, [
-          { id: 'delivery', title: t('fulfillment.deliveryBtn', lang) },
-          { id: 'takeaway', title: t('fulfillment.takeawayBtn', lang) },
-        ]);
-        return null; // Don't send another message
-      } else if (business?.supports_delivery) {
-        replyMessage = summary + '\n\n' + t('fulfillment.deliveryPrompt', lang);
-      } else {
-        // Takeaway only - Use interactive list for outlet selection
-        if (outlets.length > 0) {
-          await updateSessionFulfillmentType(session.id, 'takeaway');
-          const pickupPrompt = summary + '\n\n' + t('fulfillment.pickupPrompt', lang);
-          await saveOutgoingMessage(session.id, pickupPrompt);
-          await sendList(
-            phone,
-            t('buttons.pickupLocations', lang),
-            pickupPrompt,
-            t('buttons.chooseLocation', lang),
-            [{
-              title: t('buttons.availableOutlets', lang),
-              rows: outlets.map(o => ({
-                id: o.id,
-                title: o.outlet_name,
-                description: o.address?.substring(0, 72),
-              })),
-            }]
-          );
-          return null; // Don't send another message
-        } else {
-          replyMessage = summary + '\n\n' + t('fulfillment.askPickupTimeGeneric', lang);
-        }
-      }
-      break;
-
-    case 'confirm_items':
-      // Legacy support - treat same as ready_for_checkout
-      const itemsSession = await getSessionWithItems(session.id);
-      if (!itemsSession || itemsSession.items.length === 0) {
-        logger.warn(`⚠️ CONFIRM_ITEMS but cart is EMPTY! Session: ${session.id}`);
-        replyMessage = t('cart.empty', lang);
-        break;
-      }
-      // Ask for delivery or takeaway
-      if (business?.supports_delivery && business?.supports_takeaway) {
-        replyMessage = t('fulfillment.askTypeDirect', lang);
-      } else if (business?.supports_delivery) {
-        replyMessage = t('fulfillment.askAddress', lang);
-      } else {
-        replyMessage = t('fulfillment.pickupPrompt', lang);
-        if (outlets.length > 0) {
-          replyMessage += '\n\n' + formatOutletsForCustomer(outlets);
-        }
-      }
-      break;
-
-    case 'ask_fulfillment_type':
-      // Ask customer for delivery or takeaway
-      if (business?.supports_delivery && business?.supports_takeaway) {
-        replyMessage = aiResponse.reply || t('fulfillment.askType', lang);
-      } else if (business?.supports_delivery) {
-        replyMessage = t('fulfillment.offerDelivery', lang);
-      } else {
-        replyMessage = t('fulfillment.pickupPrompt', lang);
-      }
-      break;
-
-    case 'collect_delivery_info':
-      // Collect delivery address and time
-      if (aiResponse.fulfillment) {
-        // Set fulfillment type if not already set
-        if (aiResponse.fulfillment.fulfillment_type && !session.fulfillment_type) {
-          await updateSessionFulfillmentType(session.id, 'delivery');
-          logger.info('Fulfillment type set to: delivery');
-        }
-
-        // Save delivery address if provided
-        if (aiResponse.fulfillment.delivery_address) {
-          const addressFromAI = aiResponse.fulfillment.delivery_address;
-
-          // Skip if AI extracted coordinate format (not a real address)
-          // Patterns: "Lat: X, Long: Y", "Provided Location (Lat: X", "Location: X, Y", etc.
-          const isCoordinateFormat = /^(Lat|Location|Latitude|Provided Location)[\s:(]*-?\d+\.?\d*/i.test(addressFromAI) ||
-            /\(Lat[\s:]*-?\d+\.?\d*.*Long[\s:]*-?\d+\.?\d*\)/i.test(addressFromAI) ||
-            /Lat[\s:]*-?\d+\.?\d*.*Long[\s:]*-?\d+\.?\d*/i.test(addressFromAI);
-
-          // Skip if session already has lat/long (location was shared via WhatsApp)
-          const sessionData = await getSessionWithItems(session.id);
-          const hasLocationAlready = sessionData?.delivery_latitude && sessionData?.delivery_longitude;
-
-          if (isCoordinateFormat) {
-            logger.info(`Skipping coordinate format address from AI: ${addressFromAI}`);
-            // Still try to save time if provided
-            let deliveryTime = aiResponse.fulfillment.delivery_time
-              ? parseDeliveryTime(aiResponse.fulfillment.delivery_time, businessTimezone)
-              : null;
-            if (deliveryTime) {
-              await updateSessionDeliveryInfo(session.id, { time: deliveryTime });
-              logger.info(`Delivery time saved (skipped coord address): ${deliveryTime}`);
-            }
-          } else if (hasLocationAlready) {
-            // Has lat/long from WhatsApp location - preserve it, only update time
-            logger.info(`Session already has location coordinates - preserving existing data`);
-            let deliveryTime = aiResponse.fulfillment.delivery_time
-              ? parseDeliveryTime(aiResponse.fulfillment.delivery_time, businessTimezone)
-              : null;
-
-            if (!deliveryTime) {
-              const extracted = extractAddressAndTime(messageText, businessTimezone);
-              if (extracted.time) {
-                deliveryTime = extracted.time;
-              }
-            }
-
-            if (deliveryTime && !sessionData?.delivery_time) {
-              // ============================================
-              // URGENT DELIVERY CHECK (collect_delivery_info with location)
-              // ============================================
-              const minimumWaitMinutes = (business as any)?.minimum_wait_minutes;
-              if (minimumWaitMinutes && minimumWaitMinutes > 0) {
-                const requestedDate = new Date(deliveryTime);
-                const now = new Date();
-                const diffMinutes = (requestedDate.getTime() - now.getTime()) / (1000 * 60);
-
-                if (diffMinutes > 0 && diffMinutes < minimumWaitMinutes) {
-                  logger.info(`🚨 Urgent delivery detected (collect_delivery_info): ${deliveryTime} is ${Math.round(diffMinutes)} min away (min wait: ${minimumWaitMinutes})`);
-
-                  // Save time first
-                  await updateSessionDeliveryInfo(session.id, { time: deliveryTime });
-
-                  // Create urgent_delivery intervention
-                  const urgentIntervention = await createIntervention(
-                    businessId,
-                    session.id,
-                    customer.id,
-                    'urgent_delivery',
-                    {
-                      requestedTime: deliveryTime,
-                      fulfillmentType: 'delivery',
-                      minimumWaitMinutes,
-                      minutesUntilRequested: Math.round(diffMinutes),
-                      deliveryAddress: sessionData?.delivery_address,
-                      phone,
-                    }
-                  );
-
-                  if (urgentIntervention) {
-                    await pauseAI(session.id, 'Urgent order - awaiting admin confirmation');
-                    emitInterventionCreated(businessId, urgentIntervention);
-
-                    const formattedTime = new Date(deliveryTime).toLocaleString('en-IN', {
-                      timeZone: businessTimezone,
-                      dateStyle: 'medium',
-                      timeStyle: 'short',
-                    });
-                    const typeLabel = t('fulfillment.deliveryBtn', lang);
-                    replyMessage = t('urgentOrder.waitingConfirmation', lang, { type: typeLabel, time: formattedTime });
-                    break; // Exit the switch case
-                  }
-                }
-              }
-
-              await updateSessionDeliveryInfo(session.id, { time: deliveryTime });
-              logger.info(`Delivery time saved (preserving location): ${deliveryTime}`);
-
-              // Show final invoice
-              const deliverySummary = await generateOrderSummary(session.id, {
-                includeCta: true,
-                ctaMessage: t('orderSummary.reviewPromptAdd', lang),
-                timezone: businessTimezone
-              });
-              replyMessage = deliverySummary;
-            } else if (!sessionData?.delivery_time) {
-              // Need to ask for time
-              replyMessage = t('fulfillment.locationSavedThenAskTime', lang);
-            }
-          } else {
-            // No existing location - save the AI-extracted address
-            let deliveryTime = aiResponse.fulfillment.delivery_time
-              ? parseDeliveryTime(aiResponse.fulfillment.delivery_time, businessTimezone)
-              : null;
-
-            // Fallback: Try to extract time from the original message if AI didn't get it
-            if (!deliveryTime) {
-              const extracted = extractAddressAndTime(messageText, businessTimezone);
-              if (extracted.time) {
-                deliveryTime = extracted.time;
-              }
-            }
-
-            await updateSessionDeliveryInfo(session.id, {
-              address: addressFromAI,
-              time: deliveryTime || undefined,
-              notes: aiResponse.fulfillment.fulfillment_notes,
-            });
-            logger.info(`Delivery info saved: ${addressFromAI}, time: ${deliveryTime || 'not provided'}`);
-
-            // Check if time was provided - if not, ask for it
-            if (!deliveryTime) {
-              replyMessage = t('fulfillment.gotAddress', lang, { address: addressFromAI });
-            } else {
-              // ============================================
-              // URGENT DELIVERY CHECK (collect_delivery_info with AI address)
-              // ============================================
-              const minimumWaitMinutesAddr = (business as any)?.minimum_wait_minutes;
-              if (minimumWaitMinutesAddr && minimumWaitMinutesAddr > 0) {
-                const requestedDateAddr = new Date(deliveryTime);
-                const nowAddr = new Date();
-                const diffMinutesAddr = (requestedDateAddr.getTime() - nowAddr.getTime()) / (1000 * 60);
-
-                if (diffMinutesAddr > 0 && diffMinutesAddr < minimumWaitMinutesAddr) {
-                  logger.info(`🚨 Urgent delivery detected (collect_delivery_info w/address): ${deliveryTime} is ${Math.round(diffMinutesAddr)} min away (min wait: ${minimumWaitMinutesAddr})`);
-
-                  // Create urgent_delivery intervention
-                  const urgentInterventionAddr = await createIntervention(
-                    businessId,
-                    session.id,
-                    customer.id,
-                    'urgent_delivery',
-                    {
-                      requestedTime: deliveryTime,
-                      fulfillmentType: 'delivery',
-                      minimumWaitMinutes: minimumWaitMinutesAddr,
-                      minutesUntilRequested: Math.round(diffMinutesAddr),
-                      deliveryAddress: addressFromAI,
-                      phone,
-                    }
-                  );
-
-                  if (urgentInterventionAddr) {
-                    await pauseAI(session.id, 'Urgent order - awaiting admin confirmation');
-                    emitInterventionCreated(businessId, urgentInterventionAddr);
-
-                    const formattedTimeAddr = new Date(deliveryTime).toLocaleString('en-IN', {
-                      timeZone: businessTimezone,
-                      dateStyle: 'medium',
-                      timeStyle: 'short',
-                    });
-                    const typeLabelAddr = t('fulfillment.deliveryBtn', lang);
-                    replyMessage = t('urgentOrder.waitingConfirmation', lang, { type: typeLabelAddr, time: formattedTimeAddr });
-                    break; // Exit the switch case
-                  }
-                }
-              }
-
-              // Show final invoice with delivery details and ask for confirmation
-              const deliverySummary = await generateOrderSummary(session.id, {
-                includeCta: true,
-                ctaMessage: t('orderSummary.reviewPromptAdd', lang),
-                timezone: businessTimezone
-              });
-              replyMessage = deliverySummary;
-            }
-          }
-        }
-      }
-      break;
-
-    case 'collect_pickup_info':
-      // Collect pickup outlet and time
-      if (aiResponse.fulfillment) {
-        // Set fulfillment type if not already set
-        if (aiResponse.fulfillment.fulfillment_type && !session.fulfillment_type) {
-          await updateSessionFulfillmentType(session.id, 'takeaway');
-          logger.info('Fulfillment type set to: takeaway');
-        }
-
-        // If customer selected outlet (by number or name)
-        if (aiResponse.fulfillment.pickup_outlet_id || messageText.match(/^\d+$/)) {
-          let selectedOutlet = null;
-
-          // Try to find outlet from customer input
-          if (messageText.match(/^\d+$/)) {
-            selectedOutlet = findOutletByCustomerInput(messageText, outlets);
-          }
-
-          // Or use AI-extracted outlet ID
-          if (!selectedOutlet && aiResponse.fulfillment.pickup_outlet_id) {
-            selectedOutlet = outlets.find(o => o.id === aiResponse?.fulfillment?.pickup_outlet_id);
-          }
-
-          if (selectedOutlet) {
-            const pickupTime = aiResponse.fulfillment.pickup_time
-              ? parseDeliveryTime(aiResponse.fulfillment.pickup_time, businessTimezone)
-              : null;
-
-            // Validate pickup time against outlet operating hours
-            if (pickupTime) {
-              const validation = validateOperatingHours(pickupTime, selectedOutlet, businessTimezone);
-              if (!validation.valid) {
-                const reason = t(`time.${validation.reasonKey}` as any, lang, validation.reasonValues);
-                logger.warn(`Pickup time ${pickupTime} rejected: ${reason}`);
-                replyMessage = t('time.outsideHours', lang, { reason });
-                break;
-              }
-            }
-
-            await updateSessionPickupInfo(session.id, {
-              outlet_id: selectedOutlet.id,
-              time: pickupTime || undefined,
-              notes: aiResponse.fulfillment.fulfillment_notes,
-            });
-            logger.info(`Pickup outlet selected: ${selectedOutlet.outlet_name}`);
-
-            // If time was NOT provided, ask for it
-            if (!pickupTime) {
-              replyMessage = t('fulfillment.askPickupTime', lang, { outlet: selectedOutlet.outlet_name });
-            } else {
-              // Show final invoice with pickup details and ask for confirmation
-              const pickupSummary = await generateOrderSummary(session.id, {
-                includeCta: true,
-                ctaMessage: `\n${t('fulfillment.pickupFrom', lang)}: ${selectedOutlet.outlet_name}\n${t('orderSummary.time', lang)}: ${pickupTime}\n\n${t('orderSummary.reviewPromptAdd', lang)}`,
-                timezone: businessTimezone
-              });
-              replyMessage = pickupSummary;
-            }
-          } else {
-            // Show outlets list if not found
-            const outletsList = formatOutletsForCustomer(outlets);
-            replyMessage = aiResponse.reply + '\n\n' + outletsList;
-          }
-        } else if (latestSessionData.pickup_outlet_id && !latestSessionData.pickup_time) {
-          // Outlet already selected, user is providing time
-          const pickupTime = aiResponse.fulfillment.pickup_time
-            ? parseDeliveryTime(aiResponse.fulfillment.pickup_time, businessTimezone)
-            : parseDeliveryTime(messageText, businessTimezone); // Try to parse time from message directly
-
-          if (pickupTime) {
-            // Validate against outlet operating hours
-            const selectedOutlet = outlets.find(o => o.id === latestSessionData.pickup_outlet_id);
-            if (selectedOutlet) {
-              const validation = validateOperatingHours(pickupTime, selectedOutlet, businessTimezone);
-              if (!validation.valid) {
-                const reason = t(`time.${validation.reasonKey}` as any, lang, validation.reasonValues);
-                logger.warn(`Pickup time ${pickupTime} rejected: ${reason}`);
-                replyMessage = t('time.outsideHours', lang, { reason });
-                break;
-              }
-            }
-
-            await updateSessionPickupInfo(session.id, {
-              outlet_id: latestSessionData.pickup_outlet_id,
-              time: pickupTime,
-            });
-            logger.info(`Pickup time saved: ${pickupTime}`);
-
-            // Find outlet for display (already found above for validation)
-            const outletName = selectedOutlet?.outlet_name || 'selected outlet';
-
-            // Show final invoice with pickup details and ask for confirmation
-            const pickupSummary = await generateOrderSummary(session.id, {
-              includeCta: true,
-              ctaMessage: `\n${t('fulfillment.pickupFrom', lang)}: ${outletName}\n${t('orderSummary.time', lang)}: ${pickupTime}\n\n${t('orderSummary.reviewPromptAdd', lang)}`,
-              timezone: businessTimezone
-            });
-            replyMessage = pickupSummary;
-          } else {
-            replyMessage = t('time.invalidFormat', lang);
-          }
-        } else if (!session.pickup_outlet_id && outlets.length > 0) {
-          // Use interactive list for outlet selection
-          await saveOutgoingMessage(session.id, aiResponse.reply);
-          await sendInteractiveListMessage(
-            phone,
-            t('buttons.pickupLocations', lang),
-            aiResponse.reply,
-            t('buttons.chooseLocation', lang),
-            [{
-              title: t('buttons.availableOutlets', lang),
-              rows: outlets.map(o => ({
-                id: o.id,
-                title: o.outlet_name,
-                description: o.address?.substring(0, 72),
-              })),
-            }]
-          );
-          return null; // Don't send another message
-        }
-      }
-      break;
-
-    case 'confirm_order':
-      // Check if session has delivery location (address OR lat/long)
-      const hasDeliveryLocation = latestSessionData.delivery_address ||
-        (latestSessionData.delivery_latitude && latestSessionData.delivery_longitude);
-
-      // Track if fulfillment was just collected in THIS message (not a real confirmation)
-      // True if: address/outlet was just provided, OR time was just provided (not a "yes" to confirm)
-      // IMPORTANT: Treat lat/long as equivalent to address for location check
-      const fulfillmentJustCollected = aiResponse.fulfillment && (
-        (aiResponse.fulfillment.delivery_address && !hasDeliveryLocation) ||
-        (aiResponse.fulfillment.pickup_outlet_id && !latestSessionData.pickup_outlet_id) ||
-        (aiResponse.fulfillment.delivery_time && !latestSessionData.delivery_time) ||
-        (aiResponse.fulfillment.pickup_time && !latestSessionData.pickup_time)
-      );
-
-      // Check if fulfillment is ALREADY COMPLETE - don't overwrite with AI's re-sent data
-      // This prevents AI hallucinations (e.g., "10PM" becoming "11:00 AM") from breaking orders
-      // IMPORTANT: Treat lat/long as equivalent to address for delivery complete check
-      const fulfillmentAlreadyComplete = latestSessionData.fulfillment_type && (
-        (latestSessionData.fulfillment_type === 'delivery' && hasDeliveryLocation && latestSessionData.delivery_time) ||
-        (latestSessionData.fulfillment_type === 'takeaway' && latestSessionData.pickup_outlet_id && latestSessionData.pickup_time)
-      );
-
-      // FIRST: If AI provided fulfillment data with confirm_order, SAVE IT NOW
-      // BUT skip if fulfillment is already complete (user is just confirming with "Yes")
-      if (fulfillmentAlreadyComplete && aiResponse.fulfillment) {
-        logger.info(`✅ Fulfillment already complete - skipping AI re-sent data to prevent overwrite`);
-      }
-      if (aiResponse.fulfillment && !fulfillmentAlreadyComplete) {
-        logger.info(`📍 Saving fulfillment data from confirm_order: ${JSON.stringify(aiResponse.fulfillment)}`);
-
-        // Save fulfillment type
-        if (aiResponse.fulfillment.fulfillment_type) {
-          await updateSessionFulfillmentType(session.id, aiResponse.fulfillment.fulfillment_type);
-        }
-
-        // Save delivery info
-        if (aiResponse.fulfillment.fulfillment_type === 'delivery' && aiResponse.fulfillment.delivery_address) {
-          const addressFromAI = aiResponse.fulfillment.delivery_address;
-
-          // Skip if AI extracted coordinate format (not a real address)
-          const isCoordinateFormat = /^(Lat|Location|Latitude|Provided Location)[\s:(]*-?\d+\.?\d*/i.test(addressFromAI) ||
-            /\(Lat[\s:]*-?\d+\.?\d*.*Long[\s:]*-?\d+\.?\d*\)/i.test(addressFromAI) ||
-            /Lat[\s:]*-?\d+\.?\d*.*Long[\s:]*-?\d+\.?\d*/i.test(addressFromAI);
-
-          // Check if session already has lat/long (location was shared via WhatsApp)
-          const hasLocationAlready = latestSessionData.delivery_latitude && latestSessionData.delivery_longitude;
-
-          let deliveryTime = aiResponse.fulfillment.delivery_time
-            ? parseDeliveryTime(aiResponse.fulfillment.delivery_time, businessTimezone)
-            : null;
-
-          // Fallback: Try to extract time from original message
-          if (!deliveryTime) {
-            const extracted = extractAddressAndTime(messageText, businessTimezone);
-            if (extracted.time) {
-              deliveryTime = extracted.time;
-              logger.info(`Extracted time from message (confirm_order): ${extracted.time}`);
-            }
-          }
-
-          // Validate delivery time against operating hours
-          if (deliveryTime && outlets.length > 0) {
-            const primaryOutlet = outlets[0];
-            const validation = validateOperatingHours(deliveryTime, primaryOutlet, businessTimezone);
-            if (!validation.valid) {
-              const reason = t(`time.${validation.reasonKey}` as any, lang, validation.reasonValues);
-              logger.warn(`Delivery time ${deliveryTime} rejected in confirm_order: ${reason}`);
-              replyMessage = t('time.outsideHours', lang, { reason });
-              break;
-            }
-          }
-
-          if (isCoordinateFormat || hasLocationAlready) {
-            // Skip saving AI address - preserve existing lat/long, only save time if provided
-            logger.info(`Skipping AI address in confirm_order (coord format: ${isCoordinateFormat}, has location: ${hasLocationAlready})`);
-            if (deliveryTime) {
-              await updateSessionDeliveryInfo(session.id, { time: deliveryTime });
-            }
-          } else {
-            await updateSessionDeliveryInfo(session.id, {
-              address: addressFromAI,
-              time: deliveryTime || undefined,
-            });
-          }
-
-          // ============================================
-          // URGENT DELIVERY CHECK (confirm_order intent)
-          // ============================================
-          if (deliveryTime) {
-            const minimumWaitMinutesConfirm = (business as any)?.minimum_wait_minutes;
-            if (minimumWaitMinutesConfirm && minimumWaitMinutesConfirm > 0) {
-              const requestedDateConfirm = new Date(deliveryTime);
-              const nowConfirm = new Date();
-              const diffMinutesConfirm = (requestedDateConfirm.getTime() - nowConfirm.getTime()) / (1000 * 60);
-
-              if (diffMinutesConfirm > 0 && diffMinutesConfirm < minimumWaitMinutesConfirm) {
-                logger.info(`🚨 Urgent delivery detected (confirm_order): ${deliveryTime} is ${Math.round(diffMinutesConfirm)} min away (min wait: ${minimumWaitMinutesConfirm})`);
-
-                // Get latest session data for address
-                const sessionForUrgent = await getSessionWithItems(session.id);
-                const urgentAddress = sessionForUrgent?.delivery_address || addressFromAI || 'Location shared';
-
-                // Create urgent_delivery intervention
-                const urgentInterventionConfirm = await createIntervention(
-                  businessId,
-                  session.id,
-                  customer.id,
-                  'urgent_delivery',
-                  {
-                    requestedTime: deliveryTime,
-                    fulfillmentType: 'delivery',
-                    minimumWaitMinutes: minimumWaitMinutesConfirm,
-                    minutesUntilRequested: Math.round(diffMinutesConfirm),
-                    deliveryAddress: urgentAddress,
-                    phone,
-                  }
-                );
-
-                if (urgentInterventionConfirm) {
-                  await pauseAI(session.id, 'Urgent order - awaiting admin confirmation');
-                  emitInterventionCreated(businessId, urgentInterventionConfirm);
-
-                  const formattedTimeConfirm = new Date(deliveryTime).toLocaleString('en-IN', {
-                    timeZone: businessTimezone,
-                    dateStyle: 'medium',
-                    timeStyle: 'short',
-                  });
-                  const typeLabelConfirm = t('fulfillment.deliveryBtn', lang);
-                  replyMessage = t('urgentOrder.waitingConfirmation', lang, { type: typeLabelConfirm, time: formattedTimeConfirm });
-                  break; // Exit the switch case - don't proceed to invoice/order creation
-                }
-              }
-            }
-          }
-        }
-
-        // Save pickup info
-        if (aiResponse.fulfillment.fulfillment_type === 'takeaway' && aiResponse.fulfillment.pickup_outlet_id) {
-          // AI might return outlet name instead of UUID - need to look it up
-          let outletId = aiResponse.fulfillment.pickup_outlet_id;
-
-          // Check if it's not a valid UUID (AI returned name instead)
-          const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(outletId);
-          if (!isUUID) {
-            // Try to find outlet by name or number
-            const foundOutlet = findOutletByCustomerInput(outletId, outlets);
-            if (foundOutlet) {
-              outletId = foundOutlet.id;
-              logger.info(`Resolved outlet name "${aiResponse.fulfillment.pickup_outlet_id}" to ID: ${outletId}`);
-            } else {
-              logger.warn(`Could not find outlet: ${aiResponse.fulfillment.pickup_outlet_id}`);
-              // Don't save invalid outlet - will prompt user to select
-              outletId = '';
-            }
-          }
-
-          if (outletId) {
-            const pickupTime = aiResponse.fulfillment.pickup_time
-              ? parseDeliveryTime(aiResponse.fulfillment.pickup_time, businessTimezone)
-              : null;
-
-            // Validate pickup time against outlet operating hours
-            if (pickupTime) {
-              const selectedOutlet = outlets.find(o => o.id === outletId);
-              if (selectedOutlet) {
-                const validation = validateOperatingHours(pickupTime, selectedOutlet, businessTimezone);
-                if (!validation.valid) {
-                  const reason = t(`time.${validation.reasonKey}` as any, lang, validation.reasonValues);
-                  logger.warn(`Pickup time ${pickupTime} rejected in confirm_order: ${reason}`);
-                  replyMessage = t('time.outsideHours', lang, { reason });
-                  break;
-                }
-              }
-            }
-
-            await updateSessionPickupInfo(session.id, {
-              outlet_id: outletId,
-              time: pickupTime || undefined,
-            });
-          }
-        }
-
-        // If fulfillment was just collected, show invoice for confirmation instead of creating order
-        if (fulfillmentJustCollected) {
-          logger.info(`📋 Fulfillment just collected - showing invoice for confirmation`);
-          const confirmationSummary = await generateOrderSummary(session.id, {
-            includeCta: true,
-            ctaMessage: t('orderSummary.reviewPromptAdd', lang),
-            timezone: businessTimezone
-          });
-          replyMessage = confirmationSummary;
-          break;
-        }
-      }
-
-      // NOW fetch LATEST session data (after saving fulfillment)
-      const latestSession = await getSessionWithItems(session.id);
-
-      // VALIDATION: Check if cart has items before confirming
-      if (!latestSession || latestSession.items.length === 0) {
-        logger.warn(`⚠️ CONFIRM_ORDER attempted but cart is EMPTY! Session: ${session.id}`);
-        replyMessage = t('order.emptyCart', lang);
-        break;
-      }
-
-      // VALIDATION: Check if fulfillment info is collected (use LATEST session data)
-      if (!latestSession.fulfillment_type) {
-        logger.warn(`⚠️ CONFIRM_ORDER attempted but no fulfillment type! Session: ${session.id}`);
-        // Show summary and ask for fulfillment
-        const orderSummary = await generateOrderSummary(session.id, { includeCta: false, timezone: businessTimezone });
-        if (business?.supports_delivery && business?.supports_takeaway) {
-          replyMessage = orderSummary + '\n\n' + t('fulfillment.askTypeDirect', lang);
-        } else if (business?.supports_delivery) {
-          replyMessage = orderSummary + '\n\n' + t('fulfillment.askAddress', lang);
-        } else {
-          replyMessage = orderSummary + '\n\n' + t('fulfillment.pickupPrompt', lang);
-          if (outlets.length > 0) {
-            replyMessage += '\n\n' + formatOutletsForCustomer(outlets);
-          }
-        }
-        break;
-      }
-
-      // For delivery, check if address OR location is provided
-      const hasDeliveryLocationForValidation = latestSession.delivery_address ||
-        (latestSession.delivery_latitude && latestSession.delivery_longitude);
-      if (latestSession.fulfillment_type === 'delivery' && !hasDeliveryLocationForValidation) {
-        logger.warn(`⚠️ CONFIRM_ORDER attempted but no delivery address/location! Session: ${session.id}`);
-        replyMessage = t('fulfillment.noAddress', lang);
-        break;
-      }
-
-      // For takeaway, check if outlet is selected
-      if (latestSession.fulfillment_type === 'takeaway' && !latestSession.pickup_outlet_id && outlets.length > 0) {
-        logger.warn(`⚠️ CONFIRM_ORDER attempted but no pickup outlet! Session: ${session.id}`);
-        replyMessage = t('fulfillment.noOutlet', lang, { outlets: formatOutletsForCustomer(outlets) });
-        break;
-      }
-
-      // MANDATORY: Check if date/time is provided - orders cannot be confirmed without timing
-      const hasDeliveryTime = latestSession.fulfillment_type === 'delivery' && latestSession.delivery_time;
-      const hasPickupTime = latestSession.fulfillment_type === 'takeaway' && latestSession.pickup_time;
-
-      if (!hasDeliveryTime && !hasPickupTime) {
-        logger.warn(`⚠️ CONFIRM_ORDER attempted but no date/time provided! Session: ${session.id}`);
-        const timeExamples = t('time.examples', lang);
-        if (latestSession.fulfillment_type === 'delivery') {
-          replyMessage = t('time.needTime', lang, { type: t('time.deliveryTime', lang), examples: timeExamples });
-        } else {
-          replyMessage = t('time.needTime', lang, { type: t('time.pickupTime', lang), examples: timeExamples });
-        }
-        break;
-      }
-
-      // ============================================ 
-      // CUSTOM CAKE: Block order if time not confirmed by admin
-      // ============================================ 
-      const customCakeQuote = await getAcceptedQuoteForSession(session.id);
-      if (customCakeQuote && customCakeQuote.requested_delivery_time && !customCakeQuote.time_confirmed) {
-        logger.warn(`⏳ Custom cake order blocked - waiting for admin time confirmation. Quote: ${customCakeQuote.id}`);
-        replyMessage = t('customCake.waitingConfirmation', lang);
-        break;
-      }
-
-      try {
-        logger.info(`📦 Creating order with ${latestSession.items.length} items for session ${session.id}`);
-        const order = await createFinalOrder(session.id);
-
-        // businessTimezone is already defined at the start of processMessage
-
-        // Build confirmation message with fulfillment details (use LATEST session data)
-        let confirmMsg = `${t('order.confirmed', lang)}\n\n📋 ${t('order.orderNumber', lang)}: *${order.order_number}*\n${t('order.total', lang, { amount: order.total_amount })}`;
-
-        if (latestSession.fulfillment_type === 'delivery') {
-          confirmMsg += `\n\n${t('order.delivery', lang)}`;
-          // Show address if available, otherwise show coordinates (for WhatsApp location shares)
-          if (latestSession.delivery_address) {
-            confirmMsg += `\n📍 ${latestSession.delivery_address}`;
-          } else if (latestSession.delivery_latitude && latestSession.delivery_longitude) {
-            // Use simple coordinate format when address text is not available
-            confirmMsg += `\n📍 Location (${latestSession.delivery_latitude.toFixed(6)}, ${latestSession.delivery_longitude.toFixed(6)})`;
-          }
-          if (latestSession.delivery_time) {
-            confirmMsg += `\n${t('order.time', lang, { time: formatDeliveryTime(latestSession.delivery_time, businessTimezone, t('time.at', lang)) })}`;
-          }
-        } else if (latestSession.fulfillment_type === 'takeaway') {
-          confirmMsg += `\n\n${t('order.takeaway', lang)}`;
-          const selectedOutlet = outlets.find(o => o.id === latestSession.pickup_outlet_id);
-          if (selectedOutlet) {
-            confirmMsg += `\n📍 ${selectedOutlet.outlet_name}`;
-          }
-          if (latestSession.pickup_time) {
-            confirmMsg += `\n${t('order.time', lang, { time: formatDeliveryTime(latestSession.pickup_time, businessTimezone, t('time.at', lang)) })}`;
-          }
-        }
-
-        confirmMsg += `\n\n_${t('order.saveNumber', lang, { orderNumber: order.order_number })}_`;
-        const closingMsg = business?.closing_message || 'Thank you for your order!';
-        confirmMsg += `\n\n${closingMsg} 🙏`;
-        replyMessage = confirmMsg;
-      } catch (error) {
-        logger.error('Failed to create order', error);
-        const supportPhone = business?.customer_support_phone;
-        replyMessage = t('order.failed', lang, {
-          support: supportPhone ? t('error.contactSupport', lang, { phone: supportPhone }) : '',
-        });
-      }
-      break;
-
-    case 'cancel':
-      replyMessage = t('order.cancelled', lang);
-      break;
-
-    case 'cancel_existing_order':
-      if (aiResponse.order_id) {
-        const cancelResult = await cancelOrderById(aiResponse.order_id, customer.id, businessId);
-        if (cancelResult.success) {
-          replyMessage = t('order.cancelledSuccess', lang, { message: cancelResult.message });
-        } else {
-          replyMessage = t('order.cancelFailed', lang, { message: cancelResult.message });
-        }
-      } else {
-        replyMessage = t('order.provideOrderNumber', lang);
-      }
-      break;
-    case 'check_order_status':
-      if (aiResponse.order_id) {
-        // Customer provided order number - look up specific order
-        const businessTimezoneForStatus = businessTimezone;
-        const statusResult = await getOrderStatus(aiResponse.order_id, customer.id, businessId, businessTimezoneForStatus);
-        if (statusResult.success) {
-          replyMessage = statusResult.message;
-        } else {
-          replyMessage = t('order.cancelFailed', lang, { message: statusResult.message });
-        }
-      } else {
-        // No order number provided - try to find their active order
-        const activeOrder = await getCustomerActiveOrder(customer.id, businessId);
-        if (activeOrder) {
-          replyMessage = getOrderStatusMessage(activeOrder, lang, businessTimezone);
-        } else {
-          replyMessage = t('order.noActive', lang);
-        }
-      }
-      break;
-
-    case 'conversation_ended':
-      // Just send the farewell message, no need to ask more questions
-      // The AI's reply should already be a proper goodbye
-      break;
-
-    case 'ask_question':
-      // Handle fulfillment data if present in ask_question
-      if (aiResponse.fulfillment) {
-        logger.info(`📍 Fulfillment data in ask_question: ${JSON.stringify(aiResponse.fulfillment)}`);
-        logger.info(`📍 Current session fulfillment: type=${session.fulfillment_type}, addr=${session.delivery_address}`);
-
-        // Set fulfillment type
-        if (aiResponse.fulfillment.fulfillment_type && !session.fulfillment_type) {
-          await updateSessionFulfillmentType(session.id, aiResponse.fulfillment.fulfillment_type);
-          logger.info(`Fulfillment type set to: ${aiResponse.fulfillment.fulfillment_type}`);
-        }
-
-        // Handle delivery info
-        if (aiResponse.fulfillment.fulfillment_type === 'delivery') {
-          if (aiResponse.fulfillment.delivery_address) {
-            const addressFromAI = aiResponse.fulfillment.delivery_address;
-
-            // Skip if AI extracted coordinate format (not a real address)
-            const isCoordinateFormat = /^(Lat|Location|Latitude|Provided Location)[\s:(]*-?\d+\.?\d*/i.test(addressFromAI) ||
-              /\(Lat[\s:]*-?\d+\.?\d*.*Long[\s:]*-?\d+\.?\d*\)/i.test(addressFromAI) ||
-              /Lat[\s:]*-?\d+\.?\d*.*Long[\s:]*-?\d+\.?\d*/i.test(addressFromAI);
-
-            // Check if session already has lat/long
-            const sessionData = await getSessionWithItems(session.id);
-            const hasLocationAlready = sessionData?.delivery_latitude && sessionData?.delivery_longitude;
-
-            let deliveryTime = aiResponse.fulfillment.delivery_time
-              ? parseDeliveryTime(aiResponse.fulfillment.delivery_time, businessTimezone)
-              : null;
-
-            // Fallback: Try to extract time from original message
-            if (!deliveryTime) {
-              const extracted = extractAddressAndTime(messageText, businessTimezone);
-              if (extracted.time) {
-                deliveryTime = extracted.time;
-                logger.info(`Extracted time from message (ask_question): ${extracted.time}`);
-              }
-            }
-
-            if (isCoordinateFormat || hasLocationAlready) {
-              // Skip saving AI address - preserve existing lat/long, only save time if provided
-              logger.info(`Skipping AI address in ask_question (coord format: ${isCoordinateFormat}, has location: ${hasLocationAlready})`);
-              if (deliveryTime) {
-                await updateSessionDeliveryInfo(session.id, { time: deliveryTime });
-              }
-            } else {
-              await updateSessionDeliveryInfo(session.id, {
-                address: addressFromAI,
-                time: deliveryTime || undefined,
-                notes: aiResponse.fulfillment.fulfillment_notes,
-              });
-              logger.info(`Delivery info saved: ${addressFromAI}, time: ${deliveryTime || 'not provided'}`);
-
-              // If no time provided, prompt for it
-              if (!deliveryTime) {
-                replyMessage = t('fulfillment.gotAddress', lang, { address: addressFromAI });
-              }
-            }
-          }
-        }
-
-        // Handle pickup info
-        if (aiResponse.fulfillment.fulfillment_type === 'takeaway') {
-          // Show outlets if not selected yet
-          if (!aiResponse.fulfillment.pickup_outlet_id && outlets.length > 0 && !session.pickup_outlet_id) {
-            const outletsList = formatOutletsForCustomer(outlets);
-            replyMessage = aiResponse.reply + '\n\n' + outletsList;
-          } else if (aiResponse.fulfillment.pickup_outlet_id || messageText.match(/^\d+$/)) {
-            // Try to find outlet from customer input
-            let selectedOutlet = findOutletByCustomerInput(messageText, outlets);
-
-            if (!selectedOutlet && aiResponse.fulfillment.pickup_outlet_id) {
-              selectedOutlet = outlets.find(o => o.id === aiResponse.fulfillment?.pickup_outlet_id) || null;
-            }
-
-            if (selectedOutlet) {
-              const pickupTime = aiResponse.fulfillment.pickup_time
-                ? parseDeliveryTime(aiResponse.fulfillment.pickup_time, businessTimezone)
-                : null;
-
-              await updateSessionPickupInfo(session.id, {
-                outlet_id: selectedOutlet.id,
-                time: pickupTime || undefined,
-                notes: aiResponse.fulfillment.fulfillment_notes,
-              });
-              logger.info(`Pickup outlet selected: ${selectedOutlet.outlet_name}`);
-            }
-          }
-        }
-      }
-      // Use AI's reply (possibly modified above)
-      break;
-
-    case 'amenity_inquiry':
-      // Customer is asking about an amenity (party hall, etc.)
-      if (aiResponse.amenity?.amenity_slug && business) {
-        const amenity = await getAmenityBySlug(business.id, aiResponse.amenity.amenity_slug);
-        if (amenity) {
-          // Send amenity description first
-          replyMessage = amenity.description;
-
-          // Check for multiple images first, then fall back to single image_url
-          const imagesToSend = amenity.images?.length > 0
-            ? amenity.images
-            : (amenity.image_url ? [amenity.image_url] : []);
-
-          if (imagesToSend.length > 0) {
-            // Send text message first
-            await sendReply(phone, replyMessage);
-
-            // Send all images
-            for (const imageUrl of imagesToSend) {
-              await sendImg(phone, imageUrl);
-            }
-
-            // Mark that we've already sent the message
-            replyMessage = ''; // Clear so we don't send duplicate
-          }
-        } else {
-          // Amenity not found, use AI's reply
-          replyMessage = aiResponse.reply;
-        }
-      }
-      break;
-
-    case 'amenity_booking_request':
-      // Customer wants to book/reserve an amenity - notify admin
-      if (business) {
-        const amenitySlug = aiResponse.amenity?.amenity_slug || 'unknown';
-        const amenityName = aiResponse.amenity?.amenity_slug
-          ? (await getAmenityBySlug(business.id, aiResponse.amenity.amenity_slug))?.name || amenitySlug
-          : 'an amenity';
-
-        // Create notification for admin
-        await notifyBusinessAdmin(business.id, {
-          type: 'amenity_booking',
-          customerId: customer?.id,
-          phone: phone,
-          message: `Customer wants to book ${amenityName}. Phone: ${phone}`,
-        });
-
-        replyMessage = aiResponse.reply || t('amenity.bookingRequestConfirmation', lang, { amenity: amenityName });
-      }
-      break;
-
-    case 'show_photos':
-      // Customer wants to see photos of menu items
-      if (business) {
-        const photoRequest = aiResponse.photoRequest;
-
-        // Case 1: Specific item photo request
-        if (photoRequest?.item_name) {
-          const menuItems = await getMenuItems(business.id);
-          // Find item (case-insensitive) - prioritize exact match, then best partial match
-          const requestedName = photoRequest.item_name.toLowerCase().trim();
-
-          // 1. Exact match first
-          let matchedItem = menuItems.find(
-            item => item.name.toLowerCase() === requestedName
-          );
-
-          // 2. If no exact match, find best partial match (longest item name that matches)
-          if (!matchedItem) {
-            const partialMatches = menuItems.filter(
-              item => item.name.toLowerCase().includes(requestedName) ||
-                      requestedName.includes(item.name.toLowerCase())
-            );
-            // Sort by name length descending - prefer more specific matches
-            if (partialMatches.length > 0) {
-              matchedItem = partialMatches.sort((a, b) => b.name.length - a.name.length)[0];
-            }
-          }
-
-          if (matchedItem && matchedItem.image_url) {
-            // Build price string
-            let priceStr = '';
-            if (matchedItem.sizes && matchedItem.sizes.length > 0) {
-              priceStr = matchedItem.sizes.map(s => `${s.name}: ₹${s.price}`).join(' | ');
-            } else if (matchedItem.price) {
-              priceStr = `₹${matchedItem.price}`;
-            }
-
-            const caption = `${matchedItem.name}\n💰 ${priceStr}\n\nReply with the name to order!`;
-            await sendImg(phone, matchedItem.image_url, caption);
-            await saveOutgoingMessage(session.id, caption, {
-              messageType: 'image',
-              mediaUrl: matchedItem.image_url,
-              mediaMimeType: 'image/jpeg',
-              mediaCaption: caption
-            });
-            return null;
-          } else if (matchedItem && !matchedItem.image_url) {
-            replyMessage = lang === 'ml'
-              ? `ക്ഷമിക്കണം, ${matchedItem.name}-ന്റെ ഫോട്ടോ ഇപ്പോൾ ലഭ്യമല്ല.`
-              : `Sorry, no photo available for ${matchedItem.name} at the moment.`;
-          } else {
-            replyMessage = lang === 'ml'
-              ? `ക്ഷമിക്കണം, "${photoRequest.item_name}" കണ്ടെത്തിയില്ല.`
-              : `Sorry, couldn't find "${photoRequest.item_name}" in our menu.`;
-          }
-        }
-        // Case 2: Category photo request
-        else if (photoRequest?.category) {
-          const requestedCategory = photoRequest.category;
-
-          // Find matching category (case-insensitive)
-          const categories = await getMenuCategories(business.id);
-          const matchedCategory = categories.find(
-            c => c.name.toLowerCase() === requestedCategory.toLowerCase()
-          );
-
-          if (matchedCategory) {
-            // Get items in this category
-            const categoryItems = await getMenuItemsByCategory(business.id, matchedCategory.id);
-
-            // Filter items that have images
-            const itemsWithImages = categoryItems.filter(item => item.image_url);
-
-            if (itemsWithImages.length === 0) {
-              replyMessage = lang === 'ml'
-                ? `ക്ഷമിക്കണം, ${matchedCategory.name} വിഭാഗത്തിൽ ഇപ്പോൾ ഫോട്ടോകൾ ലഭ്യമല്ല.`
-                : `Sorry, no photos available for ${matchedCategory.name} at the moment.`;
-            } else {
-              const MAX_PHOTOS = 5;
-              const photosToSend = itemsWithImages.slice(0, MAX_PHOTOS);
-              const hasMore = itemsWithImages.length > MAX_PHOTOS;
-
-              // Send intro message
-              const introMsg = lang === 'ml'
-                ? `ഇതാ ഞങ്ങളുടെ ${matchedCategory.name} ഫോട്ടോകൾ:`
-                : `Here are our ${matchedCategory.name} photos:`;
-              await sendReply(phone, introMsg);
-
-              // Send each image with caption (name + price)
-              for (const item of photosToSend) {
-                // Build price string
-                let priceStr = '';
-                if (item.sizes && item.sizes.length > 0) {
-                  priceStr = item.sizes.map(s => `${s.name}: ₹${s.price}`).join(' | ');
-                } else if (item.price) {
-                  priceStr = `₹${item.price}`;
-                }
-
-                const caption = `${item.name}\n💰 ${priceStr}\n\nReply with the name to order!`;
-                await sendImg(phone, item.image_url!, caption);
-                await saveOutgoingMessage(session.id, caption, {
-                  messageType: 'image',
-                  mediaUrl: item.image_url,
-                  mediaMimeType: 'image/jpeg',
-                  mediaCaption: caption
-                });
-              }
-
-              // If more items available, ask if they want to see more
-              if (hasMore) {
-                const moreMsg = lang === 'ml'
-                  ? `${itemsWithImages.length - MAX_PHOTOS} കൂടി ഐറ്റങ്ങൾ ഉണ്ട്. "കൂടുതൽ കാണിക്കുക" എന്ന് പറയുക അല്ലെങ്കിൽ നിങ്ങളുടെ ഇഷ്ടം പറയുക (ഉദാ: chocolate, fruit).`
-                  : `${itemsWithImages.length - MAX_PHOTOS} more items available. Say "show more" or tell me your preference (e.g., chocolate, fruit).`;
-                await sendReply(phone, moreMsg);
-              }
-
-              return null; // Don't send another message
-            }
-          } else {
-            // Category not found
-            const availableCategories = categories.map(c => c.name).join(', ');
-            replyMessage = lang === 'ml'
-              ? `ക്ഷമിക്കണം, "${requestedCategory}" കാറ്റഗറി കണ്ടെത്തിയില്ല. ലഭ്യമായവ: ${availableCategories}`
-              : `Sorry, couldn't find "${requestedCategory}" category. Available: ${availableCategories}`;
-          }
-        } else {
-          // No category or item specified, ask which category
-          const categories = await getMenuCategories(business.id);
-          const categoryNames = categories.map(c => c.name).join(', ');
-          replyMessage = lang === 'ml'
-            ? `ഏത് കാറ്റഗറിയുടെ ഫോട്ടോകൾ കാണണം? ലഭ്യമായവ: ${categoryNames}`
-            : `Which category photos would you like to see? Available: ${categoryNames}`;
-        }
-      }
-      break;
-
-    case 'show_popular_items':
-      if (business?.id) {
-        const popularItems = await getPopularItemsForAI(business.id);
-        if (popularItems.length > 0) {
-          replyMessage = `⭐ Here are our most popular items:\n\n`;
-          replyMessage += popularItems.map((item, i) => {
-            let itemText = `${i + 1}. *${item.item_name}*`;
-            // Add price
-            if (item.sizes && item.sizes.length > 0) {
-              const prices = item.sizes.map((s: any) => s.price);
-              const minPrice = Math.min(...prices);
-              const maxPrice = Math.max(...prices);
-              itemText += minPrice === maxPrice
-                ? ` - ₹${minPrice}`
-                : ` - ₹${minPrice} to ₹${maxPrice}`;
-            } else if (item.base_price) {
-              itemText += ` - ₹${item.base_price}`;
-            }
-            // Add description
-            if (item.description) {
-              itemText += `\n   ${item.description}`;
-            }
-            return itemText;
-          }).join('\n\n');
-          replyMessage += `\n\nWhat would you like to order?`;
-
-          // Send images for items that have them (max 3 to avoid spam)
-          const itemsWithImages = popularItems.filter((item: any) => item.image_url).slice(0, 3);
-          for (const item of itemsWithImages) {
-            const caption = `${item.item_name}${item.base_price ? ` - ₹${item.base_price}` : ''}`;
-            await sendImg(phone, item.image_url, caption);
-          }
-        } else {
-          replyMessage = "We're still gathering our top sellers! You can ask for the menu to see all our items.";
-        }
-      } else {
-        replyMessage = "I can't fetch popular items right now. Please ask for the menu.";
-      }
-      break;
-
-    case 'smalltalk':
-    default:
-      // Use AI's reply as is
-      break;
+    }
   }
+  // If no handler or handler didn't change reply, use AI's reply as is (smalltalk, etc.)
 
   // Prepend welcome message on first message of session
   if (isFirstMessage && business?.welcome_message) {
     replyMessage = `${business.welcome_message}\n\n${replyMessage}`;
   }
 
-  // Save outgoing message
-  await saveOutgoingMessage(session.id, replyMessage);
+  // Save outgoing message (skip if handler already saved it)
+  if (!messageSaved) {
+    await saveOutgoingMessage(session.id, replyMessage);
+  }
 
   logger.info(`Reply sent: ${replyMessage.substring(0, 50)}...`);
 
   return replyMessage;
 }
-
 export async function handleWhatsAppWebhook(
   req: Request,
   res: Response,
@@ -3144,9 +1554,9 @@ export async function handleWhatsAppWebhook(
 
           // Track inbound message for usage stats
           const msgType = message.type === 'image' ? 'image' :
-                         message.type === 'document' ? 'document' :
-                         message.type === 'location' ? 'location' :
-                         message.type === 'interactive' ? 'interactive' : 'text';
+            message.type === 'document' ? 'document' :
+              message.type === 'location' ? 'location' :
+                message.type === 'interactive' ? 'interactive' : 'text';
           trackInboundMessage(business.id, msgType as any);
 
           // Mark message as read immediately (shows blue checkmarks to sender)
@@ -3910,7 +2320,7 @@ export async function handleWhatsAppWebhook(
 
                 if (buttonId.includes('_today_')) {
                   // Store date selection and show time buttons
-                  pendingDateSelectionMap.set(session.id, { date: 'today', fulfillmentType });
+                  await setPendingDateSelection(session.id, { date: 'today', fulfillmentType });
                   await saveIncomingMessage(session.id, `[Selected: ${t('buttons.today', lang)}]`);
 
                   // Different time options for delivery vs takeaway
@@ -3937,7 +2347,7 @@ export async function handleWhatsAppWebhook(
 
                 if (buttonId.includes('_tomorrow_')) {
                   // Store date selection and show time buttons for tomorrow
-                  pendingDateSelectionMap.set(session.id, { date: 'tomorrow', fulfillmentType });
+                  await setPendingDateSelection(session.id, { date: 'tomorrow', fulfillmentType });
                   await saveIncomingMessage(session.id, `[Selected: ${t('buttons.tomorrow', lang)}]`);
 
                   const timePrompt = t('buttons.whatTime', lang, { date: `*${t('buttons.tomorrow', lang)}*` });
@@ -3954,7 +2364,7 @@ export async function handleWhatsAppWebhook(
 
                 if (buttonId.includes('_other_')) {
                   // User wants to specify custom date/time - fall back to text input
-                  pendingDateSelectionMap.delete(session.id);
+                  await setPendingDateSelection(session.id, null);
                   await saveIncomingMessage(session.id, `[Selected: ${t('buttons.other', lang)}]`);
 
                   const customPrompt = t('buttons.customTimePrompt', lang);
@@ -3969,12 +2379,12 @@ export async function handleWhatsAppWebhook(
                 const customer = await findOrCreateCustomer(phone, business.id, customerName);
                 const { session } = await findOrCreateSession(customer.id, business.id);
                 const sessionWithItems = await getSessionWithItems(session.id);
-                const pendingDate = pendingDateSelectionMap.get(session.id);
+                const pendingDate = session.pending_state?.pendingDateSelection;
                 const lang = getSessionLanguage(session);
 
                 if (buttonId === 'time_other') {
                   // User wants custom time - fall back to text input
-                  pendingDateSelectionMap.delete(session.id);
+                  await setPendingDateSelection(session.id, null);
                   await saveIncomingMessage(session.id, `[Selected: ${t('buttons.other', lang)}]`);
 
                   const dateText = pendingDate?.date === 'tomorrow' ? t('buttons.tomorrow', lang) : t('buttons.today', lang);
@@ -4064,7 +2474,7 @@ export async function handleWhatsAppWebhook(
                   });
 
                   // Clear pending date selection
-                  pendingDateSelectionMap.delete(session.id);
+                  await setPendingDateSelection(session.id, null);
 
                   // Tell customer to wait for confirmation
                   const timeConfirmMsg = t('customCake.timeConfirmRequest', lang, {
@@ -4130,7 +2540,7 @@ export async function handleWhatsAppWebhook(
                         await saveOutgoingMessage(session.id, waitingMsg);
 
                         // Clear pending date selection
-                        pendingDateSelectionMap.delete(session.id);
+                        await setPendingDateSelection(session.id, null);
                         continue;
                       }
                     }
@@ -4151,7 +2561,7 @@ export async function handleWhatsAppWebhook(
                 }
 
                 // Clear pending date selection
-                pendingDateSelectionMap.delete(session.id);
+                await setPendingDateSelection(session.id, null);
 
                 // Show final invoice
                 const finalSummary = await generateOrderSummary(session.id, {

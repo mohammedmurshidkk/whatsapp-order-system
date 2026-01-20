@@ -9,12 +9,14 @@ import {
   getOrdersByCustomer,
   getSession,
 } from '../controllers/orderController';
+import { webhookRateLimiter } from '../middleware/rateLimiter';
 
 const router: IRouter = Router();
 
 // WhatsApp webhook endpoints
 router.get('/whatsapp', handleWebhookVerification);
-router.post('/whatsapp', handleWhatsAppWebhook);
+// Rate limit: 30 messages per minute per phone number
+router.post('/whatsapp', webhookRateLimiter({ windowMs: 60000, maxRequests: 30 }), handleWhatsAppWebhook);
 
 // Test endpoint for simulating messages
 router.post('/test/message', handleTestMessage);

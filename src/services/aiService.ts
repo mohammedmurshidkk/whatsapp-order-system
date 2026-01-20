@@ -28,6 +28,9 @@ function subtractMinutesFromTime(time: string, minutes: number): string {
 }
 
 export interface PopularItem {
+  sizes: any[];
+  description: any;
+  base_price: any;
   item_name: string;
 }
 
@@ -148,8 +151,19 @@ function getSystemPrompt(context: AIContext): string {
   let popularItemsSection = '';
   if (context.popularItems && context.popularItems.length > 0) {
     popularItemsSection += `\n\nPOPULAR ITEMS (recommend when asked "what's good", "best seller", etc.):\n`;
-    popularItemsSection += context.popularItems.map((item, i) => `${i + 1}. ${item.item_name}`).join('\n');
-    popularItemsSection += `\nWhen asked for recommendations, use intent "show_popular_items" or suggest these items naturally.\n`;
+    popularItemsSection += context.popularItems.map((item, i) => {
+      let itemDetails = `${i + 1}. ${item.item_name}`;
+      if (item.description) itemDetails += ` - ${item.description}`;
+      if (item.sizes && item.sizes.length > 0) {
+        const priceRange = item.sizes.map((s: any) => `${s.name}: ₹${s.price}`).join(', ');
+        itemDetails += ` (${priceRange})`;
+      } else if (item.base_price) {
+        itemDetails += ` - ₹${item.base_price}`;
+      }
+      return itemDetails;
+    }).join('\n');
+    popularItemsSection += `\n⚠️ IMPORTANT: When user asks for popular/trending/best items, use intent "show_popular_items". The handler will display items with images.\n`;
+    logger.info(`popularItemsSection for AI prompt: ${popularItemsSection}`);
   }
 
   // Format outlets for takeaway (static per business) with operating hours
@@ -459,14 +473,12 @@ function parseAIResponse(responseText: string): AIResponse {
       customText: parsed.customText,  // For modify_custom_text intent
       amenity: parsed.amenity,  // For amenity_inquiry/amenity_booking_request intents
       photoRequest: parsed.photoRequest,  // For show_photos intent
+      analysis: parsed.analysis,  // For intervention reasons
     };
   } catch (error) {
     logger.warn('Failed to parse AI response as JSON', { error, responseText });
-
-    return {
-      reply: "I didn't quite understand that. Could you please rephrase? For example: 'I want a chocolate cake' or 'Show me the menu'.",
-      intent: 'ask_question',
-    };
+    // Throw to allow retry at higher level
+    throw new Error('AI_PARSE_ERROR');
   }
 }
 
@@ -739,33 +751,36 @@ export async function processMessageWithAI(
 
   const prompt = buildPrompt(currentMessage, conversationHistory, context);
 
-  try {
-    const aiClient = getAIClient();
-    const result = await aiClient.processMessageWithUsage(prompt);
+  const MAX_PARSE_RETRIES = 2;
+  const aiClient = getAIClient();
 
-    // Track AI usage if we have a business ID
-    if (context.business?.id) {
-      trackAIUsage({
-        businessId: context.business.id,
-        provider: aiClient.getProvider() as AIProvider,
-        tokensInput: result.usage.inputTokens,
-        tokensOutput: result.usage.outputTokens,
-        latencyMs: result.usage.latencyMs,
-        success: !!result.text,
-        errorMessage: result.text ? undefined : 'Empty AI response',
-      }).catch(err => logger.warn('Failed to track AI usage', err));
-    }
+  for (let attempt = 0; attempt <= MAX_PARSE_RETRIES; attempt++) {
+    try {
+      const result = await aiClient.processMessageWithUsage(prompt);
 
-    const responseText = result.text;
+      // Track AI usage if we have a business ID
+      if (context.business?.id) {
+        trackAIUsage({
+          businessId: context.business.id,
+          provider: aiClient.getProvider() as AIProvider,
+          tokensInput: result.usage.inputTokens,
+          tokensOutput: result.usage.outputTokens,
+          latencyMs: result.usage.latencyMs,
+          success: !!result.text,
+          errorMessage: result.text ? undefined : 'Empty AI response',
+        }).catch(err => logger.warn('Failed to track AI usage', err));
+      }
 
-    if (!responseText) {
-      logger.error('Empty response from AI provider');
-      throw new Error('Empty AI response');
-    }
+      const responseText = result.text;
 
-    logger.debug('AI raw response', responseText);
+      if (!responseText) {
+        logger.error('Empty response from AI provider');
+        throw new Error('Empty AI response');
+      }
 
-    let aiResponse = parseAIResponse(responseText);
+      logger.debug('AI raw response', responseText);
+
+      let aiResponse = parseAIResponse(responseText);
 
     // VALIDATION: If AI tries to add an item, verify it exists in menu
     if (aiResponse.intent === 'add_item' && aiResponse.item?.name && context.menuItems) {
@@ -833,23 +848,47 @@ export async function processMessageWithAI(
     logger.info(`AI Intent: ${aiResponse.intent}`);
     return aiResponse;
 
-  } catch (error) {
-    logger.error('Error processing message with AI', { error });
+    } catch (error: any) {
+      // Check if this is a parse error that we should retry
+      if (error.message === 'AI_PARSE_ERROR' && attempt < MAX_PARSE_RETRIES) {
+        logger.warn(`AI response parse failed. Retry ${attempt + 1}/${MAX_PARSE_RETRIES}...`);
+        await new Promise(r => setTimeout(r, 500));
+        continue;
+      }
 
-    // Build professional error message with customer support if available
-    let errorReply = "We're experiencing a temporary issue processing your request. Please try again in a moment.";
+      // For parse errors after all retries, return friendly fallback
+      if (error.message === 'AI_PARSE_ERROR') {
+        logger.error('AI parse error after all retries');
+        return {
+          reply: "I didn't quite understand that. Could you please rephrase? For example: 'I want a chocolate cake' or 'Show me the menu'.",
+          intent: 'ask_question',
+        };
+      }
 
-    if (context.business?.customer_support_phone) {
-      errorReply += `\n\n📞 Need immediate assistance? Contact us: ${context.business.customer_support_phone}`;
+      // For other errors (network, empty response, etc.)
+      logger.error('Error processing message with AI', { error });
+
+      // Build professional error message with customer support if available
+      let errorReply = "We're experiencing a temporary issue processing your request. Please try again in a moment.";
+
+      if (context.business?.customer_support_phone) {
+        errorReply += `\n\n📞 Need immediate assistance? Contact us: ${context.business.customer_support_phone}`;
+      }
+
+      errorReply += "\n\n_Tip: You can continue ordering by telling us what you'd like._";
+
+      return {
+        reply: errorReply,
+        intent: 'ask_question',
+      };
     }
-
-    errorReply += "\n\n_Tip: You can continue ordering by telling us what you'd like._";
-
-    return {
-      reply: errorReply,
-      intent: 'ask_question',
-    };
   }
+
+  // Should never reach here, but TypeScript requires a return
+  return {
+    reply: "I didn't quite understand that. Could you please rephrase?",
+    intent: 'ask_question',
+  };
 }
 
 // ============================================

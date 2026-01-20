@@ -504,6 +504,12 @@ COMMENT ON COLUMN sessions.language IS 'Customer preferred language: ml (Malayal
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS custom_delivery_fee NUMERIC;
 
 -- ============================================
+-- Persist In-Memory Conversational State
+-- ============================================
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS pending_state JSONB DEFAULT NULL;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_added_item_id UUID;
+
+-- ============================================
 -- DONE
 -- ============================================
 
@@ -690,6 +696,66 @@ ADD COLUMN IF NOT EXISTS delivery_admin_note TEXT;
 
 -- Index for delivery boy orders
 CREATE INDEX IF NOT EXISTS idx_orders_delivery_boy ON orders(delivery_boy_id);
+
+-- ============================================
+-- Audit Logs Table
+-- Tracks admin/superadmin actions for accountability
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+  -- Who performed the action
+  admin_id UUID REFERENCES admin_users(id) ON DELETE SET NULL,
+  admin_email VARCHAR(255),  -- Denormalized for when admin is deleted
+  admin_role VARCHAR(50),    -- 'superadmin', 'owner', 'admin'
+
+  -- What action was performed
+  action VARCHAR(100) NOT NULL,  -- e.g., 'business.create', 'menu.update', 'order.status_change'
+
+  -- What entity was affected
+  entity_type VARCHAR(50),       -- e.g., 'business', 'menu_item', 'order', 'admin_user'
+  entity_id UUID,                -- ID of the affected entity
+  business_id UUID REFERENCES businesses(id) ON DELETE SET NULL,  -- For business-scoped actions
+
+  -- Action details
+  details JSONB DEFAULT '{}',    -- Additional context (old values, new values, etc.)
+
+  -- Request metadata
+  ip_address VARCHAR(45),        -- IPv4 or IPv6
+  user_agent TEXT,
+
+  -- Timestamp
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Indexes for common queries
+CREATE INDEX IF NOT EXISTS idx_audit_logs_admin_id ON audit_logs(admin_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_business_id ON audit_logs(business_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_entity ON audit_logs(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at DESC);
+
+-- Composite index for filtering by business and time
+CREATE INDEX IF NOT EXISTS idx_audit_logs_business_time ON audit_logs(business_id, created_at DESC);
+
+-- ============================================
+-- Common audit actions reference:
+-- ============================================
+-- Superadmin actions:
+--   business.create, business.update, business.toggle_status
+--   business.admin_add, business.admin_delete
+--   usage.config_update
+--
+-- Admin actions:
+--   menu.item_create, menu.item_update, menu.item_delete
+--   menu.category_create, menu.category_update, menu.category_delete
+--   menu.addon_create, menu.addon_update, menu.addon_delete
+--   order.status_change, order.cancel
+--   session.ai_pause, session.ai_resume
+--   business.settings_update
+--   intervention.respond
+-- ============================================
 -- ============================================
 -- USAGE TRACKING MIGRATIONS
 -- ============================================

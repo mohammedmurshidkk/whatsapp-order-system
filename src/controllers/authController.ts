@@ -3,6 +3,7 @@ import { supabase } from '../config/database';
 import { generateToken, AuthUser } from '../middleware/auth';
 import { logger } from '../utils/logger';
 import bcrypt from 'bcryptjs';
+import { createAuditLog, getRequestMetadata } from '../services/auditService';
 
 // Login endpoint
 export async function login(req: Request, res: Response): Promise<void> {
@@ -47,6 +48,18 @@ export async function login(req: Request, res: Response): Promise<void> {
         .eq('id', superAdmin.id);
 
       logger.info(`Superadmin login: ${email}`);
+
+      // Audit log successful login
+      const { ipAddress, userAgent } = getRequestMetadata(req);
+      await createAuditLog({
+        adminId: superAdmin.id,
+        adminEmail: superAdmin.email,
+        adminRole: 'superadmin',
+        action: 'auth.login',
+        details: { loginType: 'superadmin' },
+        ipAddress,
+        userAgent,
+      });
 
       res.status(200).json({
         token,
@@ -102,6 +115,19 @@ export async function login(req: Request, res: Response): Promise<void> {
       .eq('id', user.id);
 
     logger.info(`Admin login: ${email}`);
+
+    // Audit log successful login
+    const { ipAddress, userAgent } = getRequestMetadata(req);
+    await createAuditLog({
+      adminId: user.id,
+      adminEmail: user.email,
+      adminRole: 'admin',
+      action: 'auth.login',
+      businessId: user.business_id,
+      details: { loginType: 'admin' },
+      ipAddress,
+      userAgent,
+    });
 
     res.status(200).json({
       token,
