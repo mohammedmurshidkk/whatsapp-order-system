@@ -51,7 +51,7 @@ export async function getTopSellingItems(
 ): Promise<any[]> {
     const { data, error } = await supabase
     .from('order_item_stats')
-    .select('*, menu_item:menu_items(id, name, description, base_price, sizes, image_url)')
+    .select('*, menu_item:menu_items(id, name, description, price, sizes, image_url)')
     .eq('business_id', businessId)
     .eq('period_type', period)
     .order('order_count', { ascending: false })
@@ -107,7 +107,7 @@ export async function getPopularItemsForAI(businessId: string): Promise<any[]> {
       id: item.id,
       item_name: item.name,
       description: item.description,
-      base_price: item.base_price,
+      base_price: item.price,
       sizes: item.sizes,
       image_url: item.image_url,
       score: 1000 + (item.featured_order || 0),
@@ -121,7 +121,7 @@ export async function getPopularItemsForAI(businessId: string): Promise<any[]> {
         id: item.menu_item_id,
         item_name: item.menu_item.name || item.item_name,
         description: item.menu_item.description,
-        base_price: item.menu_item.base_price,
+        base_price: item.menu_item.price,
         sizes: item.menu_item.sizes,
         image_url: item.menu_item.image_url,
         score: item.order_count,
@@ -134,7 +134,7 @@ export async function getPopularItemsForAI(businessId: string): Promise<any[]> {
     .sort((a, b) => b.score - a.score)
     .slice(0, 5);
 
-  logger.info(`getPopularItemsForAI`, { popularItems, featuredItems, topItems });
+  logger.info(`getPopularItemsForAI`, JSON.stringify({ popularItems, featuredItems, topItems }, null, 2));
 
   return popularItems;
 }

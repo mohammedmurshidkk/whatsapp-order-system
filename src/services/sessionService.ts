@@ -1,5 +1,5 @@
 import { supabase } from '../config/database';
-import { Session, SessionWithItems, SessionItem, CustomCakeContext } from '../types';
+import { Session, SessionWithItems, SessionItem, CustomCakeContext, SessionPendingState, PendingCustomText, PendingAddonSelection, PendingDateSelection, PendingCustomDate } from '../types';
 import { SESSION_TIMEOUT_HOURS } from '../config/constants';
 import { logger } from '../utils/logger';
 import type { SupportedLanguage } from '../i18n';
@@ -113,6 +113,8 @@ export async function completeSession(sessionId: string): Promise<void> {
     .update({
       status: 'completed',
       completed_at: new Date().toISOString(),
+      pending_state: null,
+      last_added_item_id: null,
     })
     .eq('id', sessionId);
 
@@ -358,4 +360,76 @@ export async function clearSessionCustomCakeContext(sessionId: string): Promise<
   if (error) {
     logger.error('Failed to clear session custom cake context', error);
   }
+}
+export async function updateSessionPendingState(
+  sessionId: string,
+  updates: Partial<SessionPendingState>
+): Promise<void> {
+  const { data: session } = await supabase
+    .from('sessions')
+    .select('pending_state')
+    .eq('id', sessionId)
+    .single();
+
+  const currentState = (session?.pending_state || {}) as SessionPendingState;
+  const merged = { ...currentState, ...updates };
+
+  const { error } = await supabase
+    .from('sessions')
+    .update({ pending_state: merged })
+    .eq('id', sessionId);
+
+  if (error) {
+    logger.error('Failed to update session pending state', error);
+  }
+}
+
+export async function clearSessionPendingState(sessionId: string): Promise<void> {
+  const { error } = await supabase
+    .from('sessions')
+    .update({ pending_state: null })
+    .eq('id', sessionId);
+
+  if (error) {
+    logger.error('Failed to clear session pending state', error);
+  }
+}
+
+export async function setLastAddedItem(sessionId: string, itemId: string | null): Promise<void> {
+  const { error } = await supabase
+    .from('sessions')
+    .update({ last_added_item_id: itemId })
+    .eq('id', sessionId);
+
+  if (error) {
+    logger.error('Failed to set last added item', error);
+  }
+}
+
+export async function setPendingCustomText(
+  sessionId: string,
+  data: PendingCustomText | null
+): Promise<void> {
+  await updateSessionPendingState(sessionId, { pendingCustomText: data });
+}
+
+export async function setPendingAddonSelection(
+  sessionId: string,
+  data: PendingAddonSelection | null
+): Promise<void> {
+  await updateSessionPendingState(sessionId, { pendingAddonSelection: data });
+}
+
+export async function setPendingDateSelection(
+  sessionId: string,
+  data: PendingDateSelection | null
+): Promise<void> {
+  await updateSessionPendingState(sessionId, { pendingDateSelection: data });
+}
+
+export async function setPendingCustomDate(
+  sessionId: string,
+  data: PendingCustomDate | null
+): Promise<void> {
+  await updateSessionPendingState(sessionId, { pendingCustomDate: data });
 }

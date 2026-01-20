@@ -186,6 +186,8 @@ export interface Session {
   custom_delivery_fee?: number | null; // Admin-set delivery fee for out-of-radius deliveries
   // i18n: Customer preferred language (ml=Malayalam, en=English)
   language?: 'en' | 'ml';
+  pending_state?: SessionPendingState | null;
+  last_added_item_id?: string | null;
 }
 
 export interface SessionWithItems extends Session {
@@ -692,4 +694,37 @@ export interface InterventionRequest {
   resolved_at?: string;
   created_at: string;
   expires_at?: string;
+}
+
+// ============================================
+// PENDING STATE TYPES
+// ============================================
+
+export interface PendingCustomText {
+  itemId: string;
+  prompt: string;
+}
+
+export interface PendingAddonSelection {
+  itemId: string;
+  addonIds: string[];  // Store IDs only, fetch full objects when needed
+}
+
+export interface PendingDateSelection {
+  date: 'today' | 'tomorrow';
+  fulfillmentType: 'delivery' | 'takeaway';
+}
+
+export interface PendingCustomDate {
+  year: number;
+  month: number;
+  day: number;
+  fulfillmentType?: 'delivery' | 'takeaway';
+}
+
+export interface SessionPendingState {
+  pendingCustomText?: PendingCustomText | null;
+  pendingAddonSelection?: PendingAddonSelection | null;
+  pendingDateSelection?: PendingDateSelection | null;
+  pendingCustomDate?: PendingCustomDate | null;
 }
