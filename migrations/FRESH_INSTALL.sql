@@ -4,6 +4,8 @@
 -- ============================================
 
 -- Drop all tables in correct order (reverse of dependencies)
+DROP TABLE IF EXISTS campaign_messages CASCADE;
+DROP TABLE IF EXISTS campaigns CASCADE;
 DROP TABLE IF EXISTS session_item_addons CASCADE;
 DROP TABLE IF EXISTS category_addons CASCADE;
 DROP TABLE IF EXISTS menu_addons CASCADE;
@@ -1044,3 +1046,164 @@ begin
   end loop;
 end;
 $$ language plpgsql;
+
+-- ============================================
+-- CAMPAIGN MANAGEMENT TABLES
+-- From migrations/004_campaigns.sql
+-- ============================================
+
+-- Campaign Management Tables
+-- Stores campaign history and media
+
+CREATE TABLE IF NOT EXISTS campaigns (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+
+  -- Campaign details
+  name VARCHAR(255) NOT NULL,
+  description TEXT,
+  campaign_type VARCHAR(50) NOT NULL DEFAULT 'template', -- 'template' or 'direct'
+
+  -- Template details (for template campaigns)
+  template_name VARCHAR(255), -- e.g., 'seasonal_celebration'
+  language_code VARCHAR(10) DEFAULT 'en_US',
+
+  -- Media
+  image_url TEXT, -- Public URL of campaign image
+
+  -- Template variables (JSONB for flexibility)
+  -- Example: {"header_image": "url", "body_1": "Republic Day", "body_2": "Get 25% off!"}
+  template_variables JSONB,
+
+  -- Target audience
+  target_type VARCHAR(50) NOT NULL DEFAULT 'all', -- 'all', 'custom', 'segment'
+  target_phone_numbers TEXT[], -- Array of phone numbers
+  target_user_ids UUID[], -- Array of customer IDs
+  filter_tags TEXT[], -- Future: tag-based filtering
+
+  -- Campaign status
+  status VARCHAR(50) NOT NULL DEFAULT 'draft', -- 'draft', 'sending', 'completed', 'failed'
+  scheduled_at TIMESTAMPTZ, -- Future: scheduled campaigns
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+
+  -- Results
+  total_recipients INTEGER DEFAULT 0,
+  successful_sends INTEGER DEFAULT 0,
+  failed_sends INTEGER DEFAULT 0,
+  error_details JSONB, -- Store errors if any
+
+  -- Metadata
+  created_by UUID, -- Admin user ID
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Create indexes
+CREATE INDEX IF NOT EXISTS idx_campaigns_business_id ON campaigns(business_id);
+CREATE INDEX IF NOT EXISTS idx_campaigns_status ON campaigns(status);
+CREATE INDEX IF NOT EXISTS idx_campaigns_created_at ON campaigns(created_at DESC);
+
+-- Campaign messages tracking (optional - for detailed tracking)
+CREATE TABLE IF NOT EXISTS campaign_messages (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  campaign_id UUID NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  customer_id UUID REFERENCES customers(id) ON DELETE SET NULL,
+  phone VARCHAR(50) NOT NULL,
+
+  -- Status
+  status VARCHAR(50) NOT NULL DEFAULT 'pending', -- 'pending', 'sent', 'failed', 'delivered', 'read'
+  sent_at TIMESTAMPTZ,
+  delivered_at TIMESTAMPTZ,
+  read_at TIMESTAMPTZ,
+  failed_at TIMESTAMPTZ,
+  error_message TEXT,
+
+  -- Metadata
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Create indexes for campaign messages
+CREATE INDEX IF NOT EXISTS idx_campaign_messages_campaign_id ON campaign_messages(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_messages_customer_id ON campaign_messages(customer_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_messages_status ON campaign_messages(status);
+
+-- Update trigger for campaigns
+CREATE OR REPLACE FUNCTION update_campaigns_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trigger_update_campaigns_updated_at ON campaigns;
+CREATE TRIGGER trigger_update_campaigns_updated_at
+BEFORE UPDATE ON campaigns
+FOR EACH ROW
+EXECUTE FUNCTION update_campaigns_updated_at();
+
+-- Comments
+COMMENT ON TABLE campaigns IS 'Stores marketing campaigns sent via WhatsApp';
+COMMENT ON COLUMN campaigns.template_variables IS 'JSONB storing template parameter values for reusable templates';
+COMMENT ON COLUMN campaigns.image_url IS 'Public URL of campaign image hosted on Supabase Storage or external CDN';
+COMMENT ON TABLE campaign_messages IS 'Tracks individual message delivery status for each campaign recipient';
+\n\n-- ============================================\n-- WHATSAPP CONNECTIONS MIGRATION\n-- From migrations/005_whatsapp_connections.sql\n-- ============================================\n
+-- Migration: WhatsApp Connections (Multi-tenant WhatsApp support)
+-- This allows each business to have their own WhatsApp number with credentials stored in DB
+
+-- Create whatsapp_connections table
+CREATE TABLE IF NOT EXISTS whatsapp_connections (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  provider VARCHAR(20) NOT NULL DEFAULT 'meta', -- 'meta' | 'webjs'
+  phone_number VARCHAR(20) NOT NULL,
+
+  -- Meta API credentials
+  meta_phone_number_id VARCHAR(50),
+  meta_access_token TEXT,
+  meta_business_account_id VARCHAR(50),
+  meta_webhook_secret TEXT,
+  meta_verify_token VARCHAR(100),
+
+  -- WebJS session (for future use)
+  webjs_session_data JSONB,
+
+  -- Status tracking
+  status VARCHAR(20) DEFAULT 'active', -- pending, active, disconnected
+  connected_at TIMESTAMPTZ DEFAULT NOW(),
+  last_message_at TIMESTAMPTZ,
+
+  -- Timestamps
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+
+  -- Constraints
+  UNIQUE(phone_number)
+);
+
+-- Indexes for fast lookups
+CREATE INDEX IF NOT EXISTS idx_whatsapp_connections_phone ON whatsapp_connections(phone_number);
+CREATE INDEX IF NOT EXISTS idx_whatsapp_connections_business ON whatsapp_connections(business_id);
+CREATE INDEX IF NOT EXISTS idx_whatsapp_connections_status ON whatsapp_connections(status);
+
+-- Add trigger for updated_at
+CREATE OR REPLACE FUNCTION update_whatsapp_connections_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trigger_whatsapp_connections_updated_at ON whatsapp_connections;
+CREATE TRIGGER trigger_whatsapp_connections_updated_at
+  BEFORE UPDATE ON whatsapp_connections
+  FOR EACH ROW
+  EXECUTE FUNCTION update_whatsapp_connections_updated_at();
+
+-- Comments for documentation
+COMMENT ON TABLE whatsapp_connections IS 'Stores WhatsApp connection credentials per business for multi-tenant support';
+COMMENT ON COLUMN whatsapp_connections.provider IS 'WhatsApp provider: meta (official API) or webjs (unofficial)';
+COMMENT ON COLUMN whatsapp_connections.meta_access_token IS 'Meta Graph API access token - consider encryption for production';
+COMMENT ON COLUMN whatsapp_connections.status IS 'Connection status: pending (setup), active (working), disconnected (needs reconnection)';

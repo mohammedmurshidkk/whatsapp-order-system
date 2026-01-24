@@ -1561,7 +1561,7 @@ export async function handleWhatsAppWebhook(
 
           // Mark message as read immediately (shows blue checkmarks to sender)
           if (message.id) {
-            markAsRead(message.id).catch(() => { });
+            markAsRead(message.id, business.id).catch(() => { });
           }
 
           // Handle image messages (Feature 4)
@@ -1919,8 +1919,8 @@ export async function handleWhatsAppWebhook(
             }
 
             try {
-              // Transcribe voice message
-              const transcription = await processVoiceMessage(audioId!);
+              // Transcribe voice message (pass businessId for credential lookup)
+              const transcription = await processVoiceMessage(audioId!, business.id);
               logger.info(`Voice transcribed: "${transcription.substring(0, 50)}..."`);
 
               // Save the audio with transcription as caption

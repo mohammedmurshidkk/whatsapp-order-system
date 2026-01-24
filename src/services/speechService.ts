@@ -9,6 +9,7 @@
 import axios from 'axios';
 import { logger } from '../utils/logger';
 import { GEMINI_MODEL_NAME } from '../config/constants';
+import { getMetaCredentials } from './whatsappConnectionService';
 
 // Gemini API endpoint for multimodal content
 const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL_NAME}:generateContent`;
@@ -116,10 +117,15 @@ Instructions:
 /**
  * Download media (audio/voice) from WhatsApp
  * @param mediaId - WhatsApp media ID
+ * @param businessId - Optional business ID for multi-tenant credential lookup
  * @returns Audio buffer
  */
-export async function downloadWhatsAppMedia(mediaId: string): Promise<Buffer> {
-  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+export async function downloadWhatsAppMedia(mediaId: string, businessId?: string): Promise<Buffer> {
+  let accessToken: string | undefined;
+
+  // Try to get credentials from business config first
+  const credentials = await getMetaCredentials(businessId);
+  accessToken = credentials?.accessToken;
 
   if (!accessToken) {
     throw new Error('WhatsApp access token not configured');
@@ -173,13 +179,14 @@ export async function downloadWhatsAppMedia(mediaId: string): Promise<Buffer> {
  * Process a voice message end-to-end
  * Downloads from WhatsApp and converts to text
  * @param mediaId - WhatsApp media ID
+ * @param businessId - Optional business ID for multi-tenant credential lookup
  * @returns Transcribed text
  */
-export async function processVoiceMessage(mediaId: string): Promise<string> {
+export async function processVoiceMessage(mediaId: string, businessId?: string): Promise<string> {
   logger.info(`Processing voice message: ${mediaId}`);
 
-  // Download audio from WhatsApp
-  const audioBuffer = await downloadWhatsAppMedia(mediaId);
+  // Download audio from WhatsApp (with business credentials)
+  const audioBuffer = await downloadWhatsAppMedia(mediaId, businessId);
 
   // Convert to text
   const transcription = await convertSpeechToText(audioBuffer);

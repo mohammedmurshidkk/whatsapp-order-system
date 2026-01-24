@@ -13,7 +13,7 @@ import { logger } from '../utils/logger';
 export type APIType = 'ai' | 'whatsapp' | 'google_maps';
 export type AIProvider = 'gemini' | 'openrouter' | 'groq';
 export type MessageDirection = 'inbound' | 'outbound';
-export type MessageType = 'text' | 'image' | 'document' | 'interactive' | 'location';
+export type MessageType = 'text' | 'image' | 'document' | 'interactive' | 'location' | 'template';
 
 export interface AIUsageData {
   businessId: string;

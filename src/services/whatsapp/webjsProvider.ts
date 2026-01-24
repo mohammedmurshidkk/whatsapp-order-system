@@ -4,7 +4,7 @@
  * Interactive messages (buttons/lists) are converted to text alternatives
  */
 
-import { WhatsAppProvider, ReplyButton, ListSection, ProviderStatus } from './types';
+import { WhatsAppProvider, ReplyButton, ListSection, ProviderStatus, TemplateMessage } from './types';
 import { getClient, isClientReady, getStatus as getClientStatus } from './webjsClient';
 import {
   formatPhoneForWebJS,
@@ -155,6 +155,13 @@ export async function sendImage(
 }
 
 /**
+ * Send template - Not supported by WebJS
+ */
+export async function sendTemplate(to: string, template: TemplateMessage): Promise<void> {
+  logger.warn(`[WebJS] Template messages not supported. Template: ${template.name} to ${to}`);
+}
+
+/**
  * Get provider status
  */
 export function getStatus(): ProviderStatus {
@@ -169,4 +176,5 @@ export const webjsProvider: WhatsAppProvider = {
   sendReplyButtons,
   sendInteractiveList,
   sendLocationRequest,
+  sendTemplate,
 };

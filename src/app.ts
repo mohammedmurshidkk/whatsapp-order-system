@@ -25,12 +25,15 @@ import adminAmenityRoutes from './routes/adminAmenities';
 import adminInterventionRoutes from './routes/adminInterventions';
 import adminDeliveryBoyRoutes from './routes/adminDeliveryBoy';
 import adminPopularItemsRoutes from './routes/adminPopularItems';
+import adminCampaignRoutes from './routes/adminCampaigns';
+import adminCustomerRoutes from './routes/adminCustomers';
 import superadminUsageRoutes from './routes/superadminUsage';
 import { WHATSAPP_PROVIDER } from './config/constants';
 import { logger } from './utils/logger';
 import { handleTestMessage } from './controllers/webhookController';
 import { initializeSocket } from './services/socketService';
 import { requestLogger } from './middleware/requestLogger';
+import { startCampaignScheduler } from './services/campaignScheduler';
 
 // Load environment variables
 dotenv.config();
@@ -90,6 +93,8 @@ app.use('/api/admin/amenities', adminAmenityRoutes);
 app.use('/api/admin/interventions', adminInterventionRoutes);
 app.use('/api/admin/delivery-boys', adminDeliveryBoyRoutes);
 app.use('/api/admin/popular-items', adminPopularItemsRoutes);
+app.use('/api/admin/campaigns', adminCampaignRoutes);
+app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/superadmin', superadminRoutes);
 app.use('/api/superadmin/usage', superadminUsageRoutes);
 
@@ -166,6 +171,9 @@ httpServer.listen(PORT, () => {
 
   // Initialize WhatsApp after server starts
   initializeWhatsApp();
+
+  // Start campaign scheduler
+  startCampaignScheduler();
 });
 
 export default app;

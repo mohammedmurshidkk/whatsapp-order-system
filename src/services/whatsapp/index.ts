@@ -11,7 +11,7 @@
  */
 
 import { WHATSAPP_PROVIDER } from '../../config/constants';
-import { ReplyButton, ListSection, ProviderStatus } from './types';
+import { ReplyButton, ListSection, ProviderStatus, TemplateMessage } from './types';
 import * as metaProvider from './metaProvider';
 import * as webjsProvider from './webjsProvider';
 import { logger } from '../../utils/logger';
@@ -25,22 +25,25 @@ const isWebJS = WHATSAPP_PROVIDER === 'webjs';
 
 /**
  * Send a text message
+ * @param to - Recipient phone number
+ * @param message - Text message to send
+ * @param businessId - Business ID for multi-tenant credential lookup and usage tracking
  */
 export async function sendWhatsAppMessage(to: string, message: string, businessId?: string): Promise<void> {
   try {
     if (isWebJS) {
       await webjsProvider.sendMessage(to, message);
     } else {
-      await metaProvider.sendMessage(to, message);
+      await metaProvider.sendMessage(to, message, businessId);
     }
     // Track successful send
     if (businessId) {
-      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'text', success: true }).catch(() => {});
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'text', success: true }).catch(() => { });
     }
   } catch (error) {
     // Track failed send
     if (businessId) {
-      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'text', success: false }).catch(() => {});
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'text', success: false }).catch(() => { });
     }
     throw error;
   }
@@ -50,6 +53,10 @@ export async function sendWhatsAppMessage(to: string, message: string, businessI
  * Send reply buttons
  * Meta: Native interactive buttons
  * WebJS: Text-based numbered list
+ * @param to - Recipient phone number
+ * @param body - Button message body
+ * @param buttons - Reply buttons (max 3)
+ * @param businessId - Business ID for multi-tenant credential lookup and usage tracking
  */
 export async function sendReplyButtons(
   to: string,
@@ -61,14 +68,14 @@ export async function sendReplyButtons(
     if (isWebJS) {
       await webjsProvider.sendReplyButtons(to, body, buttons);
     } else {
-      await metaProvider.sendReplyButtons(to, body, buttons);
+      await metaProvider.sendReplyButtons(to, body, buttons, businessId);
     }
     if (businessId) {
-      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'interactive', success: true }).catch(() => {});
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'interactive', success: true }).catch(() => { });
     }
   } catch (error) {
     if (businessId) {
-      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'interactive', success: false }).catch(() => {});
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'interactive', success: false }).catch(() => { });
     }
     throw error;
   }
@@ -78,6 +85,12 @@ export async function sendReplyButtons(
  * Send interactive list
  * Meta: Native interactive list
  * WebJS: Text-based numbered list
+ * @param to - Recipient phone number
+ * @param header - List header text
+ * @param body - List body text
+ * @param buttonText - Button text to open list
+ * @param sections - List sections with rows
+ * @param businessId - Business ID for multi-tenant credential lookup and usage tracking
  */
 export async function sendInteractiveListMessage(
   to: string,
@@ -91,14 +104,14 @@ export async function sendInteractiveListMessage(
     if (isWebJS) {
       await webjsProvider.sendInteractiveList(to, header, body, buttonText, sections);
     } else {
-      await metaProvider.sendInteractiveList(to, header, body, buttonText, sections);
+      await metaProvider.sendInteractiveList(to, header, body, buttonText, sections, businessId);
     }
     if (businessId) {
-      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'interactive', success: true }).catch(() => {});
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'interactive', success: true }).catch(() => { });
     }
   } catch (error) {
     if (businessId) {
-      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'interactive', success: false }).catch(() => {});
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'interactive', success: false }).catch(() => { });
     }
     throw error;
   }
@@ -108,20 +121,47 @@ export async function sendInteractiveListMessage(
  * Send location request
  * Meta: Native location request button
  * WebJS: Text with instructions
+ * @param to - Recipient phone number
+ * @param body - Message body explaining why location is needed
+ * @param businessId - Business ID for multi-tenant credential lookup and usage tracking
  */
 export async function sendLocationRequest(to: string, body: string, businessId?: string): Promise<void> {
   try {
     if (isWebJS) {
       await webjsProvider.sendLocationRequest(to, body);
     } else {
-      await metaProvider.sendLocationRequest(to, body);
+      await metaProvider.sendLocationRequest(to, body, businessId);
     }
     if (businessId) {
-      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'location', success: true }).catch(() => {});
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'location', success: true }).catch(() => { });
     }
   } catch (error) {
     if (businessId) {
-      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'location', success: false }).catch(() => {});
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'location', success: false }).catch(() => { });
+    }
+    throw error;
+  }
+}
+
+/**
+ * Send template message
+ * @param to - Recipient phone number
+ * @param template - Template message configuration
+ * @param businessId - Business ID for multi-tenant credential lookup and usage tracking
+ */
+export async function sendTemplate(to: string, template: TemplateMessage, businessId?: string): Promise<void> {
+  try {
+    if (isWebJS) {
+      await webjsProvider.sendTemplate(to, template);
+    } else {
+      await metaProvider.sendTemplate(to, template, businessId);
+    }
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'template', success: true }).catch(() => { });
+    }
+  } catch (error) {
+    if (businessId) {
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'template', success: false }).catch(() => { });
     }
     throw error;
   }
@@ -131,6 +171,11 @@ export async function sendLocationRequest(to: string, body: string, businessId?:
  * Send document (PDF, etc.)
  * Meta: Native document message
  * WebJS: MessageMedia attachment
+ * @param to - Recipient phone number
+ * @param documentUrl - URL to the document
+ * @param filename - Filename to display
+ * @param caption - Optional caption
+ * @param businessId - Business ID for multi-tenant credential lookup and usage tracking
  */
 export async function sendDocument(
   to: string,
@@ -143,14 +188,14 @@ export async function sendDocument(
     if (isWebJS) {
       await webjsProvider.sendDocument(to, documentUrl, filename, caption);
     } else {
-      await metaProvider.sendDocument(to, documentUrl, filename, caption);
+      await metaProvider.sendDocument(to, documentUrl, filename, caption, businessId);
     }
     if (businessId) {
-      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'document', success: true }).catch(() => {});
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'document', success: true }).catch(() => { });
     }
   } catch (error) {
     if (businessId) {
-      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'document', success: false }).catch(() => {});
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'document', success: false }).catch(() => { });
     }
     throw error;
   }
@@ -160,6 +205,10 @@ export async function sendDocument(
  * Send image message
  * Meta: Native image message
  * WebJS: MessageMedia attachment
+ * @param to - Recipient phone number
+ * @param imageUrl - URL to the image
+ * @param caption - Optional caption
+ * @param businessId - Business ID for multi-tenant credential lookup and usage tracking
  */
 export async function sendImage(
   to: string,
@@ -171,14 +220,14 @@ export async function sendImage(
     if (isWebJS) {
       await webjsProvider.sendImage(to, imageUrl, caption);
     } else {
-      await metaProvider.sendImage(to, imageUrl, caption);
+      await metaProvider.sendImage(to, imageUrl, caption, businessId);
     }
     if (businessId) {
-      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'image', success: true }).catch(() => {});
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'image', success: true }).catch(() => { });
     }
   } catch (error) {
     if (businessId) {
-      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'image', success: false }).catch(() => {});
+      trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'image', success: false }).catch(() => { });
     }
     throw error;
   }
@@ -230,26 +279,30 @@ export function getProviderName(): 'meta' | 'webjs' {
 /**
  * Mark a message as read (shows blue checkmarks to sender)
  * Only works with Meta provider
+ * @param messageId - WhatsApp message ID to mark as read
+ * @param businessId - Business ID for multi-tenant credential lookup
  */
-export async function markAsRead(messageId: string): Promise<void> {
+export async function markAsRead(messageId: string, businessId?: string): Promise<void> {
   if (isWebJS) {
     // WebJS handles read receipts automatically
     return;
   }
-  return metaProvider.markAsRead(messageId);
+  return metaProvider.markAsRead(messageId, businessId);
 }
 
 /**
  * Send typing indicator
  * Note: Meta Cloud API does NOT support typing indicators
  * For Meta, this is a no-op. Consider using markAsRead() instead.
+ * @param to - Recipient phone number
+ * @param businessId - Business ID for multi-tenant credential lookup
  */
-export async function sendTypingIndicator(to: string): Promise<void> {
+export async function sendTypingIndicator(to: string, businessId?: string): Promise<void> {
   if (isWebJS) {
     // Would call webjsProvider.sendTypingIndicator if implemented
     return;
   }
-  return metaProvider.sendTypingIndicator(to);
+  return metaProvider.sendTypingIndicator(to, businessId);
 }
 
 /**
@@ -262,8 +315,30 @@ export function trackInboundMessage(businessId: string, messageType: MessageType
     direction: 'inbound',
     messageType,
     success: true,
-  }).catch(() => {});
+  }).catch(() => { });
+}
+
+/**
+ * Get message templates from Meta API
+ * Only works with Meta provider
+ * @param statusFilter - Optional filter by template status
+ * @param businessId - Business ID for multi-tenant credential lookup
+ */
+export async function getMessageTemplates(statusFilter?: 'APPROVED' | 'PENDING' | 'REJECTED', businessId?: string) {
+  if (isWebJS) {
+    throw new Error('Message templates are only available with Meta WhatsApp API');
+  }
+  return metaProvider.getMessageTemplates(statusFilter, businessId);
+}
+
+/**
+ * Parse template parameters
+ * Returns info about required parameters for a template
+ */
+export function parseTemplateParameters(template: import('./types').MetaMessageTemplate) {
+  return metaProvider.parseTemplateParameters(template);
 }
 
 // Re-export types for convenience
 export * from './types';
+export { TemplateMessage, TemplateComponent, TemplateParameter, MetaMessageTemplate, MetaTemplateComponent } from './types';

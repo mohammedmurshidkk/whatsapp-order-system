@@ -4,10 +4,26 @@ import { WHATSAPP_API_VERSION } from '../config/constants';
 import { logger } from '../utils/logger';
 import { promisify } from 'util';
 import { exec } from 'child_process';
+import { getMetaCredentials } from './whatsappConnectionService';
 
 const execAsync = promisify(exec);
 
 const WHATSAPP_API_BASE = `https://graph.facebook.com/${WHATSAPP_API_VERSION}`;
+
+/**
+ * Get WhatsApp credentials for media operations
+ * Falls back to env vars if businessId not provided or no DB config found
+ */
+async function getMediaCredentials(businessId?: string): Promise<{ accessToken: string; phoneNumberId: string } | null> {
+  const credentials = await getMetaCredentials(businessId);
+  if (!credentials) {
+    return null;
+  }
+  return {
+    accessToken: credentials.accessToken,
+    phoneNumberId: credentials.phoneNumberId,
+  };
+}
 
 // Allowed media types and size limits
 export const MEDIA_LIMITS = {
@@ -29,9 +45,21 @@ interface MediaUrlResponse {
 
 /**
  * Get media URL from WhatsApp (URL expires in ~5 minutes)
+ * @param mediaId - WhatsApp media ID
+ * @param accessToken - Optional access token (falls back to business config or env var)
+ * @param businessId - Optional business ID for multi-tenant credential lookup
  */
-export async function getWhatsAppMediaUrl(mediaId: string, accessToken?: string): Promise<MediaUrlResponse> {
-  const token = accessToken || process.env.WHATSAPP_ACCESS_TOKEN;
+export async function getWhatsAppMediaUrl(
+  mediaId: string,
+  accessToken?: string,
+  businessId?: string
+): Promise<MediaUrlResponse> {
+  let token = accessToken;
+
+  if (!token) {
+    const credentials = await getMediaCredentials(businessId);
+    token = credentials?.accessToken;
+  }
 
   if (!token) {
     throw new Error('WhatsApp access token not configured');
@@ -53,16 +81,28 @@ export async function getWhatsAppMediaUrl(mediaId: string, accessToken?: string)
 
 /**
  * Download media from WhatsApp
+ * @param mediaId - WhatsApp media ID
+ * @param accessToken - Optional access token (falls back to business config or env var)
+ * @param businessId - Optional business ID for multi-tenant credential lookup
  */
-export async function downloadWhatsAppMedia(mediaId: string, accessToken?: string): Promise<{ buffer: Buffer; mimeType: string; size: number }> {
-  const token = accessToken || process.env.WHATSAPP_ACCESS_TOKEN;
+export async function downloadWhatsAppMedia(
+  mediaId: string,
+  accessToken?: string,
+  businessId?: string
+): Promise<{ buffer: Buffer; mimeType: string; size: number }> {
+  let token = accessToken;
+
+  if (!token) {
+    const credentials = await getMediaCredentials(businessId);
+    token = credentials?.accessToken;
+  }
 
   if (!token) {
     throw new Error('WhatsApp access token not configured');
   }
 
   // First get the media URL
-  const mediaInfo = await getWhatsAppMediaUrl(mediaId, token);
+  const mediaInfo = await getWhatsAppMediaUrl(mediaId, token, businessId);
 
   // Then download the actual file
   try {
@@ -121,6 +161,10 @@ export async function storeMediaInSupabase(
 
 /**
  * Process incoming WhatsApp media: download and store
+ * @param mediaId - WhatsApp media ID
+ * @param mimeType - MIME type of the media
+ * @param businessId - Business ID (used for storage path and credential lookup)
+ * @param accessToken - Optional access token (falls back to business config)
  * @param includeBuffer - If true, also returns the raw buffer for AI analysis
  */
 export async function processIncomingMedia(
@@ -131,8 +175,8 @@ export async function processIncomingMedia(
   includeBuffer: boolean = false
 ): Promise<{ mediaUrl: string; fileSize: number; buffer?: Buffer } | null> {
   try {
-    // Download from WhatsApp
-    const { buffer, size } = await downloadWhatsAppMedia(mediaId, accessToken);
+    // Download from WhatsApp (use businessId for credential lookup if accessToken not provided)
+    const { buffer, size } = await downloadWhatsAppMedia(mediaId, accessToken, businessId);
 
     // Store in Supabase
     const { publicUrl } = await storeMediaInSupabase(buffer, mimeType, businessId, mediaId);
@@ -152,15 +196,29 @@ export async function processIncomingMedia(
 
 /**
  * Upload media to WhatsApp for sending
+ * @param buffer - Media file buffer
+ * @param mimeType - MIME type of the media
+ * @param phoneNumberId - Optional phone number ID (falls back to business config or env var)
+ * @param accessToken - Optional access token (falls back to business config or env var)
+ * @param businessId - Optional business ID for multi-tenant credential lookup
  */
 export async function uploadMediaToWhatsApp(
   buffer: Buffer,
   mimeType: string,
   phoneNumberId?: string,
-  accessToken?: string
+  accessToken?: string,
+  businessId?: string
 ): Promise<string> {
-  const token = accessToken || process.env.WHATSAPP_ACCESS_TOKEN;
-  const numId = phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID;
+  let token = accessToken;
+  let numId = phoneNumberId;
+
+  if (!token || !numId) {
+    const credentials = await getMediaCredentials(businessId);
+    if (credentials) {
+      token = token || credentials.accessToken;
+      numId = numId || credentials.phoneNumberId;
+    }
+  }
 
   if (!token || !numId) {
     throw new Error('WhatsApp credentials not configured');
@@ -203,11 +261,11 @@ export async function sendWhatsAppImage(
   to: string,
   imageUrl: string,
   caption?: string,
-  phoneNumberId?: string,
-  accessToken?: string
+  businessId?: string
 ): Promise<string | null> {
-  const token = accessToken || process.env.WHATSAPP_ACCESS_TOKEN;
-  const numId = phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const credentials = await getMediaCredentials(businessId);
+  const token = credentials?.accessToken;
+  const numId = credentials?.phoneNumberId;
 
   if (!token || !numId) {
     logger.info(`[WhatsApp Mock] Image to: ${to}, URL: ${imageUrl}, Caption: ${caption}`);
@@ -253,11 +311,11 @@ export async function sendWhatsAppVideo(
   to: string,
   videoUrl: string,
   caption?: string,
-  phoneNumberId?: string,
-  accessToken?: string
+  businessId?: string
 ): Promise<string | null> {
-  const token = accessToken || process.env.WHATSAPP_ACCESS_TOKEN;
-  const numId = phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const credentials = await getMediaCredentials(businessId);
+  const token = credentials?.accessToken;
+  const numId = credentials?.phoneNumberId;
 
   if (!token || !numId) {
     logger.info(`[WhatsApp Mock] Video to: ${to}, URL: ${videoUrl}`);
@@ -344,11 +402,11 @@ async function convertWebmToOgg(inputBuffer: Buffer): Promise<Buffer> {
 export async function sendWhatsAppAudio(
   to: string,
   audioUrl: string,
-  phoneNumberId?: string,
-  accessToken?: string
+  businessId?: string
 ): Promise<string | null> {
-  const token = accessToken || process.env.WHATSAPP_ACCESS_TOKEN;
-  const numId = phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const credentials = await getMediaCredentials(businessId);
+  const token = credentials?.accessToken;
+  const numId = credentials?.phoneNumberId;
 
   if (!token || !numId) {
     logger.info(`[WhatsApp Mock] Audio to: ${to}, URL: ${audioUrl}`);
@@ -417,11 +475,11 @@ export async function sendWhatsAppDocument(
   documentUrl: string,
   filename: string,
   caption?: string,
-  phoneNumberId?: string,
-  accessToken?: string
+  businessId?: string
 ): Promise<string | null> {
-  const token = accessToken || process.env.WHATSAPP_ACCESS_TOKEN;
-  const numId = phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const credentials = await getMediaCredentials(businessId);
+  const token = credentials?.accessToken;
+  const numId = credentials?.phoneNumberId;
 
   if (!token || !numId) {
     logger.info(`[WhatsApp Mock] Document to: ${to}, URL: ${documentUrl}, Filename: ${filename}`);
@@ -467,11 +525,11 @@ export async function sendWhatsAppDocument(
 export async function sendWhatsAppText(
   to: string,
   text: string,
-  phoneNumberId?: string,
-  accessToken?: string
+  businessId?: string
 ): Promise<string | null> {
-  const token = accessToken || process.env.WHATSAPP_ACCESS_TOKEN;
-  const numId = phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const credentials = await getMediaCredentials(businessId);
+  const token = credentials?.accessToken;
+  const numId = credentials?.phoneNumberId;
 
   if (!token || !numId) {
     logger.info(`[WhatsApp Mock] Text to: ${to}, Message: ${text}`);
@@ -511,11 +569,11 @@ export async function sendWhatsAppLocation(
   longitude: number,
   name?: string,
   address?: string,
-  phoneNumberId?: string,
-  accessToken?: string
+  businessId?: string
 ): Promise<string | null> {
-  const token = accessToken || process.env.WHATSAPP_ACCESS_TOKEN;
-  const numId = phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const credentials = await getMediaCredentials(businessId);
+  const token = credentials?.accessToken;
+  const numId = credentials?.phoneNumberId;
 
   if (!token || !numId) {
     logger.info(`[WhatsApp Mock] Location to: ${to}, Lat: ${latitude}, Lng: ${longitude}`);
@@ -674,4 +732,153 @@ export function getMediaTypeFromMimeType(mimeType: string): MediaType {
   if (mimeType.startsWith('video/')) return 'video';
   if (mimeType.startsWith('audio/')) return 'audio';
   return 'document';
+}
+
+/**
+ * Campaign Image Upload Functions
+ * For marketing campaign posters/images
+ */
+
+const CAMPAIGN_STORAGE_BUCKET = 'campaign-media';
+
+export interface UploadCampaignImageResult {
+  success: boolean;
+  publicUrl?: string;
+  filePath?: string;
+  error?: string;
+}
+
+/**
+ * Upload campaign poster/image to Supabase Storage
+ * @param file - File buffer
+ * @param filename - Original filename
+ * @param businessId - Business ID for organizing files
+ * @returns Public URL and file path
+ */
+export async function uploadCampaignImage(
+  file: Buffer,
+  filename: string,
+  businessId: string
+): Promise<UploadCampaignImageResult> {
+  try {
+    // Generate unique filename to avoid conflicts
+    const fileExtension = filename.split('.').pop()?.toLowerCase();
+    const crypto = await import('crypto');
+    const uniqueFilename = `${businessId}/${Date.now()}-${crypto.randomBytes(8).toString('hex')}.${fileExtension}`;
+
+    // Upload to Supabase Storage (campaign-media bucket)
+    const { data, error } = await supabase.storage
+      .from(CAMPAIGN_STORAGE_BUCKET)
+      .upload(uniqueFilename, file, {
+        contentType: getCampaignImageContentType(fileExtension),
+        cacheControl: '3600',
+        upsert: false
+      });
+
+    if (error) {
+      logger.error('Failed to upload campaign image to Supabase Storage:', error);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+
+    // Get public URL
+    const { data: urlData } = supabase.storage
+      .from(CAMPAIGN_STORAGE_BUCKET)
+      .getPublicUrl(uniqueFilename);
+
+    logger.info(`Campaign image uploaded successfully: ${urlData.publicUrl}`);
+
+    return {
+      success: true,
+      publicUrl: urlData.publicUrl,
+      filePath: uniqueFilename
+    };
+
+  } catch (error: any) {
+    logger.error('Error uploading campaign image:', error);
+    return {
+      success: false,
+      error: error.message || 'Unknown upload error'
+    };
+  }
+}
+
+/**
+ * Delete campaign image from Supabase Storage
+ * @param filePath - Path returned from uploadCampaignImage
+ */
+export async function deleteCampaignImage(filePath: string): Promise<boolean> {
+  try {
+    const { error } = await supabase.storage
+      .from(CAMPAIGN_STORAGE_BUCKET)
+      .remove([filePath]);
+
+    if (error) {
+      logger.error('Failed to delete campaign image from storage:', error);
+      return false;
+    }
+
+    logger.info(`Campaign image deleted successfully: ${filePath}`);
+    return true;
+
+  } catch (error) {
+    logger.error('Error deleting campaign image:', error);
+    return false;
+  }
+}
+
+/**
+ * Get content type for campaign images
+ */
+function getCampaignImageContentType(extension: string | undefined): string {
+  const ext = extension?.toLowerCase();
+
+  switch (ext) {
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg';
+    case 'png':
+      return 'image/png';
+    case 'gif':
+      return 'image/gif';
+    case 'webp':
+      return 'image/webp';
+    default:
+      return 'image/jpeg';
+  }
+}
+
+/**
+ * Validate campaign image file
+ * @param file - File buffer
+ * @param filename - Original filename
+ * @returns Validation result
+ */
+export function validateCampaignImage(
+  file: Buffer,
+  filename: string
+): { valid: boolean; error?: string } {
+  // Check file size (max 5MB for campaign images)
+  const maxSize = 5 * 1024 * 1024; // 5MB
+  if (file.length > maxSize) {
+    return {
+      valid: false,
+      error: 'File size exceeds 5MB limit'
+    };
+  }
+
+  // Check file extension
+  const allowedExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
+  const extension = filename.split('.').pop()?.toLowerCase();
+
+  if (!extension || !allowedExtensions.includes(extension)) {
+    return {
+      valid: false,
+      error: 'Invalid file type. Allowed: JPG, PNG, GIF, WEBP'
+    };
+  }
+
+  return { valid: true };
 }

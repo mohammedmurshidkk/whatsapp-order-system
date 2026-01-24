@@ -285,7 +285,7 @@ export async function sendReply(req: AuthRequest, res: Response): Promise<void> 
     // Send message based on type
     switch (type) {
       case 'text':
-        whatsappMessageId = await sendWhatsAppText(customerPhone, content);
+        whatsappMessageId = await sendWhatsAppText(customerPhone, content, businessId);
         break;
 
       case 'image':
@@ -319,20 +319,21 @@ export async function sendReply(req: AuthRequest, res: Response): Promise<void> 
 
         if (type === 'image') {
           messageContent = caption || '[Image]';
-          whatsappMessageId = await sendWhatsAppImage(customerPhone, mediaUrl, caption);
+          whatsappMessageId = await sendWhatsAppImage(customerPhone, mediaUrl, caption, businessId);
         } else if (type === 'video') {
           messageContent = caption || '[Video]';
-          whatsappMessageId = await sendWhatsAppVideo(customerPhone, mediaUrl, caption);
+          whatsappMessageId = await sendWhatsAppVideo(customerPhone, mediaUrl, caption, businessId);
         } else if (type === 'audio') {
           messageContent = '[Voice Message]';
-          whatsappMessageId = await sendWhatsAppAudio(customerPhone, mediaUrl);
+          whatsappMessageId = await sendWhatsAppAudio(customerPhone, mediaUrl, businessId);
         } else if (type === 'document') {
           messageContent = mediaFilename || '[Document]';
           whatsappMessageId = await sendWhatsAppDocument(
             customerPhone,
             mediaUrl,
             mediaFilename || 'document',
-            caption
+            caption,
+            businessId
           );
         }
         break;
@@ -349,7 +350,8 @@ export async function sendReply(req: AuthRequest, res: Response): Promise<void> 
           parseFloat(latitude),
           parseFloat(longitude),
           location_name,
-          location_address
+          location_address,
+          businessId
         );
         break;
 
