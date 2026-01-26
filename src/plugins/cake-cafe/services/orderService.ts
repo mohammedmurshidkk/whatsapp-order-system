@@ -26,8 +26,8 @@ async function generateOrderNumber(businessId: string): Promise<string> {
 
   // Get today's date in YYYY-MM-DD format
   const today = new Date().toISOString().split('T')[0];
-  const startOfDay = `${today} T00:00:00.000Z`;
-  const endOfDay = `${today} T23: 59: 59.999Z`;
+  const startOfDay = `${today}T00:00:00.000Z`;
+  const endOfDay = `${today}T23:59:59.999Z`;
 
   // Count orders for this business today
   const { count, error } = await supabase
@@ -40,12 +40,12 @@ async function generateOrderNumber(businessId: string): Promise<string> {
   if (error) {
     logger.error('Failed to count daily orders', error);
     // Fallback: use timestamp-based number
-    return `${prefix} -${Date.now().toString().slice(-6)} `;
+    return `${prefix}-${Date.now().toString().slice(-6)}`;
   }
 
   const nextNumber = (count || 0) + 1;
   const dateStr = today.slice(2).replace(/-/g, ''); // "2025-12-16" → "251216"
-  const orderNumber = `${prefix} -${dateStr} -${nextNumber} `;
+  const orderNumber = `${prefix}-${dateStr}-${nextNumber}`;
 
   logger.info(`Generated order number: ${orderNumber} for business ${businessId}`);
   return orderNumber;
@@ -408,12 +408,16 @@ export async function generateOrderSummary(
   // Add fulfillment info if available
   if (session.fulfillment_type) {
     summary += '\n';
-    if (session.fulfillment_type === 'delivery' && (session.delivery_address || session.delivery_latitude)) {
-      // Show address if available, otherwise show coordinates (frontend can reverse geocode)
+    if (session.fulfillment_type === 'delivery' && (session.delivery_address || session.delivery_geocoded_address || session.delivery_latitude)) {
+      // Priority: 1. Manual address, 2. Geocoded address, 3. Google Maps link (never show raw lat/long)
       if (session.delivery_address) {
         summary += `${t('orderSummary.deliveryTo', lang, { address: session.delivery_address })} \n`;
+      } else if (session.delivery_geocoded_address) {
+        summary += `${t('orderSummary.deliveryTo', lang, { address: session.delivery_geocoded_address })} \n`;
       } else if (session.delivery_latitude && session.delivery_longitude) {
-        summary += `${t('orderSummary.deliveryLocation', lang, { lat: session.delivery_latitude, lng: session.delivery_longitude })} \n`;
+        // Show Google Maps link instead of raw coordinates
+        const mapsLink = `https://maps.google.com/?q=${session.delivery_latitude},${session.delivery_longitude}`;
+        summary += `${t('orderSummary.deliveryLocationLink', lang, { link: mapsLink })} \n`;
       }
       if (session.delivery_time) {
         // Format time using timezone-aware formatter
@@ -665,7 +669,7 @@ Customer ID: ${order.customer_id.substring(0, 8)}
 Status: ${order.status}
 
 ${order.fulfillment_type === 'delivery' ? '🚚 DELIVERY' : order.fulfillment_type === 'takeaway' ? '📍 TAKEAWAY' : ''}
-${order.delivery_address ? `Address: ${order.delivery_address}` : (order.delivery_latitude && order.delivery_longitude ? `Location: (Lat: ${order.delivery_latitude}, Long: ${order.delivery_longitude})` : '')}
+${order.delivery_address ? `Address: ${order.delivery_address}` : (order.delivery_geocoded_address ? `Address: ${order.delivery_geocoded_address}` : (order.delivery_latitude && order.delivery_longitude ? `Location: https://maps.google.com/?q=${order.delivery_latitude},${order.delivery_longitude}` : ''))}
 ${order.pickup_outlet_id ? `Pickup${outletInfo}` : ''}
 ${order.delivery_time ? `Time: ${formatDeliveryTime(order.delivery_time, timezone)}` : ''}
 ${order.pickup_time ? `Pickup Time: ${formatDeliveryTime(order.pickup_time, timezone)}` : ''}

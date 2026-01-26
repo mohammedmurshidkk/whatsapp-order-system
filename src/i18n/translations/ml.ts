@@ -77,6 +77,7 @@ export const ml = {
     grandTotal: "💰 *ആകെ തുക: ₹{{amount}}*",
     deliveryTo: "🚚 ഡെലിവറി: {{address}}",
     deliveryLocation: "🚚 ഡെലിവറി ലൊക്കേഷൻ (Lat: {{lat}}, Long: {{lng}})",
+    deliveryLocationLink: "🚚 ഡെലിവറി ലൊക്കേഷൻ: {{link}}",
     pickupFrom: "📍 പിക്കപ്പ് ലൊക്കേഷൻ",
     time: "⏰ സമയം: {{time}}",
     reviewPrompt: "ഓർഡർ പരിശോധിക്കുക. കൺഫേം ചെയ്യാൻ *YES* എന്ന് റിപ്ലൈ ചെയ്യുക.",

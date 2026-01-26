@@ -3,6 +3,172 @@ import { supabase } from '@/config/database';
 import { FulfillmentType, DeliveryFeeResult } from '@/types';
 import { logger } from '@/utils/logger';
 import { calculateDeliveryDistance } from '@/utils/distanceUtils';
+import axios from 'axios';
+
+/**
+ * AI-based date/time parsing using Gemini
+ * Handles natural language date/time in English, Malayalam, and Manglish
+ *
+ * @param userInput - User's date/time input (e.g., "27 11am", "nale 5pm", "chovva", "mattannale")
+ * @param timezone - Business timezone
+ * @returns ISO UTC string if successful, null if parsing fails
+ */
+export async function parseDeliveryDateTimeWithAI(
+  userInput: string,
+  timezone: string = 'Asia/Kolkata'
+): Promise<string | null> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    logger.warn('GEMINI_API_KEY not set, falling back to regex parser');
+    return null;
+  }
+
+  // Get current date/time in business timezone
+  const nowInTz = getNowInTimezone(timezone);
+  const currentDate = `${nowInTz.getFullYear()}-${String(nowInTz.getMonth() + 1).padStart(2, '0')}-${String(nowInTz.getDate()).padStart(2, '0')}`;
+  const currentTime = `${String(nowInTz.getHours()).padStart(2, '0')}:${String(nowInTz.getMinutes()).padStart(2, '0')}`;
+  const currentDayOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][nowInTz.getDay()];
+
+  const prompt = `You are a date/time parser for an ordering system in India. Extract the delivery/pickup date and time from the user's input.
+
+CURRENT CONTEXT:
+- Today's date: ${currentDate} (${currentDayOfWeek})
+- Current time: ${currentTime}
+- Timezone: ${timezone}
+
+USER INPUT: "${userInput}"
+
+RULES:
+1. Parse dates in any format: "27" (day only = current month), "27/01", "27/01/26", "27/1/2026"
+2. For day-only input like "27", assume current month and year. If that day has passed, use next month.
+3. Parse Malayalam/Manglish words:
+   - Today: inn, innu, ഇന്ന്
+   - Tomorrow: nale, നാളെ, kal
+   - Day after tomorrow: mattannale, മറ്റന്നാൾ
+   - Weekdays: chovva/chowaa/ചൊവ്വ (Tuesday), thingal/തിങ്കൾ (Monday), budhan/ബുധൻ (Wednesday), vyazham/വ്യാഴം (Thursday), velli/വെള്ളി (Friday), shani/ശനി (Saturday), njayar/ഞായർ (Sunday)
+4. Parse time: "11am", "5pm", "10:30", "evening", "morning", "ravile" (morning), "vaikunneram" (evening)
+5. If no time specified, return null for time (don't guess)
+6. If date is ambiguous or cannot be determined, return null
+7. IMPORTANT: The year should be based on context. If user says "27" and today is Jan 27 2026, it means Jan 27 2026, NOT 2027.
+8. For "next [weekday]", calculate the actual date of next occurrence
+
+RESPOND WITH JSON ONLY (no markdown, no explanation):
+{"date": "YYYY-MM-DD", "time": "HH:MM", "confidence": 0.0-1.0}
+
+If date cannot be determined: {"date": null, "time": null, "confidence": 0}
+If only time is given (no date context): {"date": null, "time": "HH:MM", "confidence": 0.8}
+If only date is given (no time): {"date": "YYYY-MM-DD", "time": null, "confidence": 0.8}`;
+
+  try {
+    const { GEMINI_MODEL_NAME } = await import('../../../config/constants');
+
+    const response = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL_NAME}:generateContent?key=${apiKey}`,
+      {
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.1, // Low temperature for consistent parsing
+          maxOutputTokens: 150,
+        },
+      },
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 10000, // 10 second timeout for quick response
+      }
+    );
+
+    const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) {
+      logger.warn('Empty response from Gemini for date parsing');
+      return null;
+    }
+
+    // Parse JSON response
+    let jsonStr = text.trim();
+    jsonStr = jsonStr.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '').trim();
+
+    const firstBrace = jsonStr.indexOf('{');
+    const lastBrace = jsonStr.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      jsonStr = jsonStr.substring(firstBrace, lastBrace + 1);
+    }
+
+    const parsed = JSON.parse(jsonStr);
+    logger.info(`AI date parsing result: ${JSON.stringify(parsed)} for input "${userInput}"`);
+
+    if (!parsed.date && !parsed.time) {
+      return null;
+    }
+
+    // If we have a date but no time, return null (caller should ask for time)
+    if (parsed.date && !parsed.time) {
+      logger.info(`AI parsed date ${parsed.date} but no time - returning null to ask for time`);
+      return null;
+    }
+
+    // If we have time but no date, assume today (or tomorrow if time passed)
+    let finalDate = parsed.date;
+    if (!finalDate && parsed.time) {
+      const [hours, minutes] = parsed.time.split(':').map(Number);
+      const isPast = hours < nowInTz.getHours() || (hours === nowInTz.getHours() && minutes <= nowInTz.getMinutes());
+
+      if (isPast) {
+        // Time has passed today, use tomorrow
+        const tomorrow = new Date(nowInTz);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        finalDate = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`;
+      } else {
+        finalDate = currentDate;
+      }
+    }
+
+    // Convert to UTC
+    if (finalDate && parsed.time) {
+      const [year, month, day] = finalDate.split('-').map(Number);
+      const [hours, minutes] = parsed.time.split(':').map(Number);
+
+      return localToUTC(year, month - 1, day, hours, minutes, timezone);
+    }
+
+    return null;
+  } catch (error: any) {
+    logger.error(`AI date parsing failed for "${userInput}": ${error.message}`);
+    return null;
+  }
+}
+
+/**
+ * Smart date/time parser - tries AI first, falls back to regex
+ * This is the recommended function to use for parsing delivery/pickup times
+ *
+ * @param timeText - User's date/time input
+ * @param timezone - Business timezone
+ * @returns ISO UTC string if successful, null if parsing fails
+ */
+export async function parseDeliveryTimeSmart(
+  timeText: string,
+  timezone: string = 'Asia/Kolkata'
+): Promise<string | null> {
+  // Skip AI for simple button-based inputs that regex handles well
+  const simplePatterns = /^(today|tomorrow|morning|afternoon|evening|in \d+ hour)/i;
+  if (simplePatterns.test(timeText.trim())) {
+    logger.info(`Using regex parser for simple input: "${timeText}"`);
+    return parseDeliveryTime(timeText, timezone);
+  }
+
+  // Try AI parser first for complex/multilingual inputs
+  logger.info(`Trying AI parser for: "${timeText}"`);
+  const aiResult = await parseDeliveryDateTimeWithAI(timeText, timezone);
+
+  if (aiResult) {
+    logger.info(`AI parser succeeded: "${timeText}" -> ${aiResult}`);
+    return aiResult;
+  }
+
+  // Fall back to regex parser
+  logger.info(`AI parser returned null, falling back to regex for: "${timeText}"`);
+  return parseDeliveryTime(timeText, timezone);
+}
 
 /**
  * Update session with fulfillment type
@@ -305,9 +471,52 @@ export function parseDeliveryTime(timeText: string, timezone: string = 'Asia/Kol
   const todayDay = nowInTz.getDate();
   const currentHour = nowInTz.getHours();
 
-  // Malayalam word mappings (including common typos)
-  const todayWords = ['today', 'innu', 'ഇന്ന്', 'இன்று'];
+  // Malayalam word mappings (including common typos and variations)
+  const todayWords = ['today', 'inn', 'innu', 'ഇന്ന്', 'இன்று'];
   const tomorrowWords = ['tomorrow', 'tomorow', 'tommorow', 'tmrw', 'tmr', 'nale', 'നാളെ', 'நாளை', 'kal'];
+
+  // ============================================
+  // Handle DD/MM format without year (e.g., "25/1", "14-01", "25/1 5pm")
+  // Defaults to current year, or next year if date has passed
+  // ============================================
+  const dateNoYearMatch = normalizedTime.match(/^(\d{1,2})[\/\-](\d{1,2})(?:\s|$)/);
+  if (dateNoYearMatch && !normalizedTime.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/)) {
+    const day = parseInt(dateNoYearMatch[1], 10);
+    const month = parseInt(dateNoYearMatch[2], 10) - 1; // JS months are 0-indexed
+    let year = todayYear;
+
+    // Check if this date has already passed this year
+    const targetDate = new Date(year, month, day);
+    const todayDate = new Date(todayYear, todayMonth, todayDay);
+    if (targetDate < todayDate) {
+      // Date has passed, use next year
+      year = todayYear + 1;
+      logger.info(`Date ${day}/${month + 1} has passed, using next year: ${year}`);
+    }
+
+    // Try to extract time from the same input (e.g., "25/1 5pm")
+    const timePartMatch = normalizedTime.replace(dateNoYearMatch[0], '').trim();
+    const timeMatch = timePartMatch.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+
+    let hours = 12; // Default noon if no time specified
+    let minutes = 0;
+
+    if (timeMatch) {
+      hours = parseInt(timeMatch[1], 10);
+      minutes = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
+
+      if (timeMatch[3]?.toLowerCase() === 'pm' && hours !== 12) {
+        hours += 12;
+      } else if (timeMatch[3]?.toLowerCase() === 'am' && hours === 12) {
+        hours = 0;
+      } else if (!timeMatch[3] && hours >= 1 && hours <= 6) {
+        hours += 12; // Assume PM for business hours
+      }
+    }
+
+    logger.info(`Parsed DD/MM date (no year): ${day}/${month + 1}/${year} ${hours}:${minutes.toString().padStart(2, '0')}`);
+    return localToUTC(year, month, day, hours, minutes, tz);
+  }
 
   // ============================================
   // Handle DD/MM/YY or DD/MM/YYYY date formats (e.g., "14/01/26", "14-01-2026", "14/01/26 11am")
@@ -355,6 +564,86 @@ export function parseDeliveryTime(timeText: string, timezone: string = 'Asia/Kol
     return localToUTC(year, month, day, hours, minutes, tz);
   }
 
+  // ============================================
+  // Handle weekday names (e.g., "next friday", "monday 5pm", "friday evening")
+  // ============================================
+  const weekdayMap: Record<string, number> = {
+    'sunday': 0, 'sun': 0,
+    'monday': 1, 'mon': 1,
+    'tuesday': 2, 'tue': 2, 'tues': 2,
+    'wednesday': 3, 'wed': 3,
+    'thursday': 4, 'thu': 4, 'thur': 4, 'thurs': 4,
+    'friday': 5, 'fri': 5,
+    'saturday': 6, 'sat': 6,
+    // Malayalam weekdays
+    'ഞായർ': 0, 'ഞായറാഴ്ച': 0,
+    'തിങ്കൾ': 1, 'തിങ്കളാഴ്ച': 1,
+    'ചൊവ്വ': 2, 'ചൊവ്വാഴ്ച': 2,
+    'ബുധൻ': 3, 'ബുധനാഴ്ച': 3,
+    'വ്യാഴം': 4, 'വ്യാഴാഴ്ച': 4,
+    'വെള്ളി': 5, 'വെള്ളിയാഴ്ച': 5,
+    'ശനി': 6, 'ശനിയാഴ്ച': 6,
+  };
+
+  // Check for weekday pattern
+  const weekdayRegex = /(?:next\s+)?(sunday|sun|monday|mon|tuesday|tue|tues|wednesday|wed|thursday|thu|thur|thurs|friday|fri|saturday|sat|ഞായർ|ഞായറാഴ്ച|തിങ്കൾ|തിങ്കളാഴ്ച|ചൊവ്വ|ചൊവ്വാഴ്ച|ബുധൻ|ബുധനാഴ്ച|വ്യാഴം|വ്യാഴാഴ്ച|വെള്ളി|വെള്ളിയാഴ്ച|ശനി|ശനിയാഴ്ച)/i;
+  const weekdayMatch = normalizedTime.match(weekdayRegex);
+
+  if (weekdayMatch) {
+    const isNextWeek = normalizedTime.includes('next');
+    const weekdayName = weekdayMatch[1].toLowerCase();
+    const targetDayOfWeek = weekdayMap[weekdayName];
+
+    if (targetDayOfWeek !== undefined) {
+      const currentDayOfWeek = nowInTz.getDay();
+      let daysToAdd = targetDayOfWeek - currentDayOfWeek;
+
+      // If the day is today or earlier in the week, go to next week
+      if (daysToAdd <= 0 || isNextWeek) {
+        daysToAdd += 7;
+      }
+
+      // If explicitly "next week", ensure we're going to next week even if day is later this week
+      if (isNextWeek && daysToAdd < 7) {
+        daysToAdd += 7;
+      }
+
+      const targetDate = new Date(todayYear, todayMonth, todayDay + daysToAdd);
+
+      // Extract time if provided (e.g., "friday 5pm")
+      // Remove weekday part and check for time
+      const timePartForWeekday = normalizedTime.replace(weekdayMatch[0], '').replace(/next\s*/i, '').trim();
+      let hours = 12; // Default noon
+      let minutes = 0;
+
+      const timeMatchWeekday = timePartForWeekday.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+      if (timeMatchWeekday) {
+        hours = parseInt(timeMatchWeekday[1], 10);
+        minutes = timeMatchWeekday[2] ? parseInt(timeMatchWeekday[2], 10) : 0;
+
+        if (timeMatchWeekday[3]?.toLowerCase() === 'pm' && hours !== 12) {
+          hours += 12;
+        } else if (timeMatchWeekday[3]?.toLowerCase() === 'am' && hours === 12) {
+          hours = 0;
+        } else if (!timeMatchWeekday[3] && hours >= 1 && hours <= 6) {
+          hours += 12; // Assume PM for business hours
+        }
+      } else {
+        // Check for time words
+        if (/morning|ravile|രാവിലെ/i.test(timePartForWeekday)) {
+          hours = 10;
+        } else if (/afternoon|uchakku|ഉച്ചയ്ക്ക്/i.test(timePartForWeekday)) {
+          hours = 14;
+        } else if (/evening|vaikunneram|വൈകുന്നേരം/i.test(timePartForWeekday)) {
+          hours = 18;
+        }
+      }
+
+      logger.info(`Parsed weekday: ${weekdayName} (${isNextWeek ? 'next week' : 'this week'}) -> ${targetDate.getDate()}/${targetDate.getMonth() + 1}/${targetDate.getFullYear()} ${hours}:${minutes.toString().padStart(2, '0')}`);
+      return localToUTC(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), hours, minutes, tz);
+    }
+  }
+
   // Helper to extract hours and minutes from time text
   function extractTime(text: string): { hours: number; minutes: number } | null {
     const timeMatch = text.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
@@ -381,7 +670,23 @@ export function parseDeliveryTime(timeText: string, timezone: string = 'Asia/Kol
   if (isTomorrow) {
     const tomorrowDate = new Date(todayYear, todayMonth, todayDay + 1);
     const time = extractTime(normalizedTime);
-    const hours = time?.hours ?? 12;  // Default noon
+
+    // Check for time words if no explicit time
+    let hours: number | null = time?.hours ?? null;
+    if (hours === null) {
+      // Check for time-of-day words
+      if (/morning|ravile|രാവിലെ/i.test(normalizedTime)) {
+        hours = 10;
+      } else if (/afternoon|uchakku|ഉച്ചയ്ക്ക്/i.test(normalizedTime)) {
+        hours = 14;
+      } else if (/evening|vaikunneram|വൈകുന്നേരം/i.test(normalizedTime)) {
+        hours = 18;
+      } else {
+        // No explicit time given with "tomorrow" - return null to ask for time
+        logger.info(`Tomorrow detected but no explicit time - returning null to ask for time`);
+        return null;
+      }
+    }
     const minutes = time?.minutes ?? 0;
 
     return localToUTC(tomorrowDate.getFullYear(), tomorrowDate.getMonth(), tomorrowDate.getDate(), hours, minutes, tz);
@@ -391,7 +696,24 @@ export function parseDeliveryTime(timeText: string, timezone: string = 'Asia/Kol
   const isToday = todayWords.some(word => normalizedTime.includes(word));
   if (isToday) {
     const time = extractTime(normalizedTime);
-    let hours = time?.hours ?? (currentHour + 2);
+
+    // Check for time words if no explicit time
+    let hours: number | null = time?.hours ?? null;
+    if (hours === null) {
+      // Check for time-of-day words
+      if (/morning|ravile|രാവിലെ/i.test(normalizedTime)) {
+        hours = 10;
+      } else if (/afternoon|uchakku|ഉച്ചയ്ക്ക്/i.test(normalizedTime)) {
+        hours = 14;
+      } else if (/evening|vaikunneram|വൈകുന്നേരം/i.test(normalizedTime)) {
+        hours = 18;
+      } else {
+        // No explicit time given with "today" - return null to ask for time
+        // Don't guess with currentHour+2 as it leads to wrong times
+        logger.info(`Today detected but no explicit time - returning null to ask for time`);
+        return null;
+      }
+    }
     const minutes = time?.minutes ?? 0;
 
     // If time has passed today, return null

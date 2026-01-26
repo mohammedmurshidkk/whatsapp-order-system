@@ -13,6 +13,7 @@ import { logger } from '../../utils/logger';
 import { WhatsAppProvider, ReplyButton, ListSection, ProviderStatus, TemplateMessage, MetaMessageTemplate, MetaTemplateResponse } from './types';
 import { logMessageSend, logMessageError, mockMessageSend } from './common';
 import { getMetaCredentials, MetaCredentials } from '../whatsappConnectionService';
+import { VideoDownloadContentParams } from 'openai/resources/videos';
 
 const WHATSAPP_API_BASE = `https://graph.facebook.com/${WHATSAPP_API_VERSION}`;
 
@@ -57,19 +58,20 @@ async function isConfigured(businessId?: string): Promise<boolean> {
  * @param to - Recipient phone number
  * @param message - Text message to send
  * @param businessId - Optional business ID for multi-tenant credential lookup
+ * @returns WhatsApp message ID if successful, null otherwise
  */
-export async function sendMessage(to: string, message: string, businessId?: string): Promise<void> {
+export async function sendMessage(to: string, message: string, businessId?: string): Promise<string | null | VideoDownloadContentParams> {
   const config = await getConfig(businessId);
 
   if (!config) {
     mockMessageSend(to, message);
-    return;
+    return null;
   }
 
   const { phoneNumberId, accessToken } = config;
 
   try {
-    await axios.post(
+    const response = await axios.post(
       `${WHATSAPP_API_BASE}/${phoneNumberId}/messages`,
       {
         messaging_product: 'whatsapp',
@@ -88,6 +90,10 @@ export async function sendMessage(to: string, message: string, businessId?: stri
     );
 
     logMessageSend('Meta', to, message);
+
+    // Extract WhatsApp message ID from response
+    const messageId = response.data?.messages?.[0]?.id || null;
+    return messageId;
   } catch (error) {
     if (axios.isAxiosError(error)) {
       logger.error('Meta WhatsApp API error', {
@@ -97,6 +103,7 @@ export async function sendMessage(to: string, message: string, businessId?: stri
     } else {
       logMessageError('Meta', to, error);
     }
+    return null;
   }
 }
 

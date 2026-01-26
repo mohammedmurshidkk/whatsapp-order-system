@@ -3,6 +3,8 @@
  * Used by both Meta API and whatsapp-web.js implementations
  */
 
+import { VideoDownloadContentParams } from "openai/resources/index";
+
 // Button for interactive messages
 export interface ReplyButton {
   id: string;
@@ -89,7 +91,7 @@ export interface IncomingMessage {
 // Provider interface - what each provider must implement
 export interface WhatsAppProvider {
   // Send a text message
-  sendMessage(to: string, message: string): Promise<void>;
+  sendMessage(to: string, message: string): Promise<void | string | null | VideoDownloadContentParams>;
 
   // Send reply buttons (will be text fallback for webjs)
   sendReplyButtons(to: string, body: string, buttons: ReplyButton[]): Promise<void>;

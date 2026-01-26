@@ -86,7 +86,7 @@ export interface PluginIntent {
  * Messaging functions passed to intent handlers
  */
 export interface MessagingHelpers {
-  sendWhatsAppMessage: (to: string, message: string) => Promise<void>;
+  sendWhatsAppMessage: (to: string, message: string) => Promise<string | null | void>;
   sendButtons: (to: string, body: string, buttons: Array<{ id: string; title: string }>) => Promise<void>;
   sendList: (to: string, header: string, body: string, buttonText: string, sections: any[]) => Promise<void>;
   sendLocation: (to: string, body: string) => Promise<void>;

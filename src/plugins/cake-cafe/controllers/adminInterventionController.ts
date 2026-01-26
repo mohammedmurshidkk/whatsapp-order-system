@@ -6,7 +6,7 @@ import { getSessionWithItems, resumeSession } from '../../../services/sessionSer
 import { updateSessionPickupInfo, updateSessionDeliveryInfo } from '../services/fulfillmentService';
 import { getCustomerById } from '../../../services/customerService';
 import { sendWhatsAppMessage } from '../../../services/whatsapp';
-import { saveOutgoingMessage } from '../../../services/messageService';
+import { saveMessage } from '../../../services/messageService';
 import { createSentQuoteFromIntervention, confirmQuoteTime } from '../services/cakeQuoteService';
 import { updateSessionCustomCakeContext } from '../../../services/sessionService';
 import { logger } from '../../../utils/logger';
@@ -115,10 +115,12 @@ export const resolveIntervention = async (req: AuthRequest, res: Response) => {
                             replyMessage += message || 'Your request could not be processed at this time.';
                         }
 
-                        await sendWhatsAppMessage(customer.phone, replyMessage);
+                        const whatsappMessageId = await sendWhatsAppMessage(customer.phone, replyMessage, updated.business_id);
 
-                        // Save message to database so it appears in admin chat
-                        await saveOutgoingMessage(updated.session_id, replyMessage);
+                        // Save message as 'outbound' (manual admin message) with WhatsApp message ID for delivery tracking
+                        await saveMessage(updated.session_id, replyMessage, 'outbound', {
+                            whatsappMessageId: whatsappMessageId,
+                        });
 
                         // If custom_cake intervention with price, create a sent quote
                         // This allows customer to accept and add to cart

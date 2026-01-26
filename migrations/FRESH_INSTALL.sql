@@ -167,11 +167,15 @@ CREATE TABLE business_outlets (
   opening_buffer_minutes INTEGER DEFAULT 0,
   closing_buffer_minutes INTEGER DEFAULT 0,
   opening_days TEXT[],
+  printer_ip VARCHAR(45) DEFAULT NULL,
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_outlets_business ON business_outlets(business_id) WHERE is_active = true;
+
+-- Add comment for documentation
+COMMENT ON COLUMN business_outlets.printer_ip IS 'IP address of thermal printer for this outlet (e.g., 192.168.18.195)';
 
 -- ============================================
 -- CUSTOMERS TABLE

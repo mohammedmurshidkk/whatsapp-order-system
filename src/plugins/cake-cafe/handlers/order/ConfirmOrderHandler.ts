@@ -57,9 +57,34 @@ export const confirmOrderHandler: IntentHandlerFn = async (ctx, aiResponse) => {
     (latestSessionData.fulfillment_type === 'takeaway' && latestSessionData.pickup_outlet_id && latestSessionData.pickup_time)
   );
 
+  // IMPORTANT: Check if user's message contains an EXPLICIT time (like "6 pm", "5:30pm")
+  // If so, update the delivery_time even if fulfillment was "already complete"
+  // This fixes the bug where auto-set time (from "today" without explicit time) can't be overridden
+  const explicitTimePattern = /\d{1,2}(?::\d{2})?\s*(am|pm)/i;
+  const userProvidedExplicitTime = explicitTimePattern.test(ctx.messageText);
+
+  if (userProvidedExplicitTime && fulfillmentAlreadyComplete && latestSessionData?.fulfillment_type === 'delivery') {
+    // User provided explicit time like "6 pm" - parse and update even if time was already set
+    const newParsedTime = parseDeliveryTime(ctx.messageText, ctx.businessTimezone);
+    if (newParsedTime && newParsedTime !== latestSessionData.delivery_time) {
+      logger.info(`User provided explicit time "${ctx.messageText}" - updating delivery_time from ${latestSessionData.delivery_time} to ${newParsedTime}`);
+      await updateSessionDeliveryInfo(ctx.session.id, { time: newParsedTime });
+    }
+  } else if (userProvidedExplicitTime && fulfillmentAlreadyComplete && latestSessionData?.fulfillment_type === 'takeaway') {
+    // User provided explicit time for takeaway
+    const newParsedTime = parseDeliveryTime(ctx.messageText, ctx.businessTimezone);
+    if (newParsedTime && newParsedTime !== latestSessionData.pickup_time) {
+      logger.info(`User provided explicit pickup time "${ctx.messageText}" - updating pickup_time from ${latestSessionData.pickup_time} to ${newParsedTime}`);
+      await updateSessionPickupInfo(ctx.session.id, {
+        outlet_id: latestSessionData.pickup_outlet_id!,
+        time: newParsedTime,
+      });
+    }
+  }
+
   // If AI provided fulfillment data with confirm_order, SAVE IT NOW
   // BUT skip if fulfillment is already complete (user is just confirming with "Yes")
-  if (fulfillmentAlreadyComplete && aiResponse.fulfillment) {
+  if (fulfillmentAlreadyComplete && aiResponse.fulfillment && !userProvidedExplicitTime) {
     logger.info(`Fulfillment already complete - skipping AI re-sent data to prevent overwrite`);
   }
 
@@ -167,10 +192,14 @@ export const confirmOrderHandler: IntentHandlerFn = async (ctx, aiResponse) => {
 
     if (latestSession.fulfillment_type === 'delivery') {
       confirmMsg += `\n\n${t('order.delivery', ctx.lang)}`;
+      // Priority: 1. Manual address, 2. Geocoded address, 3. Google Maps link (never show raw lat/long)
       if (latestSession.delivery_address) {
         confirmMsg += `\n📍 ${latestSession.delivery_address}`;
+      } else if (latestSession.delivery_geocoded_address) {
+        confirmMsg += `\n📍 ${latestSession.delivery_geocoded_address}`;
       } else if (latestSession.delivery_latitude && latestSession.delivery_longitude) {
-        confirmMsg += `\n📍 Location (${latestSession.delivery_latitude.toFixed(6)}, ${latestSession.delivery_longitude.toFixed(6)})`;
+        const mapsLink = `https://maps.google.com/?q=${latestSession.delivery_latitude},${latestSession.delivery_longitude}`;
+        confirmMsg += `\n📍 ${mapsLink}`;
       }
       if (latestSession.delivery_time) {
         confirmMsg += `\n${t('order.time', ctx.lang, { time: formatDeliveryTime(latestSession.delivery_time, ctx.businessTimezone, t('time.at', ctx.lang)) })}`;

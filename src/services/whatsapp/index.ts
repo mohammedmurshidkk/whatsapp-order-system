@@ -28,18 +28,22 @@ const isWebJS = WHATSAPP_PROVIDER === 'webjs';
  * @param to - Recipient phone number
  * @param message - Text message to send
  * @param businessId - Business ID for multi-tenant credential lookup and usage tracking
+ * @returns WhatsApp message ID if successful, null otherwise
  */
-export async function sendWhatsAppMessage(to: string, message: string, businessId?: string): Promise<void> {
+export async function sendWhatsAppMessage(to: string, message: string, businessId?: string): Promise<string | null> {
   try {
+    let messageId: string | null = null;
     if (isWebJS) {
       await webjsProvider.sendMessage(to, message);
+      // WebJS doesn't return message ID in same format
     } else {
-      await metaProvider.sendMessage(to, message, businessId);
+      messageId = await metaProvider.sendMessage(to, message, businessId) as string;
     }
     // Track successful send
     if (businessId) {
       trackWhatsAppUsage({ businessId, direction: 'outbound', messageType: 'text', success: true }).catch(() => { });
     }
+    return messageId;
   } catch (error) {
     // Track failed send
     if (businessId) {

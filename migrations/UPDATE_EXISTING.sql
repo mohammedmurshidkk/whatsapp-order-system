@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS business_outlets (
   longitude DECIMAL(11, 8),
   is_active BOOLEAN DEFAULT true,
   display_order INT DEFAULT 0,
+  printer_ip VARCHAR(45) DEFAULT NULL,
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
 );
@@ -75,6 +76,13 @@ ALTER TABLE business_outlets ADD COLUMN IF NOT EXISTS closing_time TEXT;
 ALTER TABLE business_outlets ADD COLUMN IF NOT EXISTS opening_buffer_minutes INTEGER DEFAULT 0;
 ALTER TABLE business_outlets ADD COLUMN IF NOT EXISTS closing_buffer_minutes INTEGER DEFAULT 0;
 ALTER TABLE business_outlets ADD COLUMN IF NOT EXISTS opening_days TEXT[];
+
+-- Add printer_ip column to business_outlets for thermal printer support
+ALTER TABLE business_outlets
+ADD COLUMN IF NOT EXISTS printer_ip VARCHAR(45) DEFAULT NULL;
+
+-- Add comment for documentation
+COMMENT ON COLUMN business_outlets.printer_ip IS 'IP address of thermal printer for this outlet (e.g., 192.168.18.195)';
 
 CREATE INDEX IF NOT EXISTS idx_outlets_business ON business_outlets(business_id) WHERE is_active = true;
 

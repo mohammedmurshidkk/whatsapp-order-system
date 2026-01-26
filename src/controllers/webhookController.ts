@@ -66,6 +66,7 @@ import {
   updateSessionDeliveryInfo,
   updateSessionPickupInfo,
   parseDeliveryTime,
+  parseDeliveryTimeSmart,
   extractAddressAndTime,
   formatDeliveryTime,
   calculateDateTimeFromButtons,
@@ -133,7 +134,7 @@ import {
 } from '../services/sessionService';
 import { SupportedLanguage, detectLanguageRequest, t } from '../i18n';
 import { hasHandler } from '../plugins/cake-cafe/handlers/registry';
-import { getPluginForBusiness } from '../plugins';
+import { ConversationContext, getPluginForBusiness } from '../plugins';
 // IntentContext is now built inside plugin.handleIntent
 
 const CAKE_KEYWORDS = ['cake', 'birthday', 'anniversary', 'kg', 'flavor', 'chocolate', 'vanilla', 'fondant', 'design', 'custom'];
@@ -176,15 +177,36 @@ async function formatAvailableFlavors(businessId: string, lang: 'en' | 'ml'): Pr
 // Helper: Check if text is date-only (DD/MM/YY or DD/MM/YYYY without time)
 function isDateOnly(text: string): { year: number; month: number; day: number } | null {
   const normalized = text.toLowerCase().trim();
-  const dateMatch = normalized.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
-  if (!dateMatch) return null;
 
-  const day = parseInt(dateMatch[1], 10);
-  const month = parseInt(dateMatch[2], 10) - 1; // JS months are 0-indexed
-  let year = parseInt(dateMatch[3], 10);
-  if (year < 100) year += 2000;
+  // Try DD/MM/YY or DD/MM/YYYY format first
+  const dateMatchWithYear = normalized.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if (dateMatchWithYear) {
+    const day = parseInt(dateMatchWithYear[1], 10);
+    const month = parseInt(dateMatchWithYear[2], 10) - 1; // JS months are 0-indexed
+    let year = parseInt(dateMatchWithYear[3], 10);
+    if (year < 100) year += 2000;
+    return { year, month, day };
+  }
 
-  return { year, month, day };
+  // Try DD/MM format without year (e.g., "25/1", "14-01")
+  const dateMatchNoYear = normalized.match(/^(\d{1,2})[\/\-](\d{1,2})$/);
+  if (dateMatchNoYear) {
+    const day = parseInt(dateMatchNoYear[1], 10);
+    const month = parseInt(dateMatchNoYear[2], 10) - 1; // JS months are 0-indexed
+    const now = new Date();
+    let year = now.getFullYear();
+
+    // If the date has passed this year, use next year
+    const targetDate = new Date(year, month, day);
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    if (targetDate < today) {
+      year = year + 1;
+    }
+
+    return { year, month, day };
+  }
+
+  return null;
 }
 
 // Helper: Check if text is time-only (e.g., "11am", "3:30pm", "evening")
@@ -472,6 +494,9 @@ export async function processMessage(
 
   // Send welcome message with menu button(s) for new sessions
   if (isNewSession) {
+    // Save the incoming message that triggered the new session
+    await saveIncomingMessage(session.id, originalMessage);
+
     const welcomeMsg = t('menu.aiWelcome', lang, { businessName: business?.name || 'our store' });
 
     // Get active menu PDF configs for dynamic buttons
@@ -799,8 +824,8 @@ export async function processMessage(
         return timePromptMsg;
       }
 
-      // Check if message looks like a time input
-      const looksLikeTime = /\d{1,2}(?:[:\d]{2})?\s*(?:am|pm)|morning|evening|afternoon|today|tomorrow|nale|innu|in\s+\d+(?:\.\d+)?\s*(?:hour|hr|minute|min)/i.test(messageText);
+      // Check if message looks like a time input (includes Malayalam words: inn/innu=today, nale=tomorrow)
+      const looksLikeTime = /\d{1,2}(?:[:\d]{2})?\s*(?:am|pm)|morning|evening|afternoon|today|tomorrow|nale|inn|innu|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun|in\s+\d+(?:\.\d+)?\s*(?:hour|hr|minute|min)/i.test(messageText);
 
       if (looksLikeTime) {
         logger.info(`Session needs time, parsing: "${messageText}"`);
@@ -815,7 +840,8 @@ export async function processMessage(
           logger.info(`📅 Combined pending date with time: ${messageText} -> ${parsedTime}`);
           await setPendingCustomDate(session.id, null);
         } else {
-          parsedTime = parseDeliveryTime(messageText, businessTimezone);
+          // Use AI-powered smart parser for complex/multilingual date inputs
+          parsedTime = await parseDeliveryTimeSmart(messageText, businessTimezone);
         }
 
         if (parsedTime) {
@@ -1422,7 +1448,7 @@ export async function processMessage(
   const plugin = getPluginForBusiness(business || {});
 
   // Build ConversationContext for plugin
-  const conversationContext = {
+  const conversationContext: ConversationContext = {
     // Core entities
     session,
     sessionWithItems: sessionWithItems!,

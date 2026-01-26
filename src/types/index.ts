@@ -71,6 +71,8 @@ export interface BusinessOutlet {
   opening_buffer_minutes?: number; // Buffer after opening (default 0)
   closing_buffer_minutes?: number; // Buffer before closing (default 0)
   opening_days?: string[]; // e.g., ["monday", "tuesday", "wednesday", ...]
+  // Thermal printer
+  printer_ip?: string | null; // IP address of thermal printer (e.g., "192.168.18.195")
   created_at: string;
   updated_at?: string;
 }

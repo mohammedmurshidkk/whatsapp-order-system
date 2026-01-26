@@ -16,6 +16,8 @@ import superadminRoutes from './routes/superadmin';
 import whatsappAuthRoutes from './routes/whatsappAuth';
 import adminCampaignRoutes from './routes/adminCampaigns';
 import adminCustomerRoutes from './routes/adminCustomers';
+import adminOrderRoutes from './routes/adminOrders';
+import printRoutes from './routes/print';
 import superadminUsageRoutes from './routes/superadminUsage';
 // Plugin routes
 import { registerCakeCafeRoutes } from './plugins/cake-cafe/routes';
@@ -74,6 +76,8 @@ app.use('/api/notifications', adminNotificationRoutes);
 app.use('/api/admin/chat', adminChatRoutes);
 app.use('/api/admin/campaigns', adminCampaignRoutes);
 app.use('/api/admin/customers', adminCustomerRoutes);
+app.use('/api/admin/orders', adminOrderRoutes);
+app.use('/api/print', printRoutes);
 app.use('/api/superadmin', superadminRoutes);
 app.use('/api/superadmin/usage', superadminUsageRoutes);
 

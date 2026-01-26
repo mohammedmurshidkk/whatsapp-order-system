@@ -57,7 +57,7 @@ export interface IntentContext {
   isFirstMessage: boolean;
 
   // Messaging Helpers (pre-bound with businessId)
-  sendWhatsAppMessage: (phone: string, message: string) => Promise<void>;
+  sendWhatsAppMessage: (phone: string, message: string) => Promise<void | null | string>;
   sendButtons: (phone: string, body: string, buttons: Array<{ id: string; title: string }>) => Promise<void>;
   sendList: (phone: string, header: string, body: string, buttonText: string, sections: any[]) => Promise<void>;
   sendLocation: (phone: string, body: string) => Promise<void>;

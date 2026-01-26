@@ -77,6 +77,7 @@ export const en = {
     grandTotal: "💰 *Grand Total: ₹{{amount}}*",
     deliveryTo: "🚚 Delivery to: {{address}}",
     deliveryLocation: "🚚 Delivery Location (Lat: {{lat}}, Long: {{lng}})",
+    deliveryLocationLink: "🚚 Delivery Location: {{link}}",
     pickupFrom: "📍 Pickup from outlet",
     time: "⏰ Time: {{time}}",
     reviewPrompt: "Please review your order. Reply *YES* to confirm.",
