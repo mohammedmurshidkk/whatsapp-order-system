@@ -4,21 +4,21 @@
   "description": "AI-powered WhatsApp ordering system",
   "main": "dist/app.js",
   "scripts": {
-    "dev": "nodemon --ignore whatsapp-session/ --ignore .wwebjs_cache/ --exec ts-node src/app.ts",
-    "build": "tsc",
+    "dev": "nodemon --ignore whatsapp-session/ --ignore .wwebjs_cache/ --exec ts-node -r tsconfig-paths/register src/app.ts",
+    "build": "tsc && tsc-alias",
     "start": "node dist/app.js",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "test:scenarios": "jest --testPathPattern=orderFlow",
-    "test:integration": "ts-node tests/integration/testRunner.ts",
-    "test:generate-scenarios": "ts-node tests/integration/generateFromMessages.ts",
-    "test:parse-chats": "ts-node tests/utils/chatParser.ts tests/chats",
-    "test:add-scenario": "ts-node tests/utils/addScenario.ts",
-    "test:list-scenarios": "ts-node tests/utils/addScenario.ts list",
-    "migrate:fresh": "ts-node scripts/migrate.ts fresh",
-    "migrate:update": "ts-node scripts/migrate.ts update",
-    "migrate:business": "ts-node scripts/migrate.ts business"
+    "test:integration": "ts-node -r tsconfig-paths/register tests/integration/testRunner.ts",
+    "test:generate-scenarios": "ts-node -r tsconfig-paths/register tests/integration/generateFromMessages.ts",
+    "test:parse-chats": "ts-node -r tsconfig-paths/register tests/utils/chatParser.ts tests/chats",
+    "test:add-scenario": "ts-node -r tsconfig-paths/register tests/utils/addScenario.ts",
+    "test:list-scenarios": "ts-node -r tsconfig-paths/register tests/utils/addScenario.ts list",
+    "migrate:fresh": "ts-node -r tsconfig-paths/register scripts/migrate.ts fresh",
+    "migrate:update": "ts-node -r tsconfig-paths/register scripts/migrate.ts update",
+    "migrate:business": "ts-node -r tsconfig-paths/register scripts/migrate.ts business"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.2",
@@ -59,6 +59,8 @@
     "qrcode-terminal": "^0.12.0",
     "ts-jest": "^29.1.1",
     "ts-node": "^10.9.1",
+    "tsc-alias": "^1.8.16",
+    "tsconfig-paths": "^4.2.0",
     "typescript": "^5.3.2"
   }
 }

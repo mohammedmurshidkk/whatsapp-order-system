@@ -35,6 +35,8 @@ export interface Business {
   // Timezone for date/time display (IANA timezone, e.g., 'Asia/Kolkata')
   timezone?: string;
   updated_at?: string;
+  // Plugin identifier for multi-vertical support
+  plugin_id?: string; // e.g., 'cake-cafe', 'find-my-partner', 'appointments'
 }
 
 // Business Amenity types (generic amenities like party hall, catering, etc.)

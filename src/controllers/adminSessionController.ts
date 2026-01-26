@@ -3,8 +3,8 @@ import { supabase } from '../config/database';
 import { AuthRequest, getBusinessId } from '../middleware/auth';
 import { logger } from '../utils/logger';
 import { sendWhatsAppMessage } from '../services/whatsapp';
-import { generateOrderSummary } from '../services/orderService';
-import { getBusinessById } from '../services/menuService';
+import { generateOrderSummary } from '../plugins/cake-cafe/services/orderService';
+import { getBusinessById } from '../plugins/cake-cafe/services/menuService';
 
 // List sessions with filters
 export async function listSessions(req: AuthRequest, res: Response): Promise<void> {

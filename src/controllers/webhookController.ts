@@ -29,7 +29,7 @@ import {
   normalizeManglish,
   containsMalayalamScript,
   isManglishMessage,
-} from '../services/manglishService';
+} from '../plugins/cake-cafe/services/manglishService';
 import {
   saveOrderItem,
   generateOrderSummary,
@@ -40,7 +40,7 @@ import {
   getOrderStatus,
   getCustomerActiveOrder,
   getOrderStatusMessage,
-} from '../services/orderService';
+} from '../plugins/cake-cafe/services/orderService';
 import {
   getBusinessById,
   getBusinessByPhone,
@@ -54,13 +54,13 @@ import {
   buildSizeButtons,
   getCategoryById,
   getMenuItemById,
-} from '../services/menuService';
+} from '../plugins/cake-cafe/services/menuService';
 import {
   getBusinessOutlets,
   formatOutletsForCustomer,
   findOutletByCustomerInput,
-} from '../services/outletService';
-import { getPopularItemsForAI } from '../services/popularItemsService';
+} from '../plugins/cake-cafe/services/outletService';
+import { getPopularItemsForAI } from '../plugins/cake-cafe/services/popularItemsService';
 import {
   updateSessionFulfillmentType,
   updateSessionDeliveryInfo,
@@ -71,7 +71,7 @@ import {
   calculateDateTimeFromButtons,
   validateOperatingHours,
   calculateDistanceBasedDeliveryFee,
-} from '../services/fulfillmentService';
+} from '../plugins/cake-cafe/services/fulfillmentService';
 import {
   getAutoSuggestedAddons,
   addAddonToSessionItem,
@@ -80,7 +80,7 @@ import {
   findMultipleAddonsByInput,
   removeAddonFromSession,
   getAddonsByIds,
-} from '../services/addonService';
+} from '../plugins/cake-cafe/services/addonService';
 import {
   sendWhatsAppMessage,
   verifyWebhookChallenge,
@@ -93,8 +93,8 @@ import {
   markAsRead,
   trackInboundMessage,
 } from '../services/whatsapp';
-import { getAmenityBySlug, getBusinessAmenities } from '../services/amenityService';
-import { getMenuPdfUrl, menuPdfExists } from '../services/pdfService';
+import { getAmenityBySlug, getBusinessAmenities } from '../plugins/cake-cafe/services/amenityService';
+import { getMenuPdfUrl, menuPdfExists } from '../plugins/cake-cafe/services/pdfService';
 import { getAddressFromCoordinates } from '../services/geocodingService';
 import {
   processVoiceMessage,
@@ -111,8 +111,8 @@ import {
   updateQuoteTimeRequest,
   createQuoteRevision,
   analyzeImageWithGemini,
-} from '../services/cakeQuoteService';
-import { getFullPricingConfig } from '../services/cakePricingService';
+} from '../plugins/cake-cafe/services/cakeQuoteService';
+import { getFullPricingConfig } from '../plugins/cake-cafe/services/cakePricingService';
 import {
   isValidPhoneNumber,
   sanitizePhoneNumber,
@@ -120,17 +120,21 @@ import {
   sanitizeMessage,
 } from '../utils/validators';
 import { logger } from '../utils/logger';
-import { createIntervention } from '../services/interventionService';
+import {
+  createIntervention,
+  resolveIntervention,
+} from '../plugins/cake-cafe/services/interventionService';
 import { emitInterventionCreated } from '../services/socketService';
-import { getActiveMenuPdfConfigs, getMenuPdfConfigBySlug, getLocalizedMenuName } from '../services/menuPdfConfigService';
+import { getActiveMenuPdfConfigs, getMenuPdfConfigBySlug, getLocalizedMenuName } from '../plugins/cake-cafe/services/menuPdfConfigService';
 import {
   updateSessionCustomCakeContext,
   clearSessionCustomCakeContext,
   pauseAI
 } from '../services/sessionService';
 import { SupportedLanguage, detectLanguageRequest, t } from '../i18n';
-import { executeHandler, hasHandler } from './intents/registry';
-import { IntentContext } from './intents/types';
+import { hasHandler } from '../plugins/cake-cafe/handlers/registry';
+import { getPluginForBusiness } from '../plugins';
+// IntentContext is now built inside plugin.handleIntent
 
 const CAKE_KEYWORDS = ['cake', 'birthday', 'anniversary', 'kg', 'flavor', 'chocolate', 'vanilla', 'fondant', 'design', 'custom'];
 
@@ -1412,61 +1416,62 @@ export async function processMessage(
   }
 
   // ============================================
-  // BUILD INTENT CONTEXT & EXECUTE HANDLER
+  // BUILD PLUGIN CONTEXT & EXECUTE HANDLER
   // ============================================
-  // Build context for intent handlers
-  const intentContext: IntentContext = {
-    // Business & Customer
-    phone,
-    businessId,
-    business,
-    customer,
+  // Get plugin for this business (defaults to food-ordering)
+  const plugin = getPluginForBusiness(business || {});
+
+  // Build ConversationContext for plugin
+  const conversationContext = {
+    // Core entities
     session,
-    lang,
-
-    // Session State
     sessionWithItems: sessionWithItems!,
-    existingItems,
-    outlets,
-    activeOrder,
+    customer,
+    business: business!,
 
-    // Menu & Content
-    menuItems: menuItems || [],
-    menuCategories: menuCategories || [],
-    amenities: amenities || [],
-
-    // Message Data
-    messageText,
+    // Message data
+    message: messageText,
     originalMessage,
+    aiResponse,
+    language: lang,
+
+    // Phone for messaging
+    phone,
     businessTimezone,
     isFirstMessage,
 
-    // Messaging Helpers (pre-bound with businessId)
-    sendWhatsAppMessage: sendReply,
-    sendButtons,
-    sendList,
-    sendLocation,
-    sendDoc,
-    sendImage: sendImg,
+    // Menu & content
+    menu: menuItems || [],
+    categories: menuCategories || [],
+    addons: [] as any[], // Addons loaded on-demand by handlers
+    outlets,
+    cartItems: existingItems,
+    amenities: amenities || [],
+    activeOrder,
 
-    // Message Persistence
-    saveOutgoingMessage,
-    saveIncomingMessage,
+    // Messaging helpers
+    messaging: {
+      sendWhatsAppMessage: sendReply,
+      sendButtons,
+      sendList,
+      sendLocation,
+      sendDoc,
+      sendImage: sendImg,
+      saveOutgoingMessage,
+      saveIncomingMessage,
+    },
   };
 
-  // Execute handler for the intent
+  // Execute handler via plugin
   let messageSaved = false;
   if (hasHandler(intentToProcess)) {
-    const result = await executeHandler(intentToProcess, intentContext, aiResponse);
+    const result = await plugin.handleIntent(intentToProcess, conversationContext);
     if (result) {
-      if (result.reply !== null) {
-        replyMessage = result.reply;
+      if (!result.skipResponse) {
+        replyMessage = result.response;
       } else {
         // Handler sent custom message (buttons, list, etc.) - return null
         return null;
-      }
-      if (result.messageSaved) {
-        messageSaved = true;
       }
     }
   }
@@ -2081,7 +2086,7 @@ export async function handleWhatsAppWebhook(
                   });
 
                   // Create intervention for admin dashboard
-                  const { createIntervention } = await import('../services/interventionService');
+                  const { createIntervention } = await import('../plugins/cake-cafe/services/interventionService');
                   await createIntervention(
                     business.id,
                     session.id,

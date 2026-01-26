@@ -37,6 +37,9 @@ ALTER TABLE businesses
 ADD COLUMN IF NOT EXISTS road_distance_multiplier DECIMAL(3,2) DEFAULT 1.3,
 ADD COLUMN IF NOT EXISTS use_road_distance_api BOOLEAN DEFAULT false;
 
+-- Plugin architecture
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS plugin_id VARCHAR(50) DEFAULT 'cake-cafe';
+
 -- Add image URLs to menu tables
 ALTER TABLE menu_categories ADD COLUMN IF NOT EXISTS image_url TEXT;
 ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS image_url TEXT;
@@ -1226,6 +1229,70 @@ COMMENT ON TABLE campaign_messages IS 'Tracks individual message delivery status
 -- From migrations/005_whatsapp_connections.sql
 -- ============================================
 
+-- Migration: WhatsApp Connections (Multi-tenant WhatsApp support)
+-- This allows each business to have their own WhatsApp number with credentials stored in DB
+
+-- Create whatsapp_connections table
+CREATE TABLE IF NOT EXISTS whatsapp_connections (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  provider VARCHAR(20) NOT NULL DEFAULT 'meta', -- 'meta' | 'webjs'
+  phone_number VARCHAR(20) NOT NULL,
+
+  -- Meta API credentials
+  meta_phone_number_id VARCHAR(50),
+  meta_access_token TEXT,
+  meta_business_account_id VARCHAR(50),
+  meta_webhook_secret TEXT,
+  meta_verify_token VARCHAR(100),
+
+  -- WebJS session (for future use)
+  webjs_session_data JSONB,
+
+  -- Status tracking
+  status VARCHAR(20) DEFAULT 'active', -- pending, active, disconnected
+  connected_at TIMESTAMPTZ DEFAULT NOW(),
+  last_message_at TIMESTAMPTZ,
+
+  -- Timestamps
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+
+  -- Constraints
+  UNIQUE(phone_number)
+);
+
+-- Indexes for fast lookups
+CREATE INDEX IF NOT EXISTS idx_whatsapp_connections_phone ON whatsapp_connections(phone_number);
+CREATE INDEX IF NOT EXISTS idx_whatsapp_connections_business ON whatsapp_connections(business_id);
+CREATE INDEX IF NOT EXISTS idx_whatsapp_connections_status ON whatsapp_connections(status);
+
+-- Add trigger for updated_at
+CREATE OR REPLACE FUNCTION update_whatsapp_connections_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trigger_whatsapp_connections_updated_at ON whatsapp_connections;
+CREATE TRIGGER trigger_whatsapp_connections_updated_at
+  BEFORE UPDATE ON whatsapp_connections
+  FOR EACH ROW
+  EXECUTE FUNCTION update_whatsapp_connections_updated_at();
+
+-- Comments for documentation
+COMMENT ON TABLE whatsapp_connections IS 'Stores WhatsApp connection credentials per business for multi-tenant support';
+COMMENT ON COLUMN whatsapp_connections.provider IS 'WhatsApp provider: meta (official API) or webjs (unofficial)';
+COMMENT ON COLUMN whatsapp_connections.meta_access_token IS 'Meta Graph API access token - consider encryption for production';
+COMMENT ON COLUMN whatsapp_connections.status IS 'Connection status: pending (setup), active (working), disconnected (needs reconnection)';
+
+
+-- ============================================
+-- WHATSAPP CONNECTIONS MIGRATION
+-- From migrations/005_whatsapp_connections.sql
+-- ============================================
 -- Migration: WhatsApp Connections (Multi-tenant WhatsApp support)
 -- This allows each business to have their own WhatsApp number with credentials stored in DB
 

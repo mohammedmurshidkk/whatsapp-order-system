@@ -4,36 +4,28 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import webhookRoutes from './routes/webhook';
-import menuRoutes from './routes/menu';
 import sessionRoutes from './routes/session';
-// Admin routes
+// Core admin routes
 import authRoutes from './routes/auth';
 import dashboardRoutes from './routes/dashboard';
-import adminOrderRoutes from './routes/adminOrders';
 import adminSessionRoutes from './routes/adminSessions';
-import adminMenuRoutes from './routes/adminMenu';
-import adminCategoryRoutes from './routes/adminCategories';
-import adminAddonRoutes from './routes/adminAddons';
 import adminBusinessRoutes from './routes/adminBusiness';
 import adminNotificationRoutes from './routes/adminNotifications';
 import adminChatRoutes from './routes/adminChat';
 import superadminRoutes from './routes/superadmin';
 import whatsappAuthRoutes from './routes/whatsappAuth';
-import adminCakePricingRoutes from './routes/adminCakePricing';
-import adminCakeQuotesRoutes from './routes/adminCakeQuotes';
-import adminAmenityRoutes from './routes/adminAmenities';
-import adminInterventionRoutes from './routes/adminInterventions';
-import adminDeliveryBoyRoutes from './routes/adminDeliveryBoy';
-import adminPopularItemsRoutes from './routes/adminPopularItems';
 import adminCampaignRoutes from './routes/adminCampaigns';
 import adminCustomerRoutes from './routes/adminCustomers';
 import superadminUsageRoutes from './routes/superadminUsage';
+// Plugin routes
+import { registerCakeCafeRoutes } from './plugins/cake-cafe/routes';
 import { WHATSAPP_PROVIDER } from './config/constants';
 import { logger } from './utils/logger';
 import { handleTestMessage } from './controllers/webhookController';
 import { initializeSocket } from './services/socketService';
 import { requestLogger } from './middleware/requestLogger';
 import { startCampaignScheduler } from './services/campaignScheduler';
+import { initializePlugins } from './plugins';
 
 // Load environment variables
 dotenv.config();
@@ -71,32 +63,22 @@ app.get('/health', (_req: Request, res: Response) => {
 
 // API routes
 app.use('/webhook', webhookRoutes);
-app.use('/api/menu', menuRoutes);
 app.use('/api/sessions', sessionRoutes);
 
-// Admin API routes
+// Core admin API routes
 app.use('/api/auth', authRoutes);
 app.use('/api/dashboard', dashboardRoutes);
-app.use('/api/orders', adminOrderRoutes);
 app.use('/api/admin/sessions', adminSessionRoutes);
-app.use('/api/admin/menu', adminMenuRoutes);
-app.use('/api/categories', adminCategoryRoutes);
-app.use('/api/addons', adminAddonRoutes);
 app.use('/api/business', adminBusinessRoutes);
 app.use('/api/notifications', adminNotificationRoutes);
 app.use('/api/admin/chat', adminChatRoutes);
-app.use('/api/admin/cake-pricing', adminCakePricingRoutes);
-app.use('/api/admin/cake-quotes', adminCakeQuotesRoutes);
-app.use('/api/admin/amenities', adminAmenityRoutes);
-app.use('/api/admin/cake-quotes', adminCakeQuotesRoutes);
-app.use('/api/admin/amenities', adminAmenityRoutes);
-app.use('/api/admin/interventions', adminInterventionRoutes);
-app.use('/api/admin/delivery-boys', adminDeliveryBoyRoutes);
-app.use('/api/admin/popular-items', adminPopularItemsRoutes);
 app.use('/api/admin/campaigns', adminCampaignRoutes);
 app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/superadmin', superadminRoutes);
 app.use('/api/superadmin/usage', superadminUsageRoutes);
+
+// Plugin routes
+registerCakeCafeRoutes(app);
 
 // WhatsApp authentication routes (for QR code, status)
 app.use('/api/whatsapp/auth', whatsappAuthRoutes);
@@ -154,6 +136,9 @@ async function initializeWhatsApp(): Promise<void> {
 
 // Start server
 httpServer.listen(PORT, () => {
+  // Initialize plugin system
+  initializePlugins();
+
   logger.info(`Server running on port ${PORT}`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
   logger.info(`WhatsApp Provider: ${WHATSAPP_PROVIDER}`);

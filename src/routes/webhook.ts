@@ -8,7 +8,7 @@ import {
   getOrder,
   getOrdersByCustomer,
   getSession,
-} from '../controllers/orderController';
+} from '../plugins/cake-cafe/controllers/orderController';
 import { webhookRateLimiter } from '../middleware/rateLimiter';
 
 const router: IRouter = Router();

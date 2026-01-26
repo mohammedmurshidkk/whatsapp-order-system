@@ -19,7 +19,7 @@ import {
 import {
   getPendingQuoteForSession,
   markQuoteAsSent,
-} from '../services/cakeQuoteService';
+} from '../plugins/cake-cafe/services/cakeQuoteService';
 
 
 // ============================================
