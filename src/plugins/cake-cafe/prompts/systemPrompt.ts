@@ -34,6 +34,8 @@ export interface FoodOrderingPromptContext extends PluginPromptContext {
     fulfillment_type?: string | null;
     created_at: string;
   } | null;
+  aiGreetingTemplate?: string | null;
+  aiFarewellTemplate?: string | null;
 }
 
 // Helper: Add minutes to a time string (e.g., "10:00" + 30 = "10:30")
@@ -185,16 +187,33 @@ export function getSystemPrompt(context: FoodOrderingPromptContext): string {
     }
   }
 
-  // Business-specific custom instructions
-  let customInstructions = '';
-  if (context.business?.custom_ai_prompt) {
-    customInstructions = `\n🏪 BUSINESS-SPECIFIC INSTRUCTIONS:\n${context.business.custom_ai_prompt}\n`;
-  }
 
   // Customer support number
   let customerSupportSection = '';
   if (context.business?.customer_support_phone) {
     customerSupportSection = `\n📞 CUSTOMER SUPPORT: ${context.business.customer_support_phone}\nIf customer asks for help, support, contact number, or has issues outside your capabilities, provide this number.\n`;
+  }
+
+  // Personality Section
+  let personalitySection = '';
+  if (context.business?.ai_personality) {
+    const personalityMap: Record<string, string> = {
+      'friendly': 'Respond in a warm, friendly tone using a few emojis.',
+      'professional': 'Respond in a formal, professional, and efficient tone. Avoid excessive emojis.',
+      'casual': 'Respond in a relaxed, conversational tone, like a friend.',
+      'formal': 'Respond in a very polite, traditional, and respectful tone.'
+    };
+    const personalityPrompt = personalityMap[context.business.ai_personality] || personalityMap.friendly;
+    personalitySection = `\n🎭 PERSONALITY: ${personalityPrompt}\n`;
+  }
+
+  // AI Templates Section
+  let templatesSection = '';
+  if (context.aiGreetingTemplate) {
+    templatesSection += `\n👋 GREETING TEMPLATE (Use this when greeting the customer):\n${context.aiGreetingTemplate}\n`;
+  }
+  if (context.aiFarewellTemplate) {
+    templatesSection += `\n👋 FAREWELL TEMPLATE (Use this when the conversation ends):\n${context.aiFarewellTemplate}\n`;
   }
 
   // Format amenities
@@ -210,7 +229,7 @@ export function getSystemPrompt(context: FoodOrderingPromptContext): string {
 
   // Static prompt template
   const staticPrompt = `You are an AI ordering assistant for ${businessName}.
-${customInstructions}${customerSupportSection}
+${personalitySection}${templatesSection}${customerSupportSection}
 ${menuSection}
 ${popularItemsSection}
 ${outletsSection}${amenitiesSection}

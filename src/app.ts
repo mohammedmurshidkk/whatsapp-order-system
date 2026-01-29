@@ -19,6 +19,9 @@ import adminCustomerRoutes from './routes/adminCustomers';
 import adminOrderRoutes from './routes/adminOrders';
 import printRoutes from './routes/print';
 import superadminUsageRoutes from './routes/superadminUsage';
+import analyticsRoutes from './routes/analytics';
+import customerProfileRoutes from './routes/customerProfiles';
+import aiPromptRoutes from './routes/aiPrompts';
 // Plugin routes
 import { registerCakeCafeRoutes } from './plugins/cake-cafe/routes';
 import { WHATSAPP_PROVIDER } from './config/constants';
@@ -80,6 +83,9 @@ app.use('/api/admin/orders', adminOrderRoutes);
 app.use('/api/print', printRoutes);
 app.use('/api/superadmin', superadminRoutes);
 app.use('/api/superadmin/usage', superadminUsageRoutes);
+app.use('/api/analytics', analyticsRoutes);
+app.use('/api/customer-profiles', customerProfileRoutes);
+app.use('/api/ai-prompts', aiPromptRoutes);
 
 // Plugin routes
 registerCakeCafeRoutes(app);

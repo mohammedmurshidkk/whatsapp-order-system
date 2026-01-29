@@ -12,6 +12,7 @@ DROP TABLE IF EXISTS menu_addons CASCADE;
 DROP TABLE IF EXISTS messages CASCADE;
 DROP TABLE IF EXISTS orders CASCADE;
 DROP TABLE IF EXISTS session_items CASCADE;
+DROP TABLE IF EXISTS customer_profiles CASCADE;
 DROP TABLE IF EXISTS sessions CASCADE;
 DROP TABLE IF EXISTS menu_items CASCADE;
 DROP TABLE IF EXISTS menu_categories CASCADE;
@@ -20,6 +21,7 @@ DROP TABLE IF EXISTS customers CASCADE;
 DROP TABLE IF EXISTS admin_users CASCADE;
 DROP TABLE IF EXISTS super_admins CASCADE;
 DROP TABLE IF EXISTS menu_pdf_configs CASCADE;
+DROP TABLE IF EXISTS ai_prompt_templates CASCADE;
 DROP TABLE IF EXISTS businesses CASCADE;
 
 -- ============================================
@@ -30,8 +32,6 @@ CREATE TABLE businesses (
   name VARCHAR(100) NOT NULL,
   phone VARCHAR(20) UNIQUE NOT NULL,
   address TEXT,
-  welcome_message TEXT DEFAULT NULL,
-  closing_message TEXT DEFAULT NULL,
   currency VARCHAR(10) DEFAULT '₹',
   is_active BOOLEAN DEFAULT true,
   supports_delivery BOOLEAN DEFAULT true,
@@ -47,7 +47,6 @@ CREATE TABLE businesses (
   road_distance_multiplier DECIMAL(3,2) DEFAULT 1.3,
   use_road_distance_api BOOLEAN DEFAULT false,
   logo_url TEXT,
-  custom_ai_prompt TEXT,
   critical_message TEXT,
   critical_message_enabled BOOLEAN DEFAULT false,
   timezone VARCHAR(50) DEFAULT 'Asia/Kolkata',
@@ -62,6 +61,11 @@ CREATE TABLE businesses (
   whatsapp_webhook_verified BOOLEAN DEFAULT false,
   -- Plugin architecture
   plugin_id VARCHAR(50) DEFAULT 'cake-cafe',
+  -- AI Settings
+  ai_personality VARCHAR(50) DEFAULT 'friendly',
+  ai_greeting_template_id UUID, -- References ai_prompt_templates(id), added after table creation
+  ai_farewell_template_id UUID, -- References ai_prompt_templates(id), added after table creation
+  ai_instructions_enabled BOOLEAN DEFAULT true,
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
 );
@@ -1277,3 +1281,360 @@ COMMENT ON TABLE whatsapp_connections IS 'Stores WhatsApp connection credentials
 COMMENT ON COLUMN whatsapp_connections.provider IS 'WhatsApp provider: meta (official API) or webjs (unofficial)';
 COMMENT ON COLUMN whatsapp_connections.meta_access_token IS 'Meta Graph API access token - consider encryption for production';
 COMMENT ON COLUMN whatsapp_connections.status IS 'Connection status: pending (setup), active (working), disconnected (needs reconnection)';
+
+-- ============================================
+-- FEATURE: ANALYTICS DASHBOARD
+-- ============================================
+
+-- Materialized views for metrics
+CREATE MATERIALIZED VIEW mv_daily_order_metrics AS
+SELECT
+    business_id,
+    date_trunc('day', created_at)::date AS date,
+    count(*) AS order_count,
+    sum(total_amount) AS total_revenue,
+    avg(total_amount) AS avg_order_value,
+    count(*) FILTER (WHERE status = 'completed') AS completed_count,
+    count(*) FILTER (WHERE status = 'cancelled') AS cancelled_count,
+    count(*) FILTER (WHERE fulfillment_type = 'delivery') AS delivery_count,
+    count(*) FILTER (WHERE fulfillment_type = 'takeaway') AS takeaway_count
+FROM orders
+GROUP BY business_id, date;
+
+CREATE UNIQUE INDEX idx_mv_daily_order_metrics_unique ON mv_daily_order_metrics (business_id, date);
+
+CREATE MATERIALIZED VIEW mv_daily_session_metrics AS
+SELECT
+    business_id,
+    date_trunc('day', created_at)::date AS date,
+    count(*) AS session_count,
+    count(*) FILTER (WHERE status = 'completed') AS completed_sessions,
+    count(*) FILTER (WHERE ai_paused = true) AS ai_paused_count
+FROM sessions
+WHERE business_id IS NOT NULL
+GROUP BY business_id, date;
+
+CREATE UNIQUE INDEX idx_mv_daily_session_metrics_unique ON mv_daily_session_metrics (business_id, date);
+
+CREATE MATERIALIZED VIEW mv_daily_customer_metrics AS
+SELECT
+    business_id,
+    date_trunc('day', created_at)::date AS date,
+    count(*) AS new_customer_count
+FROM customers
+WHERE business_id IS NOT NULL
+GROUP BY business_id, date;
+
+CREATE UNIQUE INDEX idx_mv_daily_customer_metrics_unique ON mv_daily_customer_metrics (business_id, date);
+
+-- Functions for Analytics
+CREATE OR REPLACE FUNCTION refresh_analytics_views()
+RETURNS void AS $$
+BEGIN
+    REFRESH MATERIALIZED VIEW CONCURRENTLY mv_daily_order_metrics;
+    REFRESH MATERIALIZED VIEW CONCURRENTLY mv_daily_session_metrics;
+    REFRESH MATERIALIZED VIEW CONCURRENTLY mv_daily_customer_metrics;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION get_analytics_summary(
+    p_business_id UUID,
+    p_from_date DATE,
+    p_to_date DATE
+)
+RETURNS JSONB AS $$
+DECLARE
+    result JSONB;
+BEGIN
+    SELECT jsonb_build_object(
+        'total_orders', coalesce(sum(order_count), 0),
+        'total_revenue', coalesce(sum(total_revenue), 0),
+        'avg_order_value', coalesce(avg(avg_order_value), 0),
+        'completed_order_rate', CASE WHEN sum(order_count) > 0 THEN (sum(completed_count)::float / sum(order_count)::float) ELSE 0 END,
+        'new_customers', (SELECT sum(new_customer_count) FROM mv_daily_customer_metrics WHERE business_id = p_business_id AND date >= p_from_date AND date <= p_to_date),
+        'session_completion_rate', (SELECT CASE WHEN sum(session_count) > 0 THEN (sum(completed_sessions)::float / sum(session_count)::float) ELSE 0 END FROM mv_daily_session_metrics WHERE business_id = p_business_id AND date >= p_from_date AND date <= p_to_date)
+    ) INTO result
+    FROM mv_daily_order_metrics
+    WHERE business_id = p_business_id AND date >= p_from_date AND date <= p_to_date;
+    
+    RETURN result;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION get_analytics_trends(
+    p_business_id UUID,
+    p_from_date DATE,
+    p_to_date DATE,
+    p_granularity TEXT DEFAULT 'daily'
+)
+RETURNS TABLE (
+    period DATE,
+    order_count BIGINT,
+    total_revenue NUMERIC
+) AS $$
+BEGIN
+    IF p_granularity = 'weekly' THEN
+        RETURN QUERY
+        SELECT
+            date_trunc('week', m.date)::date as period,
+            sum(m.order_count)::BIGINT,
+            sum(m.total_revenue)
+        FROM mv_daily_order_metrics m
+        WHERE m.business_id = p_business_id AND m.date >= p_from_date AND m.date <= p_to_date
+        GROUP BY 1
+        ORDER BY 1;
+    ELSIF p_granularity = 'monthly' THEN
+        RETURN QUERY
+        SELECT
+            date_trunc('month', m.date)::date as period,
+            sum(m.order_count)::BIGINT,
+            sum(m.total_revenue)
+        FROM mv_daily_order_metrics m
+        WHERE m.business_id = p_business_id AND m.date >= p_from_date AND m.date <= p_to_date
+        GROUP BY 1
+        ORDER BY 1;
+    ELSE
+        RETURN QUERY
+        SELECT
+            m.date,
+            m.order_count,
+            m.total_revenue
+        FROM mv_daily_order_metrics m
+        WHERE m.business_id = p_business_id AND m.date >= p_from_date AND m.date <= p_to_date
+        ORDER BY m.date;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION get_top_customers(
+    p_business_id UUID,
+    p_limit INT DEFAULT 10
+)
+RETURNS TABLE (
+    customer_id UUID,
+    phone TEXT,
+    name TEXT,
+    order_count BIGINT,
+    total_spent NUMERIC
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        c.id,
+        c.phone::TEXT,
+        c.name::TEXT,
+        count(o.id) as order_count,
+        sum(o.total_amount) as total_spent
+    FROM orders o
+    JOIN customers c ON o.customer_id = c.id
+    WHERE o.business_id = p_business_id AND o.status = 'completed'
+    GROUP BY c.id, c.phone, c.name
+    ORDER BY total_spent DESC
+    LIMIT p_limit;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ============================================
+-- FEATURE: CRM / CUSTOMER PROFILES
+-- ============================================
+
+CREATE TABLE customer_profiles (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id UUID NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+    total_orders INT DEFAULT 0,
+    total_spent NUMERIC DEFAULT 0,
+    avg_order_value NUMERIC DEFAULT 0,
+    first_order_at TIMESTAMP WITH TIME ZONE,
+    last_order_at TIMESTAMP WITH TIME ZONE,
+    segment TEXT DEFAULT 'new', -- new | returning | vip | at_risk | churned
+    tags TEXT[] DEFAULT ARRAY[]::TEXT[],
+    preferences JSONB DEFAULT '{}'::JSONB,
+    marketing_opted_in BOOLEAN DEFAULT true,
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(customer_id, business_id)
+);
+
+CREATE OR REPLACE FUNCTION calculate_customer_segment(
+    p_total_orders INT,
+    p_total_spent NUMERIC,
+    p_last_order_at TIMESTAMP WITH TIME ZONE
+)
+RETURNS TEXT AS $$
+DECLARE
+    days_since_last_order INT;
+BEGIN
+    IF p_total_orders = 0 THEN
+        RETURN 'new';
+    END IF;
+
+    days_since_last_order := EXTRACT(DAY FROM (NOW() - p_last_order_at));
+
+    IF p_total_orders >= 10 OR p_total_spent >= 10000 THEN
+        RETURN 'vip';
+    END IF;
+
+    IF days_since_last_order > 90 THEN
+        RETURN 'churned';
+    END IF;
+
+    IF days_since_last_order > 45 THEN
+        RETURN 'at_risk';
+    END IF;
+
+    IF p_total_orders >= 2 AND days_since_last_order <= 45 THEN
+        RETURN 'returning';
+    END IF;
+
+    -- Default to new if they only have 1 order within 45 days
+    RETURN 'new';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION update_customer_profile_on_order()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_total_orders INT;
+    v_total_spent NUMERIC;
+    v_first_order_at TIMESTAMP WITH TIME ZONE;
+    v_last_order_at TIMESTAMP WITH TIME ZONE;
+    v_segment TEXT;
+BEGIN
+    -- Only update on completion
+    IF (TG_OP = 'UPDATE' AND NEW.status = 'completed' AND OLD.status != 'completed') OR
+       (TG_OP = 'INSERT' AND NEW.status = 'completed') THEN
+        
+        -- Get stats for this customer & business
+        SELECT 
+            count(*),
+            sum(total_amount),
+            min(created_at),
+            max(created_at)
+        INTO 
+            v_total_orders,
+            v_total_spent,
+            v_first_order_at,
+            v_last_order_at
+        FROM orders
+        WHERE customer_id = NEW.customer_id 
+          AND business_id = NEW.business_id
+          AND status = 'completed';
+
+        v_segment := calculate_customer_segment(v_total_orders, v_total_spent, v_last_order_at);
+
+        -- Upsert profile
+        INSERT INTO customer_profiles (
+            customer_id, 
+            business_id, 
+            total_orders, 
+            total_spent, 
+            avg_order_value, 
+            first_order_at, 
+            last_order_at, 
+            segment,
+            updated_at
+        )
+        VALUES (
+            NEW.customer_id, 
+            NEW.business_id, 
+            v_total_orders, 
+            v_total_spent, 
+            CASE WHEN v_total_orders > 0 THEN v_total_spent / v_total_orders ELSE 0 END,
+            v_first_order_at, 
+            v_last_order_at, 
+            v_segment,
+            NOW()
+        )
+        ON CONFLICT (customer_id, business_id) DO UPDATE SET
+            total_orders = EXCLUDED.total_orders,
+            total_spent = EXCLUDED.total_spent,
+            avg_order_value = EXCLUDED.avg_order_value,
+            last_order_at = EXCLUDED.last_order_at,
+            segment = EXCLUDED.segment,
+            updated_at = NOW();
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_update_customer_profile ON orders;
+CREATE TRIGGER trg_update_customer_profile
+AFTER INSERT OR UPDATE ON orders
+FOR EACH ROW
+EXECUTE FUNCTION update_customer_profile_on_order();
+
+CREATE OR REPLACE FUNCTION refresh_all_customer_segments()
+RETURNS void AS $$
+BEGIN
+    UPDATE customer_profiles
+    SET 
+        segment = calculate_customer_segment(total_orders, total_spent, last_order_at),
+        updated_at = NOW()
+    WHERE last_order_at IS NOT NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ============================================
+-- FEATURE: DYNAMIC AI PROMPTS
+-- ============================================
+
+CREATE TABLE ai_prompt_templates (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_id UUID REFERENCES businesses(id) ON DELETE CASCADE, -- NULL for system-wide defaults
+    plugin_id TEXT DEFAULT 'cake-cafe',
+    name TEXT NOT NULL,
+    description TEXT,
+    template_content TEXT NOT NULL,
+    template_type TEXT NOT NULL, -- greeting | farewell | personality | instruction | custom
+    is_active BOOLEAN DEFAULT true,
+    is_default BOOLEAN DEFAULT false,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Foreign keys for businesses table
+ALTER TABLE businesses ADD CONSTRAINT fk_ai_greeting FOREIGN KEY (ai_greeting_template_id) REFERENCES ai_prompt_templates(id);
+ALTER TABLE businesses ADD CONSTRAINT fk_ai_farewell FOREIGN KEY (ai_farewell_template_id) REFERENCES ai_prompt_templates(id);
+
+CREATE OR REPLACE FUNCTION get_effective_ai_template(
+    p_business_id UUID,
+    p_template_type TEXT,
+    p_plugin_id TEXT DEFAULT 'cake-cafe'
+)
+RETURNS TEXT AS $$
+DECLARE
+    v_content TEXT;
+BEGIN
+    -- Try to get business-specific active template of that type
+    SELECT template_content INTO v_content
+    FROM ai_prompt_templates
+    WHERE business_id = p_business_id 
+      AND template_type = p_template_type 
+      AND is_active = true
+    LIMIT 1;
+
+    -- Fallback to system default if not found
+    IF v_content IS NULL THEN
+        SELECT template_content INTO v_content
+        FROM ai_prompt_templates
+        WHERE business_id IS NULL 
+          AND template_type = p_template_type 
+          AND plugin_id = p_plugin_id
+          AND is_default = true
+        LIMIT 1;
+    END IF;
+
+    RETURN v_content;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Initial default templates
+INSERT INTO ai_prompt_templates (name, template_type, template_content, is_default, plugin_id)
+VALUES 
+('Default Greeting', 'greeting', 'Hello! Welcome to {business_name}. How can I help you today?', true, 'cake-cafe'),
+('Default Farewell', 'farewell', 'Thank you for choosing {business_name}! Have a great day.', true, 'cake-cafe'),
+('Default Professional', 'personality', 'You are a professional and efficient ordering assistant.', true, 'cake-cafe')
+ON CONFLICT DO NOTHING;

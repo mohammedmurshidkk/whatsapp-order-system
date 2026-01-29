@@ -1503,11 +1503,6 @@ export async function processMessage(
   }
   // If no handler or handler didn't change reply, use AI's reply as is (smalltalk, etc.)
 
-  // Prepend welcome message on first message of session
-  if (isFirstMessage && business?.welcome_message) {
-    replyMessage = `${business.welcome_message}\n\n${replyMessage}`;
-  }
-
   // Save outgoing message (skip if handler already saved it)
   if (!messageSaved) {
     await saveOutgoingMessage(session.id, replyMessage);

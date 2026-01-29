@@ -1,11 +1,10 @@
 // Business types (for SaaS multi-tenancy)
 export interface Business {
+  business_name: string;
   id: string;
   name: string;
   phone: string;
   address: string | null;
-  welcome_message: string;
-  closing_message: string;
   currency: string;
   is_active: boolean;
   created_at: string;
@@ -24,8 +23,7 @@ export interface Business {
   road_distance_multiplier?: number; // Multiplier for straight-line distance (default 1.3)
   use_road_distance_api?: boolean; // Use Google Maps API for accurate road distance
   minimum_wait_minutes?: number; // Minimum wait time for orders (no ASAP)
-  // Custom AI behavior
-  custom_ai_prompt?: string | null; // Business-specific AI instructions
+  // Critical message mode
   critical_message?: string | null; // Message to send instead of AI (emergencies)
   critical_message_enabled?: boolean; // When true, send critical_message instead of AI
   // Order numbering
@@ -37,6 +35,11 @@ export interface Business {
   updated_at?: string;
   // Plugin identifier for multi-vertical support
   plugin_id?: string; // e.g., 'cake-cafe', 'find-my-partner', 'appointments'
+  // AI Personality and Templates
+  ai_personality?: string;
+  ai_greeting_template_id?: string | null;
+  ai_farewell_template_id?: string | null;
+  ai_instructions_enabled?: boolean;
 }
 
 // Business Amenity types (generic amenities like party hall, catering, etc.)
@@ -731,4 +734,75 @@ export interface SessionPendingState {
   pendingAddonSelection?: PendingAddonSelection | null;
   pendingDateSelection?: PendingDateSelection | null;
   pendingCustomDate?: PendingCustomDate | null;
+}
+
+// ============================================
+// ANALYTICS TYPES
+// ============================================
+
+export interface AnalyticsSummary {
+  total_orders: number;
+  total_revenue: number;
+  avg_order_value: number;
+  completed_order_rate: number;
+  new_customers: number;
+  session_completion_rate: number;
+}
+
+export interface AnalyticsTrend {
+  period: string;
+  order_count: number;
+  total_revenue: number;
+}
+
+export interface TopCustomer {
+  customer_id: string;
+  phone: string;
+  name: string | null;
+  order_count: number;
+  total_spent: number;
+}
+
+// ============================================
+// CRM TYPES
+// ============================================
+
+export type CustomerSegment = 'new' | 'returning' | 'vip' | 'at_risk' | 'churned';
+
+export interface CustomerProfile {
+  id: string;
+  customer_id: string;
+  business_id: string;
+  total_orders: number;
+  total_spent: number;
+  avg_order_value: number;
+  first_order_at: string | null;
+  last_order_at: string | null;
+  segment: CustomerSegment;
+  tags: string[];
+  preferences: Record<string, any>;
+  marketing_opted_in: boolean;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ============================================
+// AI PROMPT TYPES
+// ============================================
+
+export type AIPromptTemplateType = 'greeting' | 'farewell' | 'personality' | 'instruction' | 'custom';
+
+export interface AIPromptTemplate {
+  id: string;
+  business_id: string | null;
+  plugin_id: string;
+  name: string;
+  description: string | null;
+  template_content: string;
+  template_type: AIPromptTemplateType;
+  is_active: boolean;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
 }
