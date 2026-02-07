@@ -6,6 +6,8 @@ import {
   printOrderReceipt,
   getOutletsWithPrinterStatus,
   updateOutletPrinter,
+  getProxyConnectionStatus,
+  getOutletProxyStatus,
 } from '../controllers/printController';
 import { authMiddleware } from '../middleware/auth';
 
@@ -31,5 +33,11 @@ router.get('/outlets', getOutletsWithPrinterStatus);
 
 // Update printer IP for outlet
 router.patch('/outlets/:outletId/printer', updateOutletPrinter);
+
+// Get print proxy connection status for all outlets
+router.get('/proxy-status', getProxyConnectionStatus);
+
+// Get print proxy connection status for specific outlet
+router.get('/proxy-status/:outletId', getOutletProxyStatus);
 
 export default router;

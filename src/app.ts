@@ -28,6 +28,7 @@ import { WHATSAPP_PROVIDER } from './config/constants';
 import { logger } from './utils/logger';
 import { handleTestMessage } from './controllers/webhookController';
 import { initializeSocket } from './services/socketService';
+import { initializePrintProxyWebSocket } from './services/printProxyService';
 import { requestLogger } from './middleware/requestLogger';
 import { startCampaignScheduler } from './services/campaignScheduler';
 import { initializePlugins } from './plugins';
@@ -41,6 +42,9 @@ const PORT = process.env.PORT || 8080;
 
 // Initialize Socket.IO
 initializeSocket(httpServer);
+
+// Initialize Print Proxy WebSocket
+initializePrintProxyWebSocket(httpServer);
 
 // Middleware
 app.use(cors({
@@ -163,6 +167,7 @@ httpServer.listen(PORT, () => {
 
   logger.info(`Menu API: http://localhost:${PORT}/api/menu`);
   logger.info(`Socket.IO: ws://localhost:${PORT}`);
+  logger.info(`Print Proxy WebSocket: ws://localhost:${PORT}/ws/print-proxy`);
 
   // Initialize WhatsApp after server starts
   initializeWhatsApp();

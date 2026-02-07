@@ -9,9 +9,16 @@ import {
   toEditablePrintData,
   generateHtmlFromEditable,
   printFromEditable,
+  generateEscPosFromEditable,
   EditablePrintData,
 } from '../services/printService';
 import { supabase } from '../config/database';
+import {
+  isProxyConnected,
+  sendPrintJob,
+  getProxyStatus,
+  getConnectedProxies,
+} from '../services/printProxyService';
 
 /**
  * GET /api/print/preview/:orderId
@@ -208,16 +215,55 @@ export async function printOrderReceipt(req: AuthRequest, res: Response): Promis
 
     let result: { success: boolean; error?: string };
 
-    // If printData is provided, use it (edited version)
-    if (printData) {
-      result = await printFromEditable(printData as EditablePrintData, outlet.printer_ip);
+    // Check if print proxy is connected for this outlet
+    const proxyConnected = isProxyConnected(outletId);
+
+    if (proxyConnected) {
+      // Use print proxy (for cloud deployment)
+      logger.info(`Using print proxy for outlet ${outlet.outlet_name}`);
+
+      // Get or generate editable print data
+      let editableData: EditablePrintData;
+
+      if (printData) {
+        editableData = printData as EditablePrintData;
+      } else {
+        const orderPrintData = await getOrderPrintData(orderId);
+        if (!orderPrintData) {
+          res.status(404).json({ error: 'Failed to load order data' });
+          return;
+        }
+        editableData = toEditablePrintData(orderPrintData);
+      }
+
+      // Generate ESC/POS data and convert to base64
+      const escPosBuffer = generateEscPosFromEditable(editableData);
+      const base64Data = escPosBuffer.toString('base64');
+
+      // Generate unique job ID
+      const jobId = `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+      // Send via proxy
+      result = await sendPrintJob(outletId, {
+        id: jobId,
+        data: base64Data,
+        printerIp: outlet.printer_ip,
+        timestamp: Date.now(),
+      });
+
     } else {
-      // Otherwise print from original order data
-      result = await printOrder(orderId, outletId);
+      // Direct TCP connection (for local development or same-network deployment)
+      logger.info(`Using direct TCP for outlet ${outlet.outlet_name} (proxy not connected)`);
+
+      if (printData) {
+        result = await printFromEditable(printData as EditablePrintData, outlet.printer_ip);
+      } else {
+        result = await printOrder(orderId, outletId);
+      }
     }
 
     if (result.success) {
-      logger.info(`Order ${order.order_number} printed to ${outlet.outlet_name}`);
+      logger.info(`Order ${order.order_number} printed to ${outlet.outlet_name} (via ${proxyConnected ? 'proxy' : 'direct'})`);
       res.status(200).json({
         success: true,
         message: `Order printed successfully to ${outlet.outlet_name}`,
@@ -349,4 +395,98 @@ function isValidIpAddress(ip: string): boolean {
     const num = parseInt(part, 10);
     return num >= 0 && num <= 255;
   });
+}
+
+/**
+ * GET /api/print/proxy-status
+ * Get print proxy connection status for all outlets
+ */
+export async function getProxyConnectionStatus(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    // Get all outlets with printers for this business
+    const { data: outlets, error } = await supabase
+      .from('business_outlets')
+      .select('id, outlet_name, printer_ip')
+      .eq('business_id', businessId)
+      .eq('is_active', true)
+      .not('printer_ip', 'is', null);
+
+    if (error) {
+      res.status(500).json({ error: 'Failed to fetch outlets' });
+      return;
+    }
+
+    // Get proxy status for each outlet
+    const outletsWithProxyStatus = (outlets || []).map(outlet => {
+      const status = getProxyStatus(outlet.id);
+      return {
+        id: outlet.id,
+        outlet_name: outlet.outlet_name,
+        printer_ip: outlet.printer_ip,
+        proxy_connected: status.connected,
+        last_ping: status.lastPing || null,
+      };
+    });
+
+    // Get all connected proxies for this business
+    const connectedProxies = getConnectedProxies(businessId);
+
+    res.status(200).json({
+      outlets: outletsWithProxyStatus,
+      total_connected: connectedProxies.length,
+    });
+
+  } catch (error) {
+    logger.error('Failed to get proxy status', error);
+    res.status(500).json({ error: 'Failed to get proxy status' });
+  }
+}
+
+/**
+ * GET /api/print/proxy-status/:outletId
+ * Get print proxy connection status for a specific outlet
+ */
+export async function getOutletProxyStatus(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const businessId = getBusinessId(req);
+    if (!businessId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const { outletId } = req.params;
+
+    // Verify outlet belongs to this business
+    const { data: outlet, error } = await supabase
+      .from('business_outlets')
+      .select('id, outlet_name, printer_ip')
+      .eq('id', outletId)
+      .eq('business_id', businessId)
+      .single();
+
+    if (error || !outlet) {
+      res.status(404).json({ error: 'Outlet not found' });
+      return;
+    }
+
+    const status = getProxyStatus(outletId);
+
+    res.status(200).json({
+      outlet_id: outlet.id,
+      outlet_name: outlet.outlet_name,
+      printer_ip: outlet.printer_ip,
+      proxy_connected: status.connected,
+      last_ping: status.lastPing || null,
+    });
+
+  } catch (error) {
+    logger.error('Failed to get outlet proxy status', error);
+    res.status(500).json({ error: 'Failed to get outlet proxy status' });
+  }
 }
