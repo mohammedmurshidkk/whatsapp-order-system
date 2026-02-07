@@ -31,6 +31,8 @@ import { formatOutletsForCustomer, findOutletByCustomerInput } from '../../servi
 import { createIntervention } from '../../services/interventionService';
 import { emitInterventionCreated } from '../../../../services/socketService';
 import { getAcceptedQuoteForSession } from '../../services/cakeQuoteService';
+import { customerProfileService } from '../../../../services/customerProfileService';
+import { aiPromptService } from '../../../../services/aiPromptService';
 
 /**
  * Confirm Order - Final order confirmation
@@ -187,6 +189,10 @@ export const confirmOrderHandler: IntentHandlerFn = async (ctx, aiResponse) => {
     logger.info(`Creating order with ${latestSession.items.length} items for session ${ctx.session.id}`);
     const order = await createFinalOrder(ctx.session.id);
 
+    // Learn customer preferences asynchronously
+    customerProfileService.learnCustomerPreferences(ctx.businessId, ctx.customer.id, order.id)
+      .catch(err => logger.warn('Failed to learn customer preferences', err));
+
     // Build confirmation message
     let confirmMsg = `${t('order.confirmed', ctx.lang)}\n\n📋 ${t('order.orderNumber', ctx.lang)}: *${order.order_number}*\n${t('order.total', ctx.lang, { amount: order.total_amount })}`;
 
@@ -216,7 +222,18 @@ export const confirmOrderHandler: IntentHandlerFn = async (ctx, aiResponse) => {
     }
 
     confirmMsg += `\n\n_${t('order.saveNumber', ctx.lang, { orderNumber: order.order_number })}_`;
-    const closingMsg = ctx.business?.closing_message || 'Thank you for your order!';
+
+    // Get farewell message from AI prompt templates
+    let closingMsg = 'Thank you for your order!';
+    if (ctx.business?.id) {
+      const farewellTemplate = await aiPromptService.getEffectiveTemplate(ctx.business.id, 'farewell');
+      if (farewellTemplate) {
+        closingMsg = aiPromptService.renderTemplate(farewellTemplate, {
+          business_name: ctx.business.business_name || '',
+          customer_name: ctx.customer?.name || '',
+        });
+      }
+    }
     confirmMsg += `\n\n${closingMsg} 🙏`;
 
     return { reply: confirmMsg };

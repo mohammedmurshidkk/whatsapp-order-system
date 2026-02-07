@@ -6,6 +6,7 @@ import { getAIClient } from './aiClient';
 import { formatWeight } from '../utils/weightUtils';
 import { trackAIUsage, AIProvider } from './usageService';
 import { getPopularItemsForAI } from '../plugins/cake-cafe/services/popularItemsService';
+import { aiPromptService } from './aiPromptService';
 
 // Import system prompt from cake-cafe plugin
 import { getSystemPrompt, PopularItem, FoodOrderingPromptContext } from '../plugins/cake-cafe/prompts/systemPrompt';
@@ -333,6 +334,15 @@ export async function processMessageWithAI(
     if (popularItems && popularItems.length > 0) {
       context.popularItems = popularItems;
     }
+
+    // Fetch dynamic AI templates
+    const [greeting, farewell] = await Promise.all([
+      aiPromptService.getEffectiveTemplate(context.business.id, 'greeting'),
+      aiPromptService.getEffectiveTemplate(context.business.id, 'farewell')
+    ]);
+
+    if (greeting) context.aiGreetingTemplate = aiPromptService.renderTemplate(greeting, { business_name: context.business.name });
+    if (farewell) context.aiFarewellTemplate = aiPromptService.renderTemplate(farewell, { business_name: context.business.name });
   }
 
   const prompt = buildPrompt(currentMessage, conversationHistory, context);

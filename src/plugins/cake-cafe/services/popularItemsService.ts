@@ -49,7 +49,7 @@ export async function getTopSellingItems(
   period: PopularityPeriod = 'weekly',
   limit: number = 10
 ): Promise<any[]> {
-    const { data, error } = await supabase
+  const { data, error } = await supabase
     .from('order_item_stats')
     .select('*, menu_item:menu_items(id, name, description, price, sizes, image_url)')
     .eq('business_id', businessId)
@@ -71,7 +71,7 @@ export async function getTopSellingItems(
  * @param limit - The maximum number of items to return.
  */
 export async function getFeaturedItems(businessId: string, limit: number = 10): Promise<any[]> {
-    const { data, error } = await supabase
+  const { data, error } = await supabase
     .from('menu_items')
     .select('*')
     .eq('business_id', businessId)
@@ -79,12 +79,12 @@ export async function getFeaturedItems(businessId: string, limit: number = 10): 
     .order('featured_order', { ascending: true })
     .limit(limit);
 
-    if (error) {
-        logger.error('Failed to get featured items', error);
-        return [];
-    }
+  if (error) {
+    logger.error('Failed to get featured items', error);
+    return [];
+  }
 
-    return data;
+  return data;
 }
 
 /**
@@ -133,8 +133,6 @@ export async function getPopularItemsForAI(businessId: string): Promise<any[]> {
   const popularItems = Array.from(combined.values())
     .sort((a, b) => b.score - a.score)
     .slice(0, 5);
-
-  logger.info(`getPopularItemsForAI`, JSON.stringify({ popularItems, featuredItems, topItems }, null, 2));
 
   return popularItems;
 }

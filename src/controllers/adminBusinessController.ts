@@ -38,14 +38,10 @@ export async function getProfile(req: AuthRequest, res: Response): Promise<void>
         phone: business.phone, // Read-only
         address: business.address,
         logo_url: business.logo_url || null,
-        welcome_message: business.welcome_message,
-        closing_message: business.closing_message,
         currency: business.currency,
         is_active: business.is_active,
         order_number_prefix: business?.order_number_prefix,
         customer_support_phone: business?.customer_support_phone,
-        // Custom AI prompt for business-specific rules
-        custom_ai_prompt: business.custom_ai_prompt || null,
         // Critical message - when set, overrides all AI responses
         critical_message: business.critical_message || null,
         critical_message_enabled: business.critical_message_enabled || false,
@@ -83,9 +79,6 @@ export async function updateProfile(req: AuthRequest, res: Response): Promise<vo
     const {
       name,
       address,
-      welcome_message,
-      closing_message,
-      custom_ai_prompt,
       critical_message,
       critical_message_enabled,
       supports_delivery,
@@ -108,9 +101,6 @@ export async function updateProfile(req: AuthRequest, res: Response): Promise<vo
 
     if (name !== undefined) updateData.name = name;
     if (address !== undefined) updateData.address = address;
-    if (welcome_message !== undefined) updateData.welcome_message = welcome_message;
-    if (closing_message !== undefined) updateData.closing_message = closing_message;
-    if (custom_ai_prompt !== undefined) updateData.custom_ai_prompt = custom_ai_prompt;
     if (critical_message !== undefined) updateData.critical_message = critical_message;
     if (critical_message_enabled !== undefined) updateData.critical_message_enabled = critical_message_enabled;
     if (supports_delivery !== undefined) updateData.supports_delivery = supports_delivery;

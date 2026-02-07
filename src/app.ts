@@ -19,12 +19,16 @@ import adminCustomerRoutes from './routes/adminCustomers';
 import adminOrderRoutes from './routes/adminOrders';
 import printRoutes from './routes/print';
 import superadminUsageRoutes from './routes/superadminUsage';
+import analyticsRoutes from './routes/analytics';
+import customerProfileRoutes from './routes/customerProfiles';
+import aiPromptRoutes from './routes/aiPrompts';
 // Plugin routes
 import { registerCakeCafeRoutes } from './plugins/cake-cafe/routes';
 import { WHATSAPP_PROVIDER } from './config/constants';
 import { logger } from './utils/logger';
 import { handleTestMessage } from './controllers/webhookController';
 import { initializeSocket } from './services/socketService';
+import { initializePrintProxyWebSocket } from './services/printProxyService';
 import { requestLogger } from './middleware/requestLogger';
 import { startCampaignScheduler } from './services/campaignScheduler';
 import { initializePlugins } from './plugins';
@@ -38,6 +42,9 @@ const PORT = process.env.PORT || 8080;
 
 // Initialize Socket.IO
 initializeSocket(httpServer);
+
+// Initialize Print Proxy WebSocket
+initializePrintProxyWebSocket(httpServer);
 
 // Middleware
 app.use(cors({
@@ -80,6 +87,9 @@ app.use('/api/admin/orders', adminOrderRoutes);
 app.use('/api/print', printRoutes);
 app.use('/api/superadmin', superadminRoutes);
 app.use('/api/superadmin/usage', superadminUsageRoutes);
+app.use('/api/analytics', analyticsRoutes);
+app.use('/api/customer-profiles', customerProfileRoutes);
+app.use('/api/ai-prompts', aiPromptRoutes);
 
 // Plugin routes
 registerCakeCafeRoutes(app);
@@ -157,6 +167,7 @@ httpServer.listen(PORT, () => {
 
   logger.info(`Menu API: http://localhost:${PORT}/api/menu`);
   logger.info(`Socket.IO: ws://localhost:${PORT}`);
+  logger.info(`Print Proxy WebSocket: ws://localhost:${PORT}/ws/print-proxy`);
 
   // Initialize WhatsApp after server starts
   initializeWhatsApp();
