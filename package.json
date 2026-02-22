@@ -26,6 +26,7 @@
     "@supabase/supabase-js": "^2.39.0",
     "@types/form-data": "^2.5.2",
     "@types/multer": "^2.0.0",
+    "@upstash/redis": "^1.36.2",
     "axios": "^1.6.2",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",

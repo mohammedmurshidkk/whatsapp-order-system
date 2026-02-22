@@ -1,6 +1,9 @@
 import { Request, Response } from 'express';
 import { WhatsAppWebhookBody, TestMessageRequest, SessionItem, MenuAddon, Session } from '../types';
 import { findOrCreateCustomer } from '../services/customerService';
+import { classifyIntent, buildSessionState, logTierUsage } from '../services/intentClassifier';
+import { buildSmartContext, handleTier1Intent } from '../services/contextBuilder';
+import { getCachedAIResponse, setCachedAIResponse, getCachedGreeting, setCachedGreeting } from '../services/cacheService';
 import {
   findOrCreateSession,
   updateSessionActivity,
@@ -1222,33 +1225,76 @@ export async function processMessage(
   // Check if this is the first message in the session (for welcome message)
   const isFirstMessage = messageHistory.length === 0;
 
-  // Get menu for AI context
-  let menuItems;
-  let menuCategories;
-  let amenities;
-  if (businessId) {
-    menuItems = await getMenuItems(businessId);
-    menuCategories = await getMenuCategories(businessId);
-    amenities = await getBusinessAmenities(businessId);
-    logger.info(`Menu loaded: ${menuItems?.length || 0} items, ${menuCategories?.length || 0} categories, ${amenities?.length || 0} amenities`);
-  } else {
-    logger.warn('No business found - AI will have no menu context!');
+  // Use sessionWithItems for LATEST fulfillment data
+  const latestSessionData = sessionWithItems || session;
+
+  // ============================================
+  // RAG Level 2: Intent Classification & Smart Context
+  // ============================================
+
+  // Build session state for intent classification
+  const fulfillmentComplete = !!latestSessionData.fulfillment_type &&
+    (!!latestSessionData.delivery_address || !!latestSessionData.pickup_outlet_id);
+
+  const sessionState = buildSessionState(session, existingItems, fulfillmentComplete);
+
+  // Classify intent to determine processing tier
+  const classified = classifyIntent(messageText, sessionState, business);
+  logger.debug(`Intent classified: tier=${classified.tier}, intent=${classified.intent}, skipAI=${classified.skipAI}`);
+
+  // TIER 0: Cached/template responses - no AI needed
+  if (classified.tier === 0 && classified.skipAI && classified.cachedResponse) {
+    // Check if we have a cached greeting for this business
+    if (classified.intent === 'greeting' && businessId) {
+      const cachedGreeting = await getCachedGreeting(businessId);
+      if (cachedGreeting) {
+        await saveIncomingMessage(session.id, originalMessage);
+        await saveOutgoingMessage(session.id, cachedGreeting);
+        logTierUsage(0, classified.intent, false, businessId);
+        return cachedGreeting;
+      }
+      // Cache the greeting for next time
+      await setCachedGreeting(businessId, classified.cachedResponse);
+    }
+
+    await saveIncomingMessage(session.id, originalMessage);
+    await saveOutgoingMessage(session.id, classified.cachedResponse);
+    logTierUsage(0, classified.intent, false, businessId);
+    return classified.cachedResponse;
   }
 
-  // Build AI context - use sessionWithItems for LATEST fulfillment data
-  const latestSessionData = sessionWithItems || session;
-  const aiContext = {
-    business: business || undefined,
-    menuItems,
-    menuCategories,
-    currentSessionItems: formatSessionItemsForAI(existingItems),
-    outlets,
-    sessionHasFulfillmentType: !!latestSessionData.fulfillment_type,
-    sessionHasDeliveryInfo: !!latestSessionData.delivery_address,
-    sessionHasPickupInfo: !!latestSessionData.pickup_outlet_id,
-    amenities,
-    customerLanguage: lang, // i18n: Pass customer's preferred language to AI
-    // Active order context for post-order inquiries
+  // TIER 1: DB lookup responses - no AI needed
+  if (classified.tier === 1 && classified.skipAI) {
+    const tier1Response = await handleTier1Intent(classified.intent, businessId, business);
+    if (tier1Response) {
+      await saveIncomingMessage(session.id, originalMessage);
+      await saveOutgoingMessage(session.id, tier1Response);
+      logTierUsage(1, classified.intent, false, businessId);
+      return tier1Response;
+    }
+    // Fall through to AI if no tier 1 response
+  }
+
+  // TIER 2/3: Check AI response cache first
+  if (classified.tier >= 2) {
+    const cachedResponse = await getCachedAIResponse(businessId, messageText);
+    if (cachedResponse) {
+      await saveIncomingMessage(session.id, originalMessage);
+      await saveOutgoingMessage(session.id, cachedResponse);
+      logTierUsage(classified.tier, 'cached_ai', false, businessId);
+      return cachedResponse;
+    }
+  }
+
+  // Build smart context based on tier (only loads relevant data)
+  const aiContext = await buildSmartContext({
+    message: messageText,
+    businessId,
+    business,
+    session: latestSessionData,
+    cartItems: existingItems,
+    language: lang,
+    tier: classified.tier,
     activeOrder: activeOrder ? {
       order_number: activeOrder.order_number,
       status: activeOrder.status,
@@ -1256,8 +1302,14 @@ export async function processMessage(
       fulfillment_type: activeOrder.fulfillment_type,
       created_at: activeOrder.created_at,
     } : null,
-  };
+  });
 
+  // Add outlets if not already included (needed for fulfillment flow)
+  if (!aiContext.outlets) {
+    aiContext.outlets = outlets;
+  }
+
+  logger.debug(`Smart context built: type=${aiContext.contextType}, menuItems=${aiContext.menuItems?.length || 0}, keywords=${aiContext.keywords?.join(',') || 'none'}`);
   logger.debug(`AI context fulfillment: type=${latestSessionData.fulfillment_type}, addr=${latestSessionData.delivery_address}, outlet=${latestSessionData.pickup_outlet_id}`);
 
   // ============================================
@@ -1312,6 +1364,18 @@ export async function processMessage(
     session,
     aiContext
   );
+
+  // Log tier usage for cost tracking
+  logTierUsage(classified.tier, aiResponse.intent || classified.intent, true, businessId);
+
+  // Cache non-transactional AI responses for future use
+  // Don't cache: order confirmations, cart modifications, fulfillment collection
+  const nonCacheableIntents = ['confirm_order', 'add_item', 'modify_order', 'remove_addon',
+    'collect_delivery_info', 'collect_pickup_info', 'ready_for_checkout', 'cancel'];
+  if (!nonCacheableIntents.includes(aiResponse.intent) && aiResponse.reply) {
+    // Cache with 30 min TTL for simple queries
+    await setCachedAIResponse(businessId, messageText, aiResponse.reply, 1800);
+  }
 
   // Save incoming message (use original, not normalized, to preserve customer's actual input)
   await saveIncomingMessage(session.id, originalMessage);
