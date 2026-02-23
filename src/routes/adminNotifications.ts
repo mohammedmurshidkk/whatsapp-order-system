@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authMiddleware } from '../middleware/auth';
+import { requireFeature } from '../middleware/featureMiddleware';
 import {
   getNotificationsList,
   getUnread,
@@ -10,8 +11,9 @@ import {
 
 const router: Router = Router();
 
-// All routes require authentication
+// All routes require authentication and notifications feature
 router.use(authMiddleware);
+router.use(requireFeature('notifications'));
 
 // GET /api/notifications - Get paginated notifications
 router.get('/', getNotificationsList);

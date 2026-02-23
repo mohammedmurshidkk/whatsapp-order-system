@@ -1,11 +1,13 @@
 import { Router } from 'express';
 import * as interventionController from '../controllers/adminInterventionController';
 import { authMiddleware } from '../../../middleware/auth';
+import { requireFeature } from '../../../middleware/featureMiddleware';
 
 const router: Router = Router();
 
-// Apply auth middleware to all routes
+// Apply auth middleware and interventions feature check to all routes
 router.use(authMiddleware);
+router.use(requireFeature('interventions'));
 
 // List pending interventions
 router.get('/', interventionController.getPendingInterventions);

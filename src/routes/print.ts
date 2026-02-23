@@ -10,11 +10,13 @@ import {
   getOutletProxyStatus,
 } from '../controllers/printController';
 import { authMiddleware } from '../middleware/auth';
+import { requireFeature } from '../middleware/featureMiddleware';
 
 const router: IRouter = Router();
 
-// All routes require authentication
+// All routes require authentication and order_print feature
 router.use(authMiddleware);
+router.use(requireFeature('order_print'));
 
 // Get editable JSON data for print modal
 router.get('/data/:orderId', getPrintData);

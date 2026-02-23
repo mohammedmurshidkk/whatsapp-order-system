@@ -1,4 +1,4 @@
-import { IRouter, Router } from 'express';
+import { IRouter, Router, Response } from 'express';
 import multer from 'multer';
 import {
   getProfile,
@@ -9,7 +9,9 @@ import {
   deleteOutlet,
   toggleCriticalMessage,
 } from '../controllers/adminBusinessController';
-import { authMiddleware } from '../middleware/auth';
+import { authMiddleware, AuthRequest, getBusinessId } from '../middleware/auth';
+import { getBusinessFeatures } from '../services/featureService';
+import { logger } from '../utils/logger';
 
 const router: IRouter = Router();
 
@@ -43,5 +45,22 @@ router.patch('/critical-message', toggleCriticalMessage);
 router.post('/outlets', createOutlet);
 router.put('/outlets/:outletId', updateOutlet);
 router.delete('/outlets/:outletId', deleteOutlet);
+
+// Feature flags route
+router.get('/features', async (req: AuthRequest, res: Response) => {
+  try {
+    const businessId = getBusinessId(req)
+
+    if (!businessId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const features = await getBusinessFeatures(businessId);
+    res.json({ features });
+  } catch (error) {
+    logger.error('Failed to get business features', { error });
+    res.status(500).json({ error: 'Failed to load features' });
+  }
+});
 
 export default router;

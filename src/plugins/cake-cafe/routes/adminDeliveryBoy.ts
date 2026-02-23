@@ -9,11 +9,13 @@ import {
   assignDelivery,
 } from '../controllers/deliveryBoyController';
 import { authMiddleware } from '../../../middleware/auth';
+import { requireFeature } from '../../../middleware/featureMiddleware';
 
 const router: IRouter = Router();
 
-// All routes require authentication
+// All routes require authentication and delivery_management feature
 router.use(authMiddleware);
+router.use(requireFeature('delivery_management'));
 
 // CRUD endpoints
 router.get('/', listDeliveryBoys);

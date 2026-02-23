@@ -21,6 +21,17 @@ import {
   aggregateDailyStats,
 } from '../services/usageService';
 import { getAuditLogs, getAuditStats, auditFromRequest } from '../services/auditService';
+import {
+  getAllFeatureDefinitions,
+  getBusinessFeaturesWithDefinitions,
+  bulkUpdateFeatures,
+} from '../services/featureService';
+import {
+  getClearableDataSummary,
+  checkDependencies,
+  clearData,
+  getAvailableDataTypes,
+} from '../services/dataClearService';
 import { supabase } from '../config/database';
 import { logger } from '../utils/logger';
 
@@ -415,6 +426,155 @@ router.get('/audit-logs/stats', async (req: AuthRequest, res: Response) => {
   } catch (error) {
     logger.error('Failed to get audit stats', { error });
     res.status(500).json({ error: 'Failed to load audit stats' });
+  }
+});
+
+// ============================================
+// Feature Management APIs
+// ============================================
+
+/**
+ * GET /api/superadmin/feature-definitions
+ * Get all available feature definitions
+ */
+router.get('/feature-definitions', async (req: AuthRequest, res: Response) => {
+  try {
+    const definitions = await getAllFeatureDefinitions();
+    res.json({ definitions });
+  } catch (error) {
+    logger.error('Failed to get feature definitions', { error });
+    res.status(500).json({ error: 'Failed to load feature definitions' });
+  }
+});
+
+/**
+ * GET /api/superadmin/businesses/:id/features
+ * Get features for a specific business
+ */
+router.get('/businesses/:id/features', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const features = await getBusinessFeaturesWithDefinitions(id);
+    res.json({ features });
+  } catch (error) {
+    logger.error('Failed to get business features', { error });
+    res.status(500).json({ error: 'Failed to load business features' });
+  }
+});
+
+/**
+ * PUT /api/superadmin/businesses/:id/features
+ * Update features for a business
+ */
+router.put('/businesses/:id/features', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { features } = req.body;
+    const adminId = req.user?.id;
+
+    if (!adminId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    if (!features || !Array.isArray(features)) {
+      return res.status(400).json({ error: 'features array is required' });
+    }
+
+    const updated = await bulkUpdateFeatures(id, features, adminId);
+    res.json({ success: true, updated });
+  } catch (error) {
+    logger.error('Failed to update business features', { error });
+    res.status(500).json({ error: 'Failed to update features' });
+  }
+});
+
+// ============================================
+// Data Clear APIs
+// ============================================
+
+/**
+ * GET /api/superadmin/data-types
+ * Get available data types for clearing
+ */
+router.get('/data-types', async (req: AuthRequest, res: Response) => {
+  try {
+    const dataTypes = getAvailableDataTypes();
+    res.json({ dataTypes });
+  } catch (error) {
+    logger.error('Failed to get data types', { error });
+    res.status(500).json({ error: 'Failed to load data types' });
+  }
+});
+
+/**
+ * GET /api/superadmin/businesses/:id/data-summary
+ * Get data summary (counts) for a business
+ */
+router.get('/businesses/:id/data-summary', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const summary = await getClearableDataSummary(id);
+    res.json({ summary });
+  } catch (error) {
+    logger.error('Failed to get data summary', { error });
+    res.status(500).json({ error: 'Failed to load data summary' });
+  }
+});
+
+/**
+ * POST /api/superadmin/businesses/:id/data-clear/check
+ * Check if a data type can be cleared (dependency check)
+ */
+router.post('/businesses/:id/data-clear/check', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { dataType } = req.body;
+
+    if (!dataType) {
+      return res.status(400).json({ error: 'dataType is required' });
+    }
+
+    const result = await checkDependencies(id, dataType);
+    res.json(result);
+  } catch (error) {
+    logger.error('Failed to check dependencies', { error });
+    res.status(500).json({ error: 'Failed to check dependencies' });
+  }
+});
+
+/**
+ * POST /api/superadmin/businesses/:id/data-clear
+ * Clear data for a business (with confirmation)
+ */
+router.post('/businesses/:id/data-clear', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { dataType, confirm } = req.body;
+    const adminId = req.user?.id;
+    const adminEmail = req.user?.email;
+
+    if (!adminId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    if (!dataType) {
+      return res.status(400).json({ error: 'dataType is required' });
+    }
+
+    if (confirm !== true) {
+      return res.status(400).json({ error: 'confirm must be true to proceed with deletion' });
+    }
+
+    const result = await clearData(id, dataType, adminId, adminEmail);
+
+    if (!result.success) {
+      return res.status(400).json(result);
+    }
+
+    res.json(result);
+  } catch (error) {
+    logger.error('Failed to clear data', { error });
+    res.status(500).json({ error: 'Failed to clear data' });
   }
 });
 

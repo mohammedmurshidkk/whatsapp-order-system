@@ -11,6 +11,7 @@ import {
   toggleAmenityStatus,
 } from '../controllers/adminAmenityController';
 import { authMiddleware } from '../../../middleware/auth';
+import { requireFeature } from '../../../middleware/featureMiddleware';
 
 const router: IRouter = Router();
 
@@ -29,8 +30,9 @@ const upload = multer({
   },
 });
 
-// All routes require authentication
+// All routes require authentication and amenities feature
 router.use(authMiddleware);
+router.use(requireFeature('amenities'));
 
 // List all amenities
 router.get('/', listAmenities);

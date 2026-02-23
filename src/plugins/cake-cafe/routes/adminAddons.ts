@@ -9,11 +9,13 @@ import {
   getCategoryAddons,
 } from '../controllers/adminAddonController';
 import { authMiddleware } from '../../../middleware/auth';
+import { requireFeature } from '../../../middleware/featureMiddleware';
 
 const router: IRouter = Router();
 
-// All routes require authentication
+// All routes require authentication and menu_addons feature
 router.use(authMiddleware);
+router.use(requireFeature('menu_addons'));
 
 // Addon groups
 router.get('/groups', listAddonGroups);

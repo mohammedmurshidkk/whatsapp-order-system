@@ -22,6 +22,8 @@ DROP TABLE IF EXISTS admin_users CASCADE;
 DROP TABLE IF EXISTS super_admins CASCADE;
 DROP TABLE IF EXISTS menu_pdf_configs CASCADE;
 DROP TABLE IF EXISTS ai_prompt_templates CASCADE;
+DROP TABLE IF EXISTS tenant_features CASCADE;
+DROP TABLE IF EXISTS feature_definitions CASCADE;
 DROP TABLE IF EXISTS businesses CASCADE;
 
 -- ============================================
@@ -1638,3 +1640,150 @@ VALUES
 ('Default Farewell', 'farewell', 'Thank you for choosing {business_name}! Have a great day.', true, 'cake-cafe'),
 ('Default Professional', 'personality', 'You are a professional and efficient ordering assistant.', true, 'cake-cafe')
 ON CONFLICT DO NOTHING;
+
+
+-- ============================================
+-- MIGRATION: 011_tenant_features.sql
+-- ============================================
+-- Migration: 011_tenant_features.sql
+-- Description: Tenant feature flags system for multi-tenant feature management
+-- Created: 2026-02-22
+
+-- ============================================
+-- FEATURE DEFINITIONS TABLE
+-- Master list of all available features
+-- ============================================
+CREATE TABLE IF NOT EXISTS feature_definitions (
+  feature_key VARCHAR(50) PRIMARY KEY,
+  display_name VARCHAR(100) NOT NULL,
+  description TEXT,
+  category VARCHAR(50), -- 'operations', 'marketing', 'ai', 'analytics'
+  default_enabled BOOLEAN DEFAULT true,
+  sort_order INTEGER DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ============================================
+-- TENANT FEATURES TABLE
+-- Stores feature flags per business
+-- ============================================
+CREATE TABLE IF NOT EXISTS tenant_features (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  feature_key VARCHAR(50) NOT NULL REFERENCES feature_definitions(feature_key) ON DELETE CASCADE,
+  is_enabled BOOLEAN DEFAULT true,
+  enabled_at TIMESTAMPTZ,
+  enabled_by UUID REFERENCES super_admins(id) ON DELETE SET NULL,
+  disabled_at TIMESTAMPTZ,
+  disabled_by UUID REFERENCES super_admins(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(business_id, feature_key)
+);
+
+-- Indexes for fast lookups
+CREATE INDEX IF NOT EXISTS idx_tenant_features_business ON tenant_features(business_id);
+CREATE INDEX IF NOT EXISTS idx_tenant_features_enabled ON tenant_features(business_id, is_enabled);
+CREATE INDEX IF NOT EXISTS idx_tenant_features_key ON tenant_features(feature_key);
+
+-- ============================================
+-- SEED FEATURE DEFINITIONS
+-- ============================================
+INSERT INTO feature_definitions (feature_key, display_name, description, category, default_enabled, sort_order) VALUES
+  ('delivery_management', 'Delivery Management', 'Manage delivery boys and delivery assignments', 'operations', true, 1),
+  ('campaigns', 'Marketing Campaigns', 'WhatsApp marketing campaign management', 'marketing', false, 2),
+  ('crm_customers', 'CRM / Customers', 'Customer segmentation, profiles, and analytics', 'marketing', true, 3),
+  ('ai_settings', 'AI Settings', 'AI personality and custom instructions configuration', 'ai', true, 4),
+  ('analytics', 'Analytics & Reporting', 'Business analytics and reporting dashboard', 'analytics', true, 5),
+  ('cake_pricing', 'Cake Pricing Module', 'Specialized custom cake pricing calculator', 'operations', false, 6),
+  ('amenities', 'Shop Amenities', 'Manage shop amenities and facilities', 'operations', true, 7),
+  ('notifications', 'Customer Notifications', 'Notification management system', 'operations', true, 8),
+  ('interventions', 'AI Interventions', 'AI error handling and human intervention requests', 'ai', true, 9)
+ON CONFLICT (feature_key) DO NOTHING;
+
+-- ============================================
+-- HELPER FUNCTION: Initialize features for a business
+-- ============================================
+CREATE OR REPLACE FUNCTION initialize_business_features(p_business_id UUID)
+RETURNS void AS $$
+BEGIN
+  INSERT INTO tenant_features (business_id, feature_key, is_enabled, enabled_at)
+  SELECT
+    p_business_id,
+    feature_key,
+    default_enabled,
+    CASE WHEN default_enabled THEN NOW() ELSE NULL END
+  FROM feature_definitions
+  ON CONFLICT (business_id, feature_key) DO NOTHING;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ============================================
+-- TRIGGER: Auto-initialize features when business is created
+-- ============================================
+CREATE OR REPLACE FUNCTION auto_init_business_features()
+RETURNS TRIGGER AS $$
+BEGIN
+  PERFORM initialize_business_features(NEW.id);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Drop trigger if exists and recreate
+DROP TRIGGER IF EXISTS trg_auto_init_features ON businesses;
+CREATE TRIGGER trg_auto_init_features
+AFTER INSERT ON businesses
+FOR EACH ROW
+EXECUTE FUNCTION auto_init_business_features();
+
+-- ============================================
+-- INITIALIZE FEATURES FOR EXISTING BUSINESSES
+-- ============================================
+DO $$
+DECLARE
+  biz_id UUID;
+BEGIN
+  FOR biz_id IN SELECT id FROM businesses LOOP
+    PERFORM initialize_business_features(biz_id);
+  END LOOP;
+END $$;
+
+-- ============================================
+-- HELPER FUNCTION: Check if feature is enabled for business
+-- ============================================
+CREATE OR REPLACE FUNCTION is_feature_enabled(p_business_id UUID, p_feature_key VARCHAR)
+RETURNS BOOLEAN AS $$
+DECLARE
+  v_enabled BOOLEAN;
+BEGIN
+  SELECT is_enabled INTO v_enabled
+  FROM tenant_features
+  WHERE business_id = p_business_id AND feature_key = p_feature_key;
+
+  -- If no record found, check default from feature_definitions
+  IF v_enabled IS NULL THEN
+    SELECT default_enabled INTO v_enabled
+    FROM feature_definitions
+    WHERE feature_key = p_feature_key;
+  END IF;
+
+  RETURN COALESCE(v_enabled, true);
+END;
+$$ LANGUAGE plpgsql;
+
+-- ============================================
+-- UPDATE TIMESTAMP TRIGGER
+-- ============================================
+CREATE OR REPLACE FUNCTION update_tenant_features_timestamp()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_tenant_features_updated ON tenant_features;
+CREATE TRIGGER trg_tenant_features_updated
+BEFORE UPDATE ON tenant_features
+FOR EACH ROW
+EXECUTE FUNCTION update_tenant_features_timestamp();

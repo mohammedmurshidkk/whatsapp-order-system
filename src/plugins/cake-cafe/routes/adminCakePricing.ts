@@ -22,6 +22,7 @@ import {
   downloadFlavorTemplate,
 } from '../controllers/adminCakePricingController';
 import { authMiddleware } from '../../../middleware/auth';
+import { requireFeature } from '../../../middleware/featureMiddleware';
 
 const router: IRouter = Router();
 
@@ -42,8 +43,9 @@ const upload = multer({
   },
 });
 
-// All routes require authentication
+// All routes require authentication and cake_pricing feature
 router.use(authMiddleware);
+router.use(requireFeature('cake_pricing'));
 
 // Get/Update full pricing config
 router.get('/config', getFullConfig);

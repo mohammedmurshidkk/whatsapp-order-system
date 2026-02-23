@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import * as campaignController from '../controllers/adminCampaignController';
 import { authMiddleware } from '../middleware/auth';
+import { requireFeature } from '../middleware/featureMiddleware';
 import multer from 'multer';
 
 const router: Router = Router();
@@ -20,8 +21,9 @@ const upload = multer({
   }
 });
 
-// Apply auth middleware to all routes
+// Apply auth middleware and feature check to all routes
 router.use(authMiddleware);
+router.use(requireFeature('campaigns'));
 
 // WhatsApp Templates (from Meta)
 router.get('/templates', campaignController.getTemplates);

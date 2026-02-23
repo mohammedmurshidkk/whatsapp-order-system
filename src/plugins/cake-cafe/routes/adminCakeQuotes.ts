@@ -9,11 +9,13 @@ import {
   confirmTimeHandler,
 } from '../controllers/adminCakeQuotesController';
 import { authMiddleware } from '../../../middleware/auth';
+import { requireFeature } from '../../../middleware/featureMiddleware';
 
 const router: IRouter = Router();
 
-// All routes require authentication
+// All routes require authentication and cake_pricing feature
 router.use(authMiddleware);
+router.use(requireFeature('cake_pricing'));
 
 // List all quotes (with optional status filter)
 router.get('/', listQuotes);
