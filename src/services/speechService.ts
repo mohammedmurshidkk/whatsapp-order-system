@@ -38,7 +38,7 @@ export async function convertSpeechToText(
   audioBuffer: Buffer,
   languageCode: string = 'en-IN'
 ): Promise<string> {
-  const apiKey = 'AIzaSyDhEfr1siMAKzLc45lOmUHfUot7LR0IClA'
+  const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
     logger.error('GEMINI_API_KEY not configured');
