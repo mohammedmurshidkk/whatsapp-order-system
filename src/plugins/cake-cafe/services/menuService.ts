@@ -505,3 +505,25 @@ export async function getMenuItemById(itemId: string): Promise<MenuItem | null> 
 
   return data as MenuItem;
 }
+
+/**
+ * Get menu item by retailer_id (SKU) for WhatsApp Catalog orders
+ */
+export async function getMenuItemByRetailerId(
+  businessId: string,
+  retailerId: string
+): Promise<MenuItem | null> {
+  const { data, error } = await supabase
+    .from('menu_items')
+    .select('*, category:menu_categories(*)')
+    .eq('business_id', businessId)
+    .eq('retailer_id', retailerId)
+    .single();
+
+  if (error || !data) {
+    logger.debug(`Menu item not found for retailer_id: ${retailerId}`, { businessId });
+    return null;
+  }
+
+  return data as MenuItem;
+}

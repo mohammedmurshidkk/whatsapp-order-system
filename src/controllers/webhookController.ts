@@ -1,6 +1,9 @@
 import { Request, Response } from 'express';
 import { WhatsAppWebhookBody, TestMessageRequest, SessionItem, MenuAddon, Session } from '../types';
 import { findOrCreateCustomer } from '../services/customerService';
+import { classifyIntent, buildSessionState, logTierUsage } from '../services/intentClassifier';
+import { buildSmartContext, handleTier1Intent } from '../services/contextBuilder';
+import { getCachedAIResponse, setCachedAIResponse, getCachedGreeting, setCachedGreeting } from '../services/cacheService';
 import {
   findOrCreateSession,
   updateSessionActivity,
@@ -25,6 +28,9 @@ import {
 } from '../services/messageService';
 import { processIncomingMedia } from '../services/mediaService';
 import { processMessageWithAI, classifyCustomTextResponse, classifyImageWithGemini } from '../services/aiService';
+import { getPluginForBusiness, PluginId } from '../plugins';
+import { getProfiles } from '../plugins/marriage-matching/services/profileService';
+import { getSeekerByPhone } from '../plugins/marriage-matching/services/seekerService';
 import {
   normalizeManglish,
   containsMalayalamScript,
@@ -54,6 +60,7 @@ import {
   buildSizeButtons,
   getCategoryById,
   getMenuItemById,
+  getMenuItemByRetailerId,
 } from '../plugins/cake-cafe/services/menuService';
 import {
   getBusinessOutlets,
@@ -134,7 +141,8 @@ import {
 } from '../services/sessionService';
 import { SupportedLanguage, detectLanguageRequest, t } from '../i18n';
 import { hasHandler } from '../plugins/cake-cafe/handlers/registry';
-import { ConversationContext, getPluginForBusiness } from '../plugins';
+import { ConversationContext } from '../plugins';
+import { aiPromptService } from '../services/aiPromptService';
 // IntentContext is now built inside plugin.handleIntent
 
 const CAKE_KEYWORDS = ['cake', 'birthday', 'anniversary', 'kg', 'flavor', 'chocolate', 'vanilla', 'fondant', 'design', 'custom'];
@@ -455,6 +463,10 @@ export async function processMessage(
 
   // Get business context
   const business = await getBusinessById(businessId);
+  if (!business) {
+    logger.warn(`Business not found for ID: ${businessId}`);
+    return null;
+  }
   logger.info(`Business: ${business?.name || 'NOT FOUND'} (ID: ${businessId})`);
 
   // Get business timezone for date/time parsing and display
@@ -492,30 +504,24 @@ export async function processMessage(
   }
   const lang: SupportedLanguage = getSessionLanguage(session);
 
-  // Send welcome message with menu button(s) for new sessions
+  // Send welcome message for new sessions — delegated to plugin
   if (isNewSession) {
-    // Save the incoming message that triggered the new session
     await saveIncomingMessage(session.id, originalMessage);
 
-    const welcomeMsg = t('menu.aiWelcome', lang, { businessName: business?.name || 'our store' });
+    const plugin = getPluginForBusiness(business);
+    const { message: pluginMessage, buttons } = await plugin.getWelcomePayload(business, lang);
 
-    // Get active menu PDF configs for dynamic buttons
-    const menuConfigs = business?.id ? await getActiveMenuPdfConfigs(business.id) : [];
+    // DB greeting template overrides plugin default message if configured
+    const dbGreetingTemplate = await aiPromptService.getEffectiveTemplate(business.id, 'greeting');
+    const welcomeMsg = dbGreetingTemplate
+      ? aiPromptService.renderTemplate(dbGreetingTemplate, { business_name: business.name || '' })
+      : pluginMessage;
 
-    let menuButtons: Array<{ id: string; title: string }>;
-    if (menuConfigs.length > 0) {
-      // Dynamic buttons based on menu configs (max 3 buttons for WhatsApp)
-      // Add 📖 emoji prefix, limit title to 18 chars (20 - emoji - space)
-      menuButtons = menuConfigs.slice(0, 3).map(config => ({
-        id: `show_menu_${config.slug}`,
-        title: `📖 ${getLocalizedMenuName(config, lang).substring(0, 17)}`
-      }));
+    if (buttons && buttons.length > 0) {
+      await sendButtons(phone, welcomeMsg, buttons);
     } else {
-      // Fallback to single generic button with emoji
-      menuButtons = [{ id: 'show_menu', title: `📖 ${t('menu.browseBtn', lang)}` }];
+      await sendWhatsAppMessage(phone, welcomeMsg);
     }
-
-    await sendButtons(phone, welcomeMsg, menuButtons);
     await saveOutgoingMessage(session.id, welcomeMsg);
     return null; // Don't continue to AI - welcome sent
   }
@@ -1222,33 +1228,76 @@ export async function processMessage(
   // Check if this is the first message in the session (for welcome message)
   const isFirstMessage = messageHistory.length === 0;
 
-  // Get menu for AI context
-  let menuItems;
-  let menuCategories;
-  let amenities;
-  if (businessId) {
-    menuItems = await getMenuItems(businessId);
-    menuCategories = await getMenuCategories(businessId);
-    amenities = await getBusinessAmenities(businessId);
-    logger.info(`Menu loaded: ${menuItems?.length || 0} items, ${menuCategories?.length || 0} categories, ${amenities?.length || 0} amenities`);
-  } else {
-    logger.warn('No business found - AI will have no menu context!');
+  // Use sessionWithItems for LATEST fulfillment data
+  const latestSessionData = sessionWithItems || session;
+
+  // ============================================
+  // RAG Level 2: Intent Classification & Smart Context
+  // ============================================
+
+  // Build session state for intent classification
+  const fulfillmentComplete = !!latestSessionData.fulfillment_type &&
+    (!!latestSessionData.delivery_address || !!latestSessionData.pickup_outlet_id);
+
+  const sessionState = buildSessionState(session, existingItems, fulfillmentComplete);
+
+  // Classify intent to determine processing tier
+  const classified = classifyIntent(messageText, sessionState, business);
+  logger.debug(`Intent classified: tier=${classified.tier}, intent=${classified.intent}, skipAI=${classified.skipAI}`);
+
+  // TIER 0: Cached/template responses - no AI needed
+  if (classified.tier === 0 && classified.skipAI && classified.cachedResponse) {
+    // Check if we have a cached greeting for this business
+    if (classified.intent === 'greeting' && businessId) {
+      const cachedGreeting = await getCachedGreeting(businessId);
+      if (cachedGreeting) {
+        await saveIncomingMessage(session.id, originalMessage);
+        await saveOutgoingMessage(session.id, cachedGreeting);
+        logTierUsage(0, classified.intent, false, businessId);
+        return cachedGreeting;
+      }
+      // Cache the greeting for next time
+      await setCachedGreeting(businessId, classified.cachedResponse);
+    }
+
+    await saveIncomingMessage(session.id, originalMessage);
+    await saveOutgoingMessage(session.id, classified.cachedResponse);
+    logTierUsage(0, classified.intent, false, businessId);
+    return classified.cachedResponse;
   }
 
-  // Build AI context - use sessionWithItems for LATEST fulfillment data
-  const latestSessionData = sessionWithItems || session;
-  const aiContext = {
-    business: business || undefined,
-    menuItems,
-    menuCategories,
-    currentSessionItems: formatSessionItemsForAI(existingItems),
-    outlets,
-    sessionHasFulfillmentType: !!latestSessionData.fulfillment_type,
-    sessionHasDeliveryInfo: !!latestSessionData.delivery_address,
-    sessionHasPickupInfo: !!latestSessionData.pickup_outlet_id,
-    amenities,
-    customerLanguage: lang, // i18n: Pass customer's preferred language to AI
-    // Active order context for post-order inquiries
+  // TIER 1: DB lookup responses - no AI needed
+  if (classified.tier === 1 && classified.skipAI) {
+    const tier1Response = await handleTier1Intent(classified.intent, businessId, business);
+    if (tier1Response) {
+      await saveIncomingMessage(session.id, originalMessage);
+      await saveOutgoingMessage(session.id, tier1Response);
+      logTierUsage(1, classified.intent, false, businessId);
+      return tier1Response;
+    }
+    // Fall through to AI if no tier 1 response
+  }
+
+  // TIER 2/3: Check AI response cache first
+  if (classified.tier >= 2) {
+    const cachedResponse = await getCachedAIResponse(businessId, messageText);
+    if (cachedResponse) {
+      await saveIncomingMessage(session.id, originalMessage);
+      await saveOutgoingMessage(session.id, cachedResponse);
+      logTierUsage(classified.tier, 'cached_ai', false, businessId);
+      return cachedResponse;
+    }
+  }
+
+  // Build smart context based on tier (only loads relevant data)
+  const aiContext = await buildSmartContext({
+    message: messageText,
+    businessId,
+    business,
+    session: latestSessionData,
+    cartItems: existingItems,
+    language: lang,
+    tier: classified.tier,
     activeOrder: activeOrder ? {
       order_number: activeOrder.order_number,
       status: activeOrder.status,
@@ -1256,8 +1305,14 @@ export async function processMessage(
       fulfillment_type: activeOrder.fulfillment_type,
       created_at: activeOrder.created_at,
     } : null,
-  };
+  });
 
+  // Add outlets if not already included (needed for fulfillment flow)
+  if (!aiContext.outlets) {
+    aiContext.outlets = outlets;
+  }
+
+  logger.debug(`Smart context built: type=${aiContext.contextType}, menuItems=${aiContext.menuItems?.length || 0}, keywords=${aiContext.keywords?.join(',') || 'none'}`);
   logger.debug(`AI context fulfillment: type=${latestSessionData.fulfillment_type}, addr=${latestSessionData.delivery_address}, outlet=${latestSessionData.pickup_outlet_id}`);
 
   // ============================================
@@ -1305,13 +1360,37 @@ export async function processMessage(
     }
   }
 
+  // Build plugin-specific system prompt override if needed
+  let systemPromptOverride: string | undefined;
+  if (business?.plugin_id === PluginId.MARRIAGE_MATCHING) {
+    const plugin = getPluginForBusiness(business);
+    const [profiles, seeker] = await Promise.all([
+      getProfiles(business?.id, true),
+      getSeekerByPhone(business?.id, phone),
+    ]);
+    systemPromptOverride = plugin.getSystemPrompt(business, { profiles, seeker } as any);
+  }
+
   // Process with AI
   const aiResponse = await processMessageWithAI(
     messageText,
     messageHistory,
     session,
-    aiContext
+    aiContext,
+    systemPromptOverride
   );
+
+  // Log tier usage for cost tracking
+  logTierUsage(classified.tier, aiResponse.intent || classified.intent, true, businessId);
+
+  // Cache non-transactional AI responses for future use
+  // Don't cache: order confirmations, cart modifications, fulfillment collection
+  const nonCacheableIntents = ['confirm_order', 'add_item', 'modify_order', 'remove_addon',
+    'collect_delivery_info', 'collect_pickup_info', 'ready_for_checkout', 'cancel'];
+  if (!nonCacheableIntents.includes(aiResponse.intent) && aiResponse.reply) {
+    // Cache with 30 min TTL for simple queries
+    await setCachedAIResponse(businessId, messageText, aiResponse.reply, 1800);
+  }
 
   // Save incoming message (use original, not normalized, to preserve customer's actual input)
   await saveIncomingMessage(session.id, originalMessage);
@@ -1467,12 +1546,12 @@ export async function processMessage(
     isFirstMessage,
 
     // Menu & content
-    menu: menuItems || [],
-    categories: menuCategories || [],
+    menu: aiContext.menuItems || [],
+    categories: aiContext.menuCategories || [],
     addons: [] as any[], // Addons loaded on-demand by handlers
     outlets,
     cartItems: existingItems,
-    amenities: amenities || [],
+    amenities: aiContext.amenities || [],
     activeOrder,
 
     // Messaging helpers
@@ -1489,8 +1568,12 @@ export async function processMessage(
   };
 
   // Execute handler via plugin
+  // hasHandler checks cake-cafe's registry; for other plugins check their own intent list
+  const pluginHandlesIntent =
+    hasHandler(intentToProcess) ||
+    plugin.getIntents().some(i => i.name === intentToProcess);
   let messageSaved = false;
-  if (hasHandler(intentToProcess)) {
+  if (pluginHandlesIntent) {
     const result = await plugin.handleIntent(intentToProcess, conversationContext);
     if (result) {
       if (!result.skipResponse) {
@@ -2211,9 +2294,9 @@ export async function handleWhatsAppWebhook(
               }
 
               // Handle delivery button - set fulfillment type and CLEAR any previous takeaway info
+              const customer = await findOrCreateCustomer(phone, business.id, customerName);
+              const { session } = await findOrCreateSession(customer.id, business.id);
               if (buttonId === 'delivery') {
-                const customer = await findOrCreateCustomer(phone, business.id, customerName);
-                const { session } = await findOrCreateSession(customer.id, business.id);
 
                 // Set fulfillment type to delivery (this will clear takeaway info in the handler)
                 await updateSessionFulfillmentType(session.id, 'delivery');
@@ -2281,6 +2364,15 @@ export async function handleWhatsAppWebhook(
                   await saveOutgoingMessage(session.id, t('menu.fallback', lang));
                 }
                 continue;
+              }
+
+              // Handle marriage welcome buttons
+              if (buttonId === 'marriage_search' || buttonId === 'marriage_register') {
+                const { session } = await findOrCreateSession(customer.id, business.id);
+                const syntheticMessage = buttonId === 'marriage_search' ? 'search' : 'register';
+                await saveIncomingMessage(session?.id, `[Clicked: ${buttonId}]`);
+                await processMessage(phone, syntheticMessage, business.id, customerName);
+                return;
               }
 
               // Handle show_menu_<slug> buttons for specific menu PDFs
@@ -2720,6 +2812,88 @@ export async function handleWhatsAppWebhook(
             }
           } else if (message.type === 'text' && message.text?.body) {
             messageText = sanitizeMessage(message.text.body);
+          } else if (message.type === 'order' && message.order) {
+            // Handle WhatsApp Catalog orders
+            const catalogOrder = message.order;
+            const productItems = catalogOrder.product_items || [];
+
+            if (productItems.length === 0) {
+              logger.warn('Empty catalog order received', { phone });
+              continue;
+            }
+
+            logger.info(`Catalog order received from ${phone}`, {
+              catalogId: catalogOrder.catalog_id,
+              itemCount: productItems.length
+            });
+
+            // Get/create customer and session
+            const customer = await findOrCreateCustomer(phone, business.id, customerName);
+            const { session } = await findOrCreateSession(customer.id, business.id);
+            const lang = getSessionLanguage(session);
+
+            // Map products to local menu items and add to cart
+            const addedItems: string[] = [];
+            const failedItems: string[] = [];
+
+            for (const item of productItems) {
+              const menuItem = await getMenuItemByRetailerId(business.id, item.product_retailer_id);
+              if (menuItem) {
+                await saveOrderItem(session.id, {
+                  name: menuItem.name,
+                  quantity: item.quantity,
+                  size_or_weight: undefined // Catalog orders don't have size selection
+                }, business.id);
+                addedItems.push(`${item.quantity}x ${menuItem.name}`);
+              } else {
+                logger.warn('Menu item not found for catalog order', {
+                  retailerId: item.product_retailer_id,
+                  businessId: business.id
+                });
+                failedItems.push(item.product_retailer_id);
+              }
+            }
+
+            // Save incoming message (catalog order summary)
+            await saveIncomingMessage(session.id, `[Catalog Order: ${addedItems.join(', ')}]`);
+
+            // Send confirmation
+            if (addedItems.length > 0) {
+              const confirmMsg = t('catalog.itemsAdded', lang, { count: addedItems.length.toString() });
+              await wbSendReply(phone, confirmMsg);
+              await saveOutgoingMessage(session.id, confirmMsg);
+
+              // Ask for fulfillment type to continue the flow
+              if (business.supports_delivery && business.supports_takeaway) {
+                const fulfillmentMsg = t('fulfillment.askType', lang);
+                await saveOutgoingMessage(session.id, fulfillmentMsg);
+                await wbSendButtons(phone, fulfillmentMsg, [
+                  { id: 'fulfillment_delivery', title: t('fulfillment.deliveryBtn', lang) },
+                  { id: 'fulfillment_takeaway', title: t('fulfillment.takeawayBtn', lang) },
+                ]);
+              } else if (business.supports_delivery) {
+                await updateSessionFulfillmentType(session.id, 'delivery');
+                const deliveryMsg = t('fulfillment.askDeliveryAddress', lang);
+                await wbSendReply(phone, deliveryMsg);
+                await saveOutgoingMessage(session.id, deliveryMsg);
+              } else if (business.supports_takeaway) {
+                await updateSessionFulfillmentType(session.id, 'takeaway');
+                const outlets = await getBusinessOutlets(business.id);
+                const outletMsg = formatOutletsForCustomer(outlets);
+                await saveOutgoingMessage(session.id, outletMsg);
+                await wbSendList(phone, t('fulfillment.selectOutlet', lang), outletMsg, t('fulfillment.viewOutlets', lang), [{
+                  title: t('fulfillment.outlets', lang),
+                  rows: outlets.map(o => ({ id: o.id, title: o.outlet_name, description: o.address }))
+                }]);
+              }
+            } else {
+              // All items failed
+              const errorMsg = t('catalog.noItemsFound', lang);
+              await wbSendReply(phone, errorMsg);
+              await saveOutgoingMessage(session.id, errorMsg);
+            }
+
+            continue; // Skip normal message processing
           } else {
             logger.debug(`Skipping unsupported message type: ${message.type}`);
             continue;

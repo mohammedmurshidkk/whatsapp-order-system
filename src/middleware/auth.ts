@@ -1,6 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import { logger } from '../utils/logger';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 
@@ -10,6 +9,7 @@ export interface AuthUser {
   role: 'superadmin' | 'admin';
   business_id?: string;
   business_name?: string;
+  plugin_id?: string;
 }
 
 export interface AuthRequest extends Request {

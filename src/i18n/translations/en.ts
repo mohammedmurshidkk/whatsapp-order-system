@@ -230,6 +230,12 @@ export const en = {
   },
   document: {
     fallback: "I received your document! 📄\n\nI've notified our team to review it. They'll respond shortly!{{support}}",
+  },
+
+  // Catalog orders (WhatsApp Catalog)
+  catalog: {
+    itemsAdded: "I've added {{count}} item(s) from your order to your cart! 🛒",
+    noItemsFound: "I couldn't find those items in our menu. Please try ordering from our menu or contact support.",
   }
 } as const;
 

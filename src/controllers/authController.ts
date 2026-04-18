@@ -78,7 +78,8 @@ export async function login(req: Request, res: Response): Promise<void> {
         business_id,
         businesses (
           id,
-          name
+          name,
+          plugin_id
         )
       `)
       .eq('email', normalizedEmail)
@@ -104,6 +105,7 @@ export async function login(req: Request, res: Response): Promise<void> {
       role: 'admin',
       business_id: user.business_id,
       business_name: (user.businesses as any)?.name || 'Unknown Business',
+      plugin_id: (user.businesses as any)?.plugin_id || undefined,
     };
 
     const token = generateToken(authUser);

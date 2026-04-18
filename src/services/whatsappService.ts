@@ -3,22 +3,47 @@ import crypto from 'crypto';
 import { WHATSAPP_API_VERSION } from '../config/constants';
 import { logger } from '../utils/logger';
 import { trackWhatsAppUsage, MessageType } from './usageService';
+import { supabase } from '../config/database';
 
 const WHATSAPP_API_BASE = `https://graph.facebook.com/${WHATSAPP_API_VERSION}`;
+
+async function getWhatsAppCredentials(businessId?: string): Promise<{ phoneNumberId: string; accessToken: string } | null> {
+  // Try DB credentials first (per-business)
+  if (businessId) {
+    const { data } = await supabase
+      .from('businesses')
+      .select('whatsapp_phone_number_id, whatsapp_access_token')
+      .eq('id', businessId)
+      .single();
+
+    if (data?.whatsapp_phone_number_id && data?.whatsapp_access_token) {
+      return {
+        phoneNumberId: data.whatsapp_phone_number_id,
+        accessToken: data.whatsapp_access_token,
+      };
+    }
+  }
+
+  // Fall back to env vars
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+  if (phoneNumberId && accessToken) {
+    return { phoneNumberId, accessToken };
+  }
+
+  return null;
+}
 
 export async function sendWhatsAppMessage(
   to: string,
   message: string,
   businessId?: string
 ): Promise<void> {
-  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+  const credentials = await getWhatsAppCredentials(businessId);
 
-  // For MVP: log to console instead of actual API call
-  if (!phoneNumberId || !accessToken) {
+  if (!credentials) {
     logger.info(`[WhatsApp Mock] To: ${to}`);
     logger.info(`[WhatsApp Mock] Message: ${message}`);
-    // Track mock usage too for testing
     if (businessId) {
       trackWhatsAppUsage({
         businessId,
@@ -29,6 +54,8 @@ export async function sendWhatsAppMessage(
     }
     return;
   }
+
+  const { phoneNumberId, accessToken } = credentials;
 
   try {
     await axios.post(

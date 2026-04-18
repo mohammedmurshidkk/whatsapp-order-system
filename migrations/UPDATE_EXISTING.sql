@@ -17,6 +17,9 @@ ALTER TABLE businesses ADD COLUMN IF NOT EXISTS timezone VARCHAR(50) DEFAULT 'As
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS minimum_wait_minutes INTEGER DEFAULT 30;
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS order_number_prefix VARCHAR(10) DEFAULT 'ORD';
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS customer_support_phone VARCHAR(20);
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS meta_catalog_id VARCHAR(100);
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS meta_commerce_account_id VARCHAR(100);
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS meta_catalog_access_token TEXT;
 
 -- WhatsApp Business API fields (for Tech Provider)
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS whatsapp_phone_number VARCHAR(20);
@@ -43,6 +46,14 @@ ALTER TABLE businesses ADD COLUMN IF NOT EXISTS plugin_id VARCHAR(50) DEFAULT 'c
 ALTER TABLE menu_categories ADD COLUMN IF NOT EXISTS image_url TEXT;
 ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS image_url TEXT;
 ALTER TABLE menu_addons ADD COLUMN IF NOT EXISTS image_url TEXT;
+ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS retailer_id VARCHAR(100);
+ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS catalog_synced_at TIMESTAMP WITH TIME ZONE;
+ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS catalog_sync_status VARCHAR(20) DEFAULT 'not_synced';
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_menu_items_retailer_id
+ON menu_items(business_id, retailer_id) WHERE retailer_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_menu_items_retailer_lookup
+ON menu_items(business_id, retailer_id) WHERE retailer_id IS NOT NULL AND is_available = true;
 
 -- Add custom_text_prompt to menu_categories (e.g., "What should we write on the cake?")
 ALTER TABLE menu_categories ADD COLUMN IF NOT EXISTS custom_text_prompt TEXT;
@@ -1790,7 +1801,8 @@ INSERT INTO feature_definitions (feature_key, display_name, description, categor
   ('cake_pricing', 'Cake Pricing Module', 'Specialized custom cake pricing calculator', 'operations', false, 6),
   ('amenities', 'Shop Amenities', 'Manage shop amenities and facilities', 'operations', true, 7),
   ('notifications', 'Customer Notifications', 'Notification management system', 'operations', true, 8),
-  ('interventions', 'AI Interventions', 'AI error handling and human intervention requests', 'ai', true, 9)
+  ('interventions', 'AI Interventions', 'AI error handling and human intervention requests', 'ai', true, 9),
+  ('marriage_matching', 'Marriage Matching', 'Plugin for marriage matching and profiles', 'operations', false, 10)
 ON CONFLICT (feature_key) DO NOTHING;
 
 -- ============================================
@@ -1879,3 +1891,108 @@ CREATE TRIGGER trg_tenant_features_updated
 BEFORE UPDATE ON tenant_features
 FOR EACH ROW
 EXECUTE FUNCTION update_tenant_features_timestamp();
+
+-- ============================================
+-- MARRIAGE MATCHING PLUGIN
+-- ============================================
+
+-- Candidate profiles (added by admin)
+CREATE TABLE IF NOT EXISTS profiles (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  profile_code TEXT NOT NULL,           -- e.g. #M001
+  name TEXT NOT NULL,                   -- Display name only
+  gender TEXT NOT NULL,                 -- 'male' | 'female'
+  age INTEGER,
+  height TEXT,
+  weight TEXT,
+  skin_tone TEXT,
+  religion TEXT,
+  religion_sect TEXT,
+  location_city TEXT,
+  location_country TEXT,
+  education TEXT,
+  profession TEXT,
+  income_range TEXT,
+  marital_status TEXT,                  -- 'never_married' | 'divorced' | 'widowed'
+  has_children BOOLEAN DEFAULT FALSE,
+  children_count INTEGER,
+  languages TEXT[],
+  description TEXT,
+  photo_url TEXT,
+  -- Preferences / what they want
+  preferred_age_min INTEGER,
+  preferred_age_max INTEGER,
+  preferred_location TEXT,
+  preferred_religion TEXT,
+  preferred_sect TEXT,
+  distance_restriction TEXT,
+  other_demands TEXT,
+  -- Meta
+  is_active BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Auto-generate profile_code: #M001, #M002, etc.
+CREATE SEQUENCE IF NOT EXISTS profile_code_seq START 1;
+
+CREATE OR REPLACE FUNCTION generate_profile_code(business_uuid UUID, gender_val TEXT)
+RETURNS TEXT AS $$
+DECLARE
+  prefix TEXT;
+  seq_val INTEGER;
+BEGIN
+  prefix := CASE WHEN gender_val = 'male' THEN 'M' ELSE 'F' END;
+  SELECT COUNT(*) + 1 INTO seq_val
+  FROM profiles
+  WHERE business_id = business_uuid;
+  RETURN '#' || prefix || LPAD(seq_val::TEXT, 3, '0');
+END;
+$$ LANGUAGE plpgsql;
+
+-- Seekers (WhatsApp users who register via bot)
+CREATE TABLE IF NOT EXISTS seekers (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  phone TEXT NOT NULL,
+  name TEXT,
+  registered_at TIMESTAMPTZ DEFAULT NOW(),
+  profile_submitted BOOLEAN DEFAULT FALSE,
+  -- Optional own profile fields
+  age INTEGER,
+  gender TEXT,
+  religion TEXT,
+  religion_sect TEXT,
+  location_city TEXT,
+  location_country TEXT,
+  profession TEXT,
+  education TEXT,
+  description TEXT,
+  is_blocked BOOLEAN DEFAULT FALSE,
+  UNIQUE(business_id, phone)
+);
+
+-- Interest requests
+CREATE TABLE IF NOT EXISTS interest_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  seeker_id UUID NOT NULL REFERENCES seekers(id) ON DELETE CASCADE,
+  profile_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending',  -- 'pending' | 'contacted' | 'closed'
+  admin_note TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_profiles_business_id ON profiles(business_id);
+CREATE INDEX IF NOT EXISTS idx_profiles_is_active ON profiles(is_active);
+CREATE INDEX IF NOT EXISTS idx_seekers_business_id ON seekers(business_id);
+CREATE INDEX IF NOT EXISTS idx_seekers_phone ON seekers(phone);
+CREATE INDEX IF NOT EXISTS idx_interest_requests_business_id ON interest_requests(business_id);
+CREATE INDEX IF NOT EXISTS idx_interest_requests_status ON interest_requests(status);
+
+-- Add location_district, drop unused location_country from profiles
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS location_district TEXT;
+ALTER TABLE profiles DROP COLUMN IF EXISTS location_country;

@@ -40,6 +40,13 @@ export interface Business {
   ai_greeting_template_id?: string | null;
   ai_farewell_template_id?: string | null;
   ai_instructions_enabled?: boolean;
+  // Template content (loaded/cached)
+  greeting_template?: string | null;
+  farewell_template?: string | null;
+  // Meta Commerce Catalog settings
+  meta_catalog_id?: string | null;
+  meta_commerce_account_id?: string | null;
+  meta_catalog_access_token?: string | null;
 }
 
 // Business Amenity types (generic amenities like party hall, catering, etc.)
@@ -151,6 +158,41 @@ export interface MenuItem {
   image_url?: string | null;  // Menu item photo URL
   created_at: string;
   category?: MenuCategory;
+  // Catalog sync fields
+  retailer_id?: string | null;  // SKU for Meta Commerce Catalog
+  catalog_synced_at?: string | null;
+  catalog_sync_status?: CatalogSyncStatus;
+}
+
+// Catalog sync status
+export type CatalogSyncStatus = 'not_synced' | 'pending' | 'synced' | 'failed';
+
+// WhatsApp Catalog order types
+export interface CatalogOrderItem {
+  product_retailer_id: string;
+  quantity: number;
+  item_price: number;  // Price in smallest currency unit (paise)
+  currency: string;
+}
+
+export interface CatalogOrder {
+  catalog_id: string;
+  product_items: CatalogOrderItem[];
+}
+
+// Catalog sync result types
+export interface CatalogSyncResult {
+  success: boolean;
+  synced_count: number;
+  failed_count: number;
+  errors?: Array<{ item_id: string; error: string }>;
+}
+
+export interface CatalogItemStatus {
+  item_id: string;
+  retailer_id: string | null;
+  sync_status: CatalogSyncStatus;
+  synced_at: string | null;
 }
 
 // Customer types
@@ -440,6 +482,16 @@ export interface WhatsAppWebhookMessage {
   sticker?: {
     id: string;
     mime_type: string;
+  };
+  // WhatsApp Catalog order
+  order?: {
+    catalog_id: string;
+    product_items: Array<{
+      product_retailer_id: string;
+      quantity: number;
+      item_price: number;
+      currency: string;
+    }>;
   };
 }
 

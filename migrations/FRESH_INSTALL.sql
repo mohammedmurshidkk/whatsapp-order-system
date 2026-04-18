@@ -61,6 +61,10 @@ CREATE TABLE businesses (
   whatsapp_business_account_id VARCHAR(50),
   whatsapp_access_token TEXT,
   whatsapp_webhook_verified BOOLEAN DEFAULT false,
+  -- Meta Catalog integration fields
+  meta_catalog_id VARCHAR(100),
+  meta_commerce_account_id VARCHAR(100),
+  meta_catalog_access_token TEXT,
   -- Plugin architecture
   plugin_id VARCHAR(50) DEFAULT 'cake-cafe',
   -- AI Settings
@@ -230,12 +234,19 @@ CREATE TABLE menu_items (
   price DECIMAL(10, 2),
   sizes JSONB,
   image_url TEXT,
+  retailer_id VARCHAR(100),
+  catalog_synced_at TIMESTAMP WITH TIME ZONE,
+  catalog_sync_status VARCHAR(20) DEFAULT 'not_synced',
   is_available BOOLEAN DEFAULT true,
   created_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_menu_items_business ON menu_items(business_id) WHERE is_available = true;
 CREATE INDEX IF NOT EXISTS idx_menu_items_category ON menu_items(category_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_menu_items_retailer_id
+ON menu_items(business_id, retailer_id) WHERE retailer_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_menu_items_retailer_lookup
+ON menu_items(business_id, retailer_id) WHERE retailer_id IS NOT NULL AND is_available = true;
 
 -- ============================================
 -- MENU ADD-ONS TABLE

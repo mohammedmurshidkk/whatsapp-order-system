@@ -8,10 +8,14 @@ import {
   IntentResult,
   ValidationResult,
   PluginPromptContext,
+  PluginId,
 } from '../types';
 import { Business, Session, Order } from '../../types';
 import { getSystemPrompt, FoodOrderingPromptContext } from './prompts/systemPrompt';
 import { FoodOrderingIntent } from './types';
+import { getActiveMenuPdfConfigs, getLocalizedMenuName } from './services/menuPdfConfigService';
+import { t, SupportedLanguage } from '../../i18n';
+import { WelcomePayload } from '../types';
 
 // Import plugin-specific intent handler registry
 import { executeHandler, hasHandler, handlerRegistry } from './handlers/registry';
@@ -33,7 +37,7 @@ import { logger } from '../../utils/logger';
  * - Cake flavor pricing
  */
 export const CakeCafePlugin: BusinessPlugin = {
-  id: 'cake-cafe',
+  id: PluginId.CAKE_CAFE,
   name: 'Cake & Cafe',
   version: '1.0.0',
 
@@ -57,6 +61,23 @@ export const CakeCafePlugin: BusinessPlugin = {
     };
 
     return getSystemPrompt(foodContext);
+  },
+
+  async getWelcomePayload(business: Business, lang: string): Promise<WelcomePayload> {
+    const welcomeMsg = t('menu.aiWelcome', lang as SupportedLanguage, { businessName: business.name || 'our store' });
+    const menuConfigs = await getActiveMenuPdfConfigs(business.id);
+
+    let buttons: Array<{ id: string; title: string }>;
+    if (menuConfigs.length > 0) {
+      buttons = menuConfigs.slice(0, 3).map(config => ({
+        id: `show_menu_${config.slug}`,
+        title: `📖 ${getLocalizedMenuName(config, lang as SupportedLanguage).substring(0, 17)}`,
+      }));
+    } else {
+      buttons = [{ id: 'show_menu', title: `📖 ${t('menu.browseBtn', lang as SupportedLanguage)}` }];
+    }
+
+    return { message: welcomeMsg, buttons };
   },
 
   /**

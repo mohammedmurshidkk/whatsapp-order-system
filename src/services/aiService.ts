@@ -26,10 +26,11 @@ export type AIContext = FoodOrderingPromptContext;
 function buildPrompt(
   currentMessage: string,
   conversationHistory: Message[],
-  context: AIContext
+  context: AIContext,
+  systemPromptOverride?: string
 ): string {
   const historyText = formatMessagesForAI(conversationHistory);
-  let prompt = getSystemPrompt(context);
+  let prompt = systemPromptOverride ?? getSystemPrompt(context);
 
   if (historyText) {
     prompt += `\n\nConversation history:\n${historyText}`;
@@ -327,7 +328,8 @@ export async function processMessageWithAI(
   currentMessage: string,
   conversationHistory: Message[],
   _sessionContext: Session,
-  context: AIContext = {}
+  context: AIContext = {},
+  systemPromptOverride?: string
 ): Promise<AIResponse> {
   if (context.business) {
     const popularItems = await getPopularItemsForAI(context.business.id);
@@ -345,7 +347,7 @@ export async function processMessageWithAI(
     if (farewell) context.aiFarewellTemplate = aiPromptService.renderTemplate(farewell, { business_name: context.business.name });
   }
 
-  const prompt = buildPrompt(currentMessage, conversationHistory, context);
+  const prompt = buildPrompt(currentMessage, conversationHistory, context, systemPromptOverride);
 
   const MAX_PARSE_RETRIES = 2;
   const aiClient = getAIClient();

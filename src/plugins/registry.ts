@@ -1,14 +1,14 @@
 // src/plugins/registry.ts
 // Plugin registration and lookup
 
-import { BusinessPlugin } from './types';
+import { BusinessPlugin, PluginId } from './types';
 
 /**
  * Plugin Registry - manages all registered business plugins
  */
 class PluginRegistry {
   private plugins: Map<string, BusinessPlugin> = new Map();
-  private defaultPluginId: string = 'cake-cafe';
+  private defaultPluginId: string = PluginId.CAKE_CAFE;
 
   /**
    * Register a plugin
@@ -104,6 +104,6 @@ export const pluginRegistry = new PluginRegistry();
  * Falls back to default plugin if not specified
  */
 export function getPluginForBusiness(business: { plugin_id?: string }): BusinessPlugin {
-  const pluginId = business.plugin_id || 'cake-cafe';
+  const pluginId = business.plugin_id || PluginId.CAKE_CAFE;
   return pluginRegistry.getOrThrow(pluginId);
 }

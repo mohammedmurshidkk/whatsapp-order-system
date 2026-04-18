@@ -3,6 +3,7 @@
 
 import { pluginRegistry, getPluginForBusiness } from './registry';
 import { CakeCafePlugin } from './cake-cafe';
+import { MarriageMatchingPlugin } from './marriage-matching';
 import { logger } from '../utils/logger';
 
 /**
@@ -15,10 +16,8 @@ export function initializePlugins(): void {
   // Register cake-cafe plugin (default)
   pluginRegistry.register(CakeCafePlugin);
 
-  // Future plugins would be registered here:
-  // pluginRegistry.register(FindMyPartnerPlugin);
-  // pluginRegistry.register(AppointmentsPlugin);
-  // pluginRegistry.register(EcommercePlugin);
+  // Register marriage-matching plugin
+  pluginRegistry.register(MarriageMatchingPlugin);
 
   logger.info(`Plugins initialized: ${pluginRegistry.listPluginIds().join(', ')}`);
 }
@@ -31,3 +30,4 @@ export * from './types';
 
 // Export individual plugins for direct access if needed
 export { CakeCafePlugin };
+export { MarriageMatchingPlugin };

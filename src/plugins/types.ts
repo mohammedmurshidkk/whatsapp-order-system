@@ -1,6 +1,11 @@
 // src/plugins/types.ts
 // Plugin architecture type definitions
 
+export enum PluginId {
+  CAKE_CAFE = 'cake-cafe',
+  MARRIAGE_MATCHING = 'marriage-matching',
+}
+
 // Re-export types from main types file to avoid duplication
 import {
   Session,
@@ -59,6 +64,9 @@ export interface BusinessPlugin {
 
   // Validation
   validateBusinessConfig?(business: Business): ValidationResult;
+
+  // Welcome message for new sessions
+  getWelcomePayload(business: Business, lang: string): Promise<WelcomePayload>;
 }
 
 /**
@@ -162,4 +170,12 @@ export interface ValidationResult {
   valid: boolean;
   errors: string[];
   warnings: string[];
+}
+
+/**
+ * Payload returned by getWelcomePayload — used for new session greeting
+ */
+export interface WelcomePayload {
+  message: string;
+  buttons?: Array<{ id: string; title: string }>; // omit or empty = send plain text
 }

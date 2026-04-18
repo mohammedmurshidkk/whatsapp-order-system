@@ -22,8 +22,10 @@ import superadminUsageRoutes from './routes/superadminUsage';
 import analyticsRoutes from './routes/analytics';
 import customerProfileRoutes from './routes/customerProfiles';
 import aiPromptRoutes from './routes/aiPrompts';
+import adminCatalogRoutes from './routes/adminCatalog';
 // Plugin routes
 import { registerCakeCafeRoutes } from './plugins/cake-cafe/routes';
+import marriageRoutes from './plugins/marriage-matching/routes';
 import { WHATSAPP_PROVIDER } from './config/constants';
 import { logger } from './utils/logger';
 import { handleTestMessage } from './controllers/webhookController';
@@ -90,9 +92,11 @@ app.use('/api/superadmin/usage', superadminUsageRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/customer-profiles', customerProfileRoutes);
 app.use('/api/ai-prompts', aiPromptRoutes);
+app.use('/api/admin/catalog', adminCatalogRoutes);
 
 // Plugin routes
 registerCakeCafeRoutes(app);
+app.use('/api/marriage', marriageRoutes);
 
 // WhatsApp authentication routes (for QR code, status)
 app.use('/api/whatsapp/auth', whatsappAuthRoutes);
