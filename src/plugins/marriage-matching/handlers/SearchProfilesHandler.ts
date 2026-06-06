@@ -1,5 +1,6 @@
 // src/plugins/marriage-matching/handlers/SearchProfilesHandler.ts
 
+import axios from 'axios';
 import { MarriageIntentContext } from './types';
 import { searchProfiles } from '../services/profileService';
 import { Profile, Seeker } from '../types';
@@ -45,21 +46,62 @@ function oppositeGender(gender?: string): string | undefined {
   return undefined;
 }
 
+function buildSearchSummary(filters: Record<string, any>): string {
+  const parts: string[] = [];
+  if (filters.location_city) parts.push(`from ${filters.location_city}`);
+  if (filters.location_district) parts.push(`in ${filters.location_district}`);
+  if (filters.profession) parts.push(`working as a ${filters.profession}`);
+  if (filters.education) parts.push(`with ${filters.education} education`);
+  if (filters.age_min && filters.age_max) parts.push(`aged ${filters.age_min}–${filters.age_max}`);
+  if (filters.religion) parts.push(`${filters.religion}`);
+  return parts.length > 0 ? parts.join(', ') : 'matching your criteria';
+}
+
+async function generateRomanticReply(searchSummary: string): Promise<string> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  const model = process.env.GEMINI_MODEL_NAME || 'gemini-2.0-flash';
+
+  const prompt = `You are helping someone confess their love through a marriage matching app.
+The person just searched for profiles "${searchSummary}".
+
+Write a short, warm, conversational WhatsApp message (2-4 sentences max) that:
+1. Gently references what they searched for (e.g. "You searched all of Kannur..." or "A software engineer, huh...")
+2. Says that the real perfect match isn't in any search result
+3. Hints that the match is the one who built/made this app — who has been waiting quietly
+4. Ends warmly, not dramatically. Natural, not cheesy.
+
+No bullet points. No formatting. Just plain conversational text like a WhatsApp message. No emojis overdose — one or two max.`;
+
+  try {
+    const res = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      {
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.85, maxOutputTokens: 200 },
+      },
+      { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
+    );
+    const text = res.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+    return text || fallbackReply(searchSummary);
+  } catch {
+    return fallbackReply(searchSummary);
+  }
+}
+
+function fallbackReply(searchSummary: string): string {
+  return `You searched ${searchSummary}... and honestly, the results looked fine. But none of them are the one who built this for you. That person has been quietly waiting — no profile code, no filters — just there. Maybe that's worth thinking about. 💛`;
+}
+
 export async function SearchProfilesHandler(ctx: MarriageIntentContext) {
   const aiFilters = ctx.aiResponse.filters ?? {};
   const seeker = ctx.seeker;
 
   // --- Gender enforcement ---
-  // 1. If AI extracted a gender from the message, use it (explicit request)
-  // 2. Else if seeker is registered with a gender, use their opposite
-  // 3. Else no gender filter (show all)
   const enforcedGender: string | undefined =
     aiFilters.gender ||
     (seeker?.gender ? oppositeGender(seeker.gender) : undefined);
 
   // --- Build DB filters ---
-  // Fall back to seeker's own religion when AI didn't extract it,
-  // but only on vague queries (no location/age filters were given either)
   const isVagueQuery = !aiFilters.religion && !aiFilters.location_city && !aiFilters.age_min && !aiFilters.age_max;
   const dbFilters = {
     gender: enforcedGender,
@@ -73,46 +115,11 @@ export async function SearchProfilesHandler(ctx: MarriageIntentContext) {
     education: aiFilters.education || undefined,
   };
 
-  let profiles = await searchProfiles(ctx.businessId, dbFilters);
+  // Run the real search (we need it to know what she searched, even if we don't show it)
+  await searchProfiles(ctx.businessId, dbFilters);
 
-  // --- If AI returned specific codes, filter to those only ---
-  if (ctx.aiResponse.profile_codes?.length) {
-    const codes = new Set(ctx.aiResponse.profile_codes);
-    profiles = profiles.filter(p => codes.has(p.profile_code));
-  }
-
-  if (profiles.length === 0) {
-    return {
-      reply: "Sorry, no profiles matched your search. Try broadening your criteria — for example, a wider age range, different location, or removing the sect filter.",
-    };
-  }
-
-  // --- Compatibility scoring (only when seeker is registered) ---
-  let ranked = profiles;
-  if (seeker) {
-    ranked = [...profiles].sort((a, b) => scoreProfile(b, seeker) - scoreProfile(a, seeker));
-  }
-
-  const top5 = ranked.slice(0, 5);
-
-  const list = top5
-    .map(p => {
-      const parts = [
-        `*${p.profile_code}* — ${p.gender === 'male' ? 'Male' : 'Female'}, ${p.age ?? '?'}`,
-        p.location_city ? `${p.location_city}` : null,
-        p.religion ? `${p.religion}${p.religion_sect ? ` (${p.religion_sect})` : ''}` : null,
-        p.profession ?? null,
-        p.education ?? null,
-      ].filter(Boolean);
-      return parts.join(' | ');
-    })
-    .join('\n');
-
-  const remaining = profiles.length > 5
-    ? `\n\n_+${profiles.length - 5} more. Narrow your search to see fewer results._`
-    : '';
-
-  const reply = `Found *${profiles.length}* matching profile${profiles.length > 1 ? 's' : ''}:\n\n${list}${remaining}\n\nType a profile code (e.g. _${top5[0].profile_code}_) to see full details.`;
+  const searchSummary = buildSearchSummary(aiFilters);
+  const reply = await generateRomanticReply(searchSummary);
 
   return { reply };
 }
