@@ -40,9 +40,15 @@ let wss: WebSocketServer | null = null;
  * Initialize Print Proxy WebSocket server
  */
 export function initializePrintProxyWebSocket(server: HTTPServer): void {
-  wss = new WebSocketServer({
-    server,
-    path: '/ws/print-proxy'
+  wss = new WebSocketServer({ noServer: true });
+
+  server.on('upgrade', (request: any, socket: any, head: any) => {
+    const pathname = request.url ? request.url.split('?')[0] : '';
+    if (pathname === '/ws/print-proxy') {
+      wss?.handleUpgrade(request, socket, head, (ws) => {
+        wss?.emit('connection', ws, request);
+      });
+    }
   });
 
   wss.on('connection', async (ws: WebSocket, req) => {

@@ -9,6 +9,7 @@ const businessAdminSockets = new Map<string, Set<string>>();
 
 export function initializeSocket(httpServer: HTTPServer): SocketIOServer {
   io = new SocketIOServer(httpServer, {
+    destroyUpgrade: false,
     cors: {
       origin: '*', // Configure based on your frontend URL in production
       methods: ['GET', 'POST'],
